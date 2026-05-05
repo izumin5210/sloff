@@ -1,0 +1,7 @@
+commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools:
+      - aqua: example/copier

@@ -1,16 +1,15 @@
 # lazygen Architecture
 
-`lazygen` は monorepo 向けの **共有可能なキャッシュ機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Bazel / moonrepo / Pants) では実現できなかった「キャッシュ健全性の 3 防御線 ( OS 中立 logical version / preflight / output-comparison)」を設計レベルで強制することを設計目標とする。
+`lazygen` は monorepo 向けの **共有可能なキャッシュ機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Bazel / moonrepo / Pants) では実現できなかった「キャッシュ健全性の 2 防御線 ( OS 中立な logical version の取得元が runtime と必ず整合する仕組み / output-comparison)」を設計レベルで強制することを設計目標とする。
 
 関連:
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md) (= 自作)
 - [ADR-0002: キャッシュヒット判定モデル](../adr/0002-cache-hit-decision-model.md) (= output-comparison)
 - [ADR-0003: キャッシュレコードのストレージ方式](../adr/0003-record-storage-strategy.md) (= git per-task per-input ファイル)
 - 各 Resolver の詳細設計:
-  - [Resolver: aqua](./resolver-aqua.md)
-  - [Resolver: go-external](./resolver-go-external.md) — Go 外部配布 ( go.mod tool / require)
+  - [Resolver: script](./resolver-script.md) — prebuilt binary ( aqua 配布物 / go.mod tool / その他 `--version` を備えるバイナリ)
+  - [Resolver: pnpm-external](./resolver-pnpm-external.md) — pnpm 外部公開パッケージ ( npm registry 等、 lockfile-based)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
-  - [Resolver: pnpm-external](./resolver-pnpm-external.md) — pnpm 外部公開パッケージ ( npm registry 等)
   - [Resolver: pnpm-local](./resolver-pnpm-local.md) — pnpm workspace 内 内製パッケージ
   - [Resolver: buf](./resolver-buf.md) — buf.gen.yaml 経由の複合 plugin 群
 
@@ -22,7 +21,7 @@
 
 この課題に対する 3 つの大きな意思決定が先行 ADR で確定している:
 
-- **[ADR-0001](../adr/0001-cache-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Bazel / moonrepo / Pants) は「キャッシュ健全性 3 防御線」を満たさないため **自作する**
+- **[ADR-0001](../adr/0001-cache-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Bazel / moonrepo / Pants) は「キャッシュ健全性 2 防御線」を満たさないため **自作する**
 - **[ADR-0002](../adr/0002-cache-hit-decision-model.md)**: cache hit 判定は **output-comparison** ( input_hash 一致 + record の output_hash と現状ツリーの output_hash 一致)
 - **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
 
@@ -71,9 +70,12 @@
 - record は `.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` に git 管理で配置
 - record は **input hash → output hash + output ファイル一覧** の mapping のみ ( artifact は含まない)
 - cache hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
-- ツール invalidate は **OS 非依存な論理 version 文字列** ( aqua の version、 go.mod の require、 pnpm の resolved version、 内製ツールは entry point からのソースファイル集合の hash) を input hash に組み込んで実現
+- ツール invalidate は **OS 非依存な論理 version 文字列** を入力源別に取得して実現:
+  - **prebuilt binary** ( aqua 配布物 / `go tool <name>` 経由のもの 等): script resolver が `<bin> --version` を実行し、 必要なら regex で抽出した文字列をそのまま採用 ( 「runtime のバイナリが SSoT」)
+  - **npm 系** ( pnpm workspace 配下の外部 package): pnpm-lock.yaml の resolved version。 lockfile が runtime と乖離していないことは preflight で別途検証
+  - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
 - 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`、 ts なら esbuild。 Pants 流の dependency inference を取り込む)
-- preflight ( lockfile と install 状態の照合) を resolver の前段で必ず実行
+- preflight ( lockfile と install 状態の照合) は **lockfile を SSoT とする channel ( pnpm-external) のみ** で動かす。 script resolver / 内製ソース resolver では runtime バイナリやソース自体が SSoT のため、 preflight は構造的に不要
 - record の永続化レイヤ ( Storage) も interface を切り、 初版は `GitFileStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
 
 ```mermaid
@@ -100,17 +102,19 @@ commands:
     cmd: buf generate --template buf.gen.yaml
     inputs: ["**/*.proto", "buf.gen.yaml"]
     outputs: ["**/*.pb.go", "**/*.connect.go"]
-    tools:                    # 省略可。 未指定なら cmd[0] から auto-resolve
-      - aqua: buf                                              # aqua resolver
-      - go-external: google.golang.org/protobuf/cmd/protoc-gen-go   # go-external resolver
-      # 他に使える resolver: go-local, pnpm-external, pnpm-local, buf, ...
+    tools:
+      # script resolver: prebuilt binary に --version 等を問い合わせる
+      - exec: ["buf", "--version"]
+      - exec: ["protoc-gen-go", "--version"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+      # 他に使える resolver: pnpm-external (lockfile-based), go-local / pnpm-local (source-hash), buf (composite)
     # 注: depends フィールドは持たない。 依存は inputs / outputs から完全自動導出される
 ```
 
 文法ポイント:
 
 - `inputs` / `outputs` の **明示分離が必須**
-- `tools` フィールドで明示的にツール宣言可能 ( 未指定なら cmd[0] から auto-dispatch)
+- `tools` フィールドで明示的にツール宣言可能。 prebuilt binary は script resolver ( `exec` + 任意の `extract` regex)、 npm / 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
 - `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
 
 ### キャッシュレコード schema
@@ -290,41 +294,42 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 各 channel の resolver は独立 doc にまとめている ( 本 doc 冒頭の関連リンク参照)。 概要だけ表で示す:
 
-同 ecosystem 内で **外部配布 ( = `external`)** と **内製ソース ( = `local`)** を対称的に分けている ( go-external / go-local、 pnpm-external / pnpm-local)。
+「version 文字列をどこから取るか」で 3 つに分類できる:
 
-| Channel | Resolver Name | 取得元 | 詳細 doc |
-|---|---|---|---|
-| aqua 管理 OSS | `aqua` | `aqua.yaml` の `packages[*]` | [resolver-aqua.md](./resolver-aqua.md) |
-| Go 外部配布 ツール | `go-external` | `go.mod` の `tool` ブロック → `require` line | [resolver-go-external.md](./resolver-go-external.md) |
-| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存 ( 内部 / 外部分離戦略) | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 外部公開パッケージ | `pnpm-external` | `pnpm-lock.yaml` の resolved version | [resolver-pnpm-external.md](./resolver-pnpm-external.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | workspace package の src/ ソース hash ( esbuild API 経由) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
-| `buf generate` 経由 | `buf` | `buf` 本体 + `buf.gen.yaml` の plugin 群 ( 各 plugin type 別解決) | [resolver-buf.md](./resolver-buf.md) |
-| その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — |
+- **prebuilt binary**: 「実 install されているバイナリの `--version` 出力」が SSoT。 lockfile / install 状態のズレが構造的に起きないので preflight 不要 ( script resolver)
+- **npm package**: lockfile を SSoT に取り、 lockfile vs install 状態は preflight で検証 ( pnpm-external resolver + checker)
+- **内製ソース**: SemVer を持たないため、 ソースファイル集合の hash を logical version とする ( go-local / pnpm-local resolver)
+
+| Channel | Resolver Name | 取得元 | preflight | 詳細 doc |
+|---|---|---|---|---|
+| prebuilt binary ( aqua / `go tool` 経由 / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
+| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存 ( 内部 / 外部分離戦略) | 不要 | [resolver-go-local.md](./resolver-go-local.md) |
+| pnpm 外部公開パッケージ | `pnpm-external` | `pnpm-lock.yaml` の resolved version | 必要 ( node_modules 整合) | [resolver-pnpm-external.md](./resolver-pnpm-external.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | workspace package の src/ ソース hash ( esbuild API 経由) | build 必須なら dist 整合 | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| `buf generate` 経由 | `buf` | `buf` 本体 ( script resolver) + `buf.gen.yaml` の plugin 群 ( 各 plugin type 別解決) | composite ( 各 plugin の preflight に再帰) | [resolver-buf.md](./resolver-buf.md) |
+| その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 ```mermaid
 flowchart LR
-    SPEC["CmdSpec.Cmd"] --> DISP["resolver dispatch<br/>(cmd[0] base name)"]
-    DISP -->|"buf"| BUF["bufResolver"]
-    DISP -->|"xo / sqlc / tbls / ..."| AQUA["aquaResolver"]
-    DISP -->|"protoc-gen-go / mockgen / ..."| GOEXT["goExternalResolver"]
+    SPEC["CmdSpec.Cmd / tools[]"] --> DISP["resolver dispatch"]
+    DISP -->|"declared exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go / ...)"]
+    DISP -->|"buf generate"| BUF["bufResolver<br/>(buf 本体は script に再帰)"]
     DISP -->|"go run ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister"]
     DISP -->|"pnpm exec <external>"| PNPMEXT["pnpmExternalResolver"]
     DISP -->|"pnpm exec <workspace local>"| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister"]
-    BUF --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
-    AQUA --> CONCAT
-    GOEXT --> CONCAT
+    SCRIPT --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
+    BUF --> CONCAT
     GOLOC --> CONCAT
     PNPMEXT --> CONCAT
     PNPMLOC --> CONCAT
 ```
 
-#### Dispatch: ヒューリスティック + 明示宣言ハイブリッド
+#### Dispatch: 明示宣言を基本に少数の名前付き dispatch
 
 - spec の `tools: [...]` で明示宣言があればそれを優先
-- 未指定時は `cmd[0]` の base name から resolver を auto-dispatch
+- 一部の channel ( `bufResolver` / `pnpmLocalResolver` 等) は `cmd[0]` の base name や cmd 形状から auto-dispatch する。 prebuilt binary 全般を覆う script resolver は **明示宣言された場合のみ動く** ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
 - `buf generate` のような複合 cmd は名前付き専用 resolver (`bufResolver`) が `buf.gen.yaml` を読んで plugin 一覧を返す
-- どの resolver にも該当しない場合は警告ログを出し、 cmd 文字列のみを `tools_hash` 入力にフォールバック (= ツール変更には反応しないが、 cmd 変更には最低限反応)
+- どの resolver にも該当しない場合は警告ログを出し、 cmd 文字列のみを `tools_hash` 入力にフォールバック (= ツール変更には反応しないが、 cmd 変更には最低限反応)。 重要な generator では必ず `tools` 宣言を書く運用とする
 
 具体的な Resolver / Registry の interface 定義は [resolver / preflight の拡張性](#resolver--preflight-の拡張性-interface-設計) 節にまとめる。
 
@@ -357,17 +362,20 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 #### Lockfile と install 状態の整合性検証 (preflight)
 
-`tools_hash` は lockfile (`aqua.yaml` / `go.mod` / `pnpm-lock.yaml` / `buf.lock`) を SSoT として計算する。 開発者がこれらを更新したまま install を実行し忘れた状態で lazygen を走らせると、 resolver は新 version で `tools_hash` を計算する一方、 実 generator は古いバイナリで動き、 嘘の record が `.lazygen/cache/` に書き込まれて他開発者・CI に共有される (cache 汚染)。
+preflight が必要なのは、 `tools_hash` の取得元が lockfile であって runtime の実体と乖離する余地がある channel に限られる。 具体的には:
 
-これを防ぐため、 resolver の前段に **preflight 検証** を必ず通す。 各 channel の検証内容は対応する Resolver doc に記述している ( [aqua](./resolver-aqua.md#preflight-checker) / [go-external](./resolver-go-external.md#preflight-checker) / [go-local](./resolver-go-local.md#preflight-checker) / [pnpm-external](./resolver-pnpm-external.md#preflight-checker) / [pnpm-local](./resolver-pnpm-local.md#preflight-checker) / [buf](./resolver-buf.md#preflight-checker))。
+- **必要**: `pnpm-external` ( pnpm-lock.yaml と node_modules の整合)、 `pnpm-local` ( workspace package の build 出力 dist が src より新しいかの整合)、 `buf` ( buf.yaml deps と buf.lock の整合 / `buf.gen.yaml` の remote plugin pinned tag 強制)
+- **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため)
 
-不整合検出時の挙動 ( 全 Channel 共通):
+各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-external](./resolver-pnpm-external.md#preflight-checker) / [pnpm-local](./resolver-pnpm-local.md#preflight-checker) / [buf](./resolver-buf.md#preflight-checker))。
+
+不整合検出時の挙動 ( preflight が走った channel 共通):
 
 - **デフォルト**: lazygen を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
 - **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
 - **ローカル escape hatch**: `LAZYGEN_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で lazygen を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 
-代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) `~/.aqua/` のような global install path が CI / 開発者で異なる、 (b) aqua-checksums.json は global manifest 重ね合わせで分裂する、 (c) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight の比較対象として補助的に使うに留める。
+代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight の比較対象として補助的に使うに留める。
 
 ### resolver / preflight の拡張性 (interface 設計)
 
@@ -381,7 +389,7 @@ package toolresolver
 
 import "context"
 
-// Resolver は単一の distribution channel ( aqua / go-external / go-local / pnpm-external / pnpm-local 等) を担当する
+// Resolver は単一の distribution channel ( script / pnpm-external / go-local / pnpm-local / buf 等) を担当する
 type Resolver interface {
     // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される
     Name() string
@@ -400,7 +408,7 @@ type ToolVersion struct {
 }
 ```
 
-組み込み実装: `aquaResolver`, `goExternalResolver`, `goLocalResolver` (内製 Go CLI), `pnpmExternalResolver`, `pnpmLocalResolver` (pnpm workspace 内 内製), `bufResolver` (`buf.gen.yaml` 解析の特殊形)。 各 Resolver の実装詳細は対応する独立 doc を参照。
+組み込み実装: `scriptResolver` ( prebuilt binary 全般)、 `goLocalResolver` (内製 Go CLI), `pnpmExternalResolver`, `pnpmLocalResolver` (pnpm workspace 内 内製), `bufResolver` (`buf.gen.yaml` 解析の特殊形 / 内部で script に再帰)。 各 Resolver の実装詳細は対応する独立 doc を参照。
 
 Registry:
 
@@ -420,7 +428,7 @@ func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, de
 }
 ```
 
-新 channel ( 例: `mise`) を追加するときは、 `miseResolver` を実装し `Registry.Register` で登録するだけで済む。 spec 文法は `tools: - mise: <name>` で自動的に使えるようになる ( resolver Name と spec のキーが一致する規約)。
+新 channel ( 例: 既存と異なる lockfile-based エコシステム) を追加するときは、 対応 `Resolver` を実装し `Registry.Register` で登録するだけで済む。 prebuilt binary 系の追加対応は基本 `scriptResolver` で吸収できるため、 新 Resolver の追加は本質的に新しい lockfile / 新しい source-hash 戦略を必要とするケースに限られる。
 
 #### Preflight interface
 
@@ -430,7 +438,7 @@ package preflight
 
 import "context"
 
-// Checker は単一の依存プロバイダ ( aqua / go-external / pnpm-external / buf BSR 等) の install 状態を検証する
+// Checker は単一の依存プロバイダ ( pnpm-external / pnpm-local / buf BSR 等 lockfile-based channel) の install 状態を検証する
 type Checker interface {
     Name() string                                     // resolver と同じ Name で対応付け
     Check(ctx context.Context, specDir string) (Result, error)
@@ -448,11 +456,11 @@ type Issue struct {
 }
 ```
 
-組み込み実装: `aquaChecker`, `gomodChecker`, `pnpmChecker`, `pnpmWorkspaceChecker`, `bufChecker`。 各 Resolver と 1 対 1 で対応する。
+組み込み実装: `pnpmExternalChecker`, `pnpmLocalChecker`, `bufChecker`。 lockfile / build 状態を SSoT として持つ channel のみが Checker を持つ。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( 構造的に不要)。
 
 Registry の動作:
 
-- lazygen の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 対応する preflight Checker を all-or-nothing で実行
+- lazygen の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 そのうち Checker を持つ channel についてだけ all-or-nothing で実行
 - いずれかが Issue を返したら lazygen は fail (前述の preflight ポリシーに従う)
 
 #### 拡張ポイントの責務分離
@@ -472,10 +480,12 @@ Registry の動作:
 
 #### Future channel candidates ( 拡張想定)
 
-| 想定 channel | Resolver の取得元 | Preflight の検証内容 | 内製ツール対応時の `SourceLister` |
+prebuilt binary 系 ( `mise` / `asdf` 等で配布される CLI、 自前 download スクリプトで取り回す binary 等) は **基本 `scriptResolver` で吸収できる** ため、 個別 Resolver を追加する必要は無い。 ユーザーは `tools: [{exec: ["<bin>", "--version"], extract: "..."}]` を書くだけ。
+
+専用 Resolver / Preflight Checker の追加が必要になるのは、 lockfile-based または ソース hash 戦略を新規に必要とするケース:
+
+| 想定 channel | 取得元 | Preflight の検証内容 | 内製ツール対応時の `SourceLister` |
 |---|---|---|---|
-| `mise` | `.tool-versions` / `mise.toml` | `mise install` の実行済み確認 | — ( 外部配布物のみ想定) |
-| `asdf` | `.tool-versions` | `asdf list` で installed plugin / version との照合 | — |
 | `nix` | `flake.lock` | `nix flake check` | — |
 | `bun` | `bun.lockb` | `node_modules/` 整合性 (pnpm と類似) | `esbuildLister` ( 既存) を流用 |
 | `deno` | `deno.lock` | `deno cache --reload` の成功 | TypeScript Compiler API based の代替 lister を検討 |
@@ -605,12 +615,10 @@ internal/lazygen/
   toolresolver/                             # ★ Resolver interface + Registry
     resolver.go                             # Resolver interface, ToolVersion 型
     registry.go                             # Registry (byName + dispatch order)
-    aqua/                                   # ★ 各 Resolver は独立 Go package
-      aqua.go                               # package aqua (詳細は resolver-aqua.md)
+    script/                                 # ★ 各 Resolver は独立 Go package
+      script.go                             # package script (prebuilt binary 全般、 詳細は resolver-script.md)
     buf/
       buf.go                                # package buf (詳細は resolver-buf.md)
-    goexternal/
-      goexternal.go                         # package goexternal (詳細は resolver-go-external.md)
     golocal/
       golocal.go                            # package golocal / internal: goPackagesLister (詳細は resolver-go-local.md)
     pnpmexternal/
@@ -626,19 +634,16 @@ internal/lazygen/
       #   tsc.go             (TypeScript Compiler API ベースの代替)
       #   cargo_metadata.go  (Rust 用)
       #   python_ast.go      (Python ast module ベース)
-  preflight/                                # ★ Checker interface + Registry (toolresolver と同じ命名規則)
+  preflight/                                # ★ Checker interface + Registry (lockfile/build 状態を SSoT とする channel のみ実装)
     preflight.go                            # Checker interface, Result/Issue 型
     registry.go
-    aqua/
-      aqua.go                               # package aqua
     buf/
       buf.go                                # package buf
-    goexternal/
-      goexternal.go                         # package goexternal
     pnpmexternal/
       pnpmexternal.go                       # package pnpmexternal
     pnpmlocal/
       pnpmlocal.go                          # package pnpmlocal ( pnpm workspace 内 内製の build 状態検証)
+    # script resolver と go-local resolver には対応 Checker を置かない (構造的に不要、 [preflight 節](#lockfile-と-install-状態の整合性検証-preflight) 参照)
 
 # 利用者リポジトリ側に作成するファイル ( lazygen 利用時)
 <spec_dir>/lazygen.yml                      # task 定義
@@ -648,11 +653,11 @@ internal/lazygen/
 
 #### Resolver / Preflight Checker / Storage backend の package 分割方針
 
-各実装 ( aquaResolver / goExternalResolver / aquaChecker / GitFileStorage 等) は **それぞれ独立した Go package** として配置する ( ファイル単位ではなくディレクトリ単位)。 理由:
+各実装 ( scriptResolver / pnpmExternalResolver / pnpmExternalChecker / GitFileStorage 等) は **それぞれ独立した Go package** として配置する ( ファイル単位ではなくディレクトリ単位)。 理由:
 
 - 各実装が独立した Go package となることで、 import 関係 ( 何を依存するか) が明示的に分離される
-- 単独 package のテストが書ける ( aquaResolver のテストが goExternalResolver の実装に巻き込まれない)
-- 将来の channel 追加 ( mise / nix / cargo 等) も「新 package を 1 つ追加」で完結し、 既存 package を触らない
+- 単独 package のテストが書ける ( scriptResolver のテストが pnpmExternalResolver の実装に巻き込まれない)
+- 将来の channel 追加 ( nix / cargo 等の lockfile-based) も「新 package を 1 つ追加」で完結し、 既存 package を触らない
 - internal ヘルパーの可視性も Go の package 境界で自然に閉じ込められる
 
 トップレベル package ( `toolresolver` / `preflight` / `cache`) には interface 定義と Registry のみを置き、 各実装 package は interface を import して `Resolver` / `Checker` / `Storage` を返す factory を export する。 Registry には `main.go` 等の起動側で必要な実装を組み立てて register する ( DI コンテナ的な使い方)。

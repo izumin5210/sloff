@@ -64,7 +64,7 @@ func TestLoad_MissReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestSave_ReplacesSlashesInSpecRelpath(t *testing.T) {
+func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 	root := t.TempDir()
 	st := gitfile.New(root)
 	ctx := context.Background()
@@ -74,7 +74,10 @@ func TestSave_ReplacesSlashesInSpecRelpath(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	want := filepath.Join(root, ".lazygen", "cache", "path_to_spec", "gen", "abc123.yml")
+	// Deviation from architecture.md: we keep the spec dir hierarchy verbatim instead of
+	// flattening with "_". A "_" substitution would lose information on List for spec
+	// dirs whose names contain underscores.
+	want := filepath.Join(root, ".lazygen", "cache", "path", "to", "spec", "gen", "abc123.yml")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("expected record at %s, got err=%v", want, err)
 	}

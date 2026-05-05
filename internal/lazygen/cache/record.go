@@ -73,10 +73,16 @@ func (fh FileHashes) MarshalYAML() (any, error) {
 }
 
 // UnmarshalYAML reads a YAML mapping and converts it to a path-sorted FileHashes slice.
+// Empty mappings round-trip back to a nil slice to preserve byte-for-byte identity with
+// records that were created without any output files.
 func (fh *FileHashes) UnmarshalYAML(b []byte) error {
 	var m yaml.MapSlice
 	if err := yaml.Unmarshal(b, &m); err != nil {
 		return err
+	}
+	if len(m) == 0 {
+		*fh = nil
+		return nil
 	}
 	out := make(FileHashes, 0, len(m))
 	for _, item := range m {

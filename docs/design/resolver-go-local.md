@@ -1,0 +1,178 @@
+# Resolver: go-local
+
+`goLocalResolver` はリポジトリ内に実装された **内製 Go CLI** (`go run ./cmd/...` 形式や repo local main package) の論理 version を解決する。
+
+関連:
+- [Architecture](./architecture.md)
+- [Resolver: go-external](./resolver-go-external.md) ( 外部配布 Go ツール側の対応物)
+- [Resolver: pnpm-local](./resolver-pnpm-local.md) ( pnpm 側の対応物 = workspace 内 内製パッケージ)
+
+## Context
+
+Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ツールを構成するソースファイル全集合の hash** を論理 version 文字列として用いる。
+
+「内製ソース ( = `local`)」という意味では [pnpm-local](./resolver-pnpm-local.md) の対応物。 「Go ecosystem の repo local main package」と「pnpm ecosystem の workspace 内 local package」が概念的に対をなす。
+
+ソースファイル列挙には Resolver 内部 helper の `SourceLister` を使う。 標準実装は **`golang.org/x/tools/go/packages` の Go API を直接 import した `goPackagesLister`** で、 entry main package から transitive な依存解析で関係する `.go` ファイルのみを抽出する。
+
+## Resolver の動作
+
+### 取得元
+
+1. cmd から main package の import path を判定 (`go run ./cmd/foo/...` なら `./cmd/foo/...`、 build 済み binary なら spec で明示宣言)
+2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存ファイル全集合を取得
+3. 内部コード / 外部パッケージで戦略を分けて hash ( 後述)
+
+### 論理 version 文字列の形式
+
+```
+"go-local:<main-package-path>@sha256:<hex>"
+```
+
+例: `"go-local:./cmd/protoc-gen-foo@sha256:abcd1234..."`
+
+### CanResolve / dispatch
+
+- `cmd[0]` が `go run ./<path>/...` 形式で、 `./<path>` がリポジトリ内 main package を指す → true
+- spec で `tools: [{go-local: <import-path>}]` のように明示宣言 → true
+- build 済み binary を直接呼ぶケース ( 例: `cmd: protoc-gen-foo`) は spec で明示宣言を必須
+
+### Resolver 実装イメージ
+
+```go
+package golocal
+
+import (
+    "context"
+    "encoding/hex"
+
+    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
+    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+)
+
+type Resolver struct {
+    lister lister.SourceLister // DI: 標準は goPackagesLister
+}
+
+func New(l lister.SourceLister) toolresolver.Resolver {
+    return &Resolver{lister: l}
+}
+
+func (r *Resolver) Name() string { return "go-local" }
+
+func (r *Resolver) CanResolve(specDir string, cmd []string) bool {
+    return looksLikeGoRun(cmd) // "go run ./..." パターン
+}
+
+func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
+    var entry string
+    if declaredKey != "" {
+        entry = declaredKey
+    } else {
+        entry = extractGoRunPath(cmd) // "go run ./cmd/foo/..." → "./cmd/foo/..."
+    }
+    files, err := r.lister.List(ctx, entry)
+    if err != nil {
+        return nil, err
+    }
+    sum := hashFiles(files) // 内部/外部分離戦略で計算 ( 後述)
+    return []toolresolver.ToolVersion{{
+        Name:    entry,
+        Version: "go-local:" + entry + "@sha256:" + hex.EncodeToString(sum),
+        Source:  "go-local:" + entry,
+    }}, nil
+}
+```
+
+## SourceLister: `goPackagesLister` (`go/packages` を直接 import)
+
+`goLocalResolver` の標準実装は `goPackagesLister`。 **`golang.org/x/tools/go/packages` パッケージを Go API で直接 import** して in-process で呼び出す。 lazygen バイナリのメモリ空間内で完結し、 `go list` を subprocess で起動するオーバーヘッドがない。
+
+```go
+import "golang.org/x/tools/go/packages"
+
+cfg := &packages.Config{
+    Mode: packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+    Dir:  repoRoot,
+}
+pkgs, err := packages.Load(cfg, "./cmd/protoc-gen-foo/...")
+```
+
+これは `go list -deps -json` と同等の情報を返す Go 公式 API ( 内部的には `go list` と同じ機構を使うが、 同一プロセス内のライブラリ呼び出しとして動く)。
+
+探索範囲を **per-task の対象 main package とその transitive 依存** に限定する (`./cmd/protoc-gen-foo/...` の形)。 monorepo 全体に対する解析 (`./...`) は CLI 計測で約 7.5 秒 (`3.10s user 5.38s system 112% cpu 7.526 total`) と重く、 task ごとに必要な範囲を遥かに超えるため使わない。
+
+### hash 計算は内部コードと外部パッケージで戦略を分ける
+
+transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOMODCACHE` 配下の外部 package のソース」の 2 種類が含まれる。 両者を一律にファイル本体 SHA256 すると、 外部 module の minor bump で何百ものファイルを再 hash することになり性能が悪い。 また go.mod 全体の transitive 変更 ( 例: 一般的な ライブラリ依存 module の patch bump) を「該当 module 内の全 .go ファイル」を読んで反映する必要もない ( go.sum で内容が暗号学的に保証されているため)。
+
+そこで戦略を 2 つに分ける:
+
+| 種別 | 判定 | hash 入力 |
+|---|---|---|
+| 内部コード | `pkg.Module == nil` ( stdlib) または `pkg.Module.Main` ( 自リポジトリの module) | ファイル本体を SHA256 ( ソーステキスト hash) |
+| 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash |
+
+```go
+for each pkg in transitive(pkgs):
+    if pkg.Module == nil || pkg.Module.Main {
+        // 内部コード: ファイル本体を hash
+        for f in pkg.GoFiles {  // _test.go は除外
+            hash.Write(readFile(f))
+        }
+    } else {
+        // 外部パッケージ: version + go.sum 該当行で代用
+        hash.Write([]byte(pkg.Module.Path + "@" + pkg.Module.Version))
+        hash.Write([]byte(lookupGoSum(pkg.Module.Path, pkg.Module.Version)))
+    }
+```
+
+### 利点
+
+- 外部 module の patch bump → version 文字列が変わる → 自動 invalidate ( ファイル本体を読まなくても version 比較で済む)
+- 同 version なら中身を読まないので高速 ( `$GOMODCACHE` は数 GB 規模になりうる、 全 .go を SHA256 すると重い)
+- go.sum で「version → 中身」が暗号学的に保証されているため、 「version + go.sum hash」が「中身全 hash」と等価な強度を持つ
+- 内部コードは細かい変更にも敏感 ( `_test.go` 除外以外は普通の hash 戦略)
+- stdlib ( `pkg.Module == nil`) は Go バージョン自体に紐づくため、 [go-external](./resolver-go-external.md) 経由の Go tool ディレクティブの version 解決と組み合わせて間接的に invalidate される
+
+### `globLister` への retreat
+
+`go/packages` で正しく取れない構造の Go プロジェクトに対応する場合は、 該当 `goLocalResolver` の `SourceLister` を `globLister` に切り替える:
+
+```go
+import "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+
+resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.go"}))
+```
+
+これで該当パッケージのみ「精度は下がるが死角ゼロ」運用に切り替わる。 影響範囲は Resolver 単位なので局所化される。
+
+### `SourceLister` 共通の挙動
+
+[Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / lazygen バイナリ単体完結等の共通機能。
+
+## Preflight Checker
+
+`goLocalChecker` は `go/packages` での解析が完走するかで install 状態を間接的に検証する。
+
+### 検証内容
+
+`go list -deps -json ./<main_package>/...` ( in-process で `packages.Load`) がエラー無く完走するかを確認する。 transitive 依存が `$GOMODCACHE` に存在しないと `packages.Load` がエラーを返すため、 これを代理シグナルにする ( go-external resolver の preflight と重複する部分は cache 共通化で軽減)。
+
+### 不整合検出時
+
+lazygen を即時 fail させ、 stderr に以下を表示:
+
+```
+go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
+  no required module provides package ...
+  please run: go mod download
+```
+
+実質 `goExternalChecker` と同じ install 状態を見ているため、 まとめて 1 回の `packages.Load` で済ませる実装最適化が可能。
+
+## Open Questions
+
+- `go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか
+- transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)
+- 内製 protoc plugin が `go.mod` の `internal/...` パッケージに依存する場合の subset hash 戦略

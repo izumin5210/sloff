@@ -9,19 +9,18 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/gitfile"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
-	preflightaqua "github.com/izumin5210/lazygen/internal/lazygen/preflight/aqua"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
-	resolveraqua "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/aqua"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
-const fixtureAquaSimple = "aqua-simple"
+const fixtureScriptSimple = "script-simple"
 
 // fixture wraps a freshly-copied testdata/e2e/<name> tree with helpers used by the tests.
 //
 // Tests mutate files inside f.root (a t.TempDir copy of the fixture) and rebuild the
-// runner via f.newRunner so that resolver/checker config is re-read after each mutation.
+// runner via f.newRunner so that the resolver is given a fresh per-run cache.
 type fixture struct {
 	t    *testing.T
 	root string
@@ -43,23 +42,20 @@ func loadFixture(t *testing.T, name string) *fixture {
 	return &fixture{t: t, root: dst}
 }
 
-func (f *fixture) newRunner(readOnly bool) *runner.Runner {
+func (f *fixture) newRunner() *runner.Runner {
 	f.t.Helper()
 	specs, err := spec.Discover(f.root, "**/lazygen.yml")
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	resolverReg := toolresolver.NewRegistry()
-	resolverReg.Register(must(resolveraqua.New(f.root)))
-	preflightReg := preflight.NewRegistry()
-	preflightReg.Register(must(preflightaqua.New(f.root)))
+	resolverReg.Register(script.New(f.root))
 	return runner.New(runner.Options{
 		RepoRoot:  f.root,
 		Specs:     specs,
 		Storage:   gitfile.New(f.root),
 		Resolvers: resolverReg,
-		Preflight: preflightReg,
-		ReadOnly:  readOnly,
+		Preflight: preflight.NewRegistry(), // PR1 ships no concrete checkers
 	})
 }
 
@@ -82,16 +78,9 @@ func (f *fixture) writeFile(relpath, contents string) {
 	}
 }
 
-func (f *fixture) removeFile(relpath string) {
-	f.t.Helper()
-	if err := os.Remove(filepath.Join(f.root, relpath)); err != nil {
-		f.t.Fatal(err)
-	}
-}
-
 func TestRunner_FirstRunWritesRecord(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	f := loadFixture(t, fixtureScriptSimple)
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if f.markerCount() != 1 {
@@ -104,8 +93,8 @@ func TestRunner_FirstRunWritesRecord(t *testing.T) {
 }
 
 func TestRunner_SecondRunHits(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	r := f.newRunner(false)
+	f := loadFixture(t, fixtureScriptSimple)
+	r := f.newRunner()
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -118,12 +107,12 @@ func TestRunner_SecondRunHits(t *testing.T) {
 }
 
 func TestRunner_InputChangeInvalidates(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	f := loadFixture(t, fixtureScriptSimple)
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f.writeFile("spec/input.txt", "world")
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if f.markerCount() != 2 {
@@ -131,75 +120,40 @@ func TestRunner_InputChangeInvalidates(t *testing.T) {
 	}
 }
 
-func TestRunner_AquaVersionBumpInvalidates(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+func TestRunner_ToolVersionBumpInvalidates(t *testing.T) {
+	f := loadFixture(t, fixtureScriptSimple)
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// Bump aqua version → tools_hash changes → cache miss.
-	f.writeFile("aqua.yaml", `packages:
-  - name: example/copier@v2.0.0
+	// Rewriting the tools[].exec to print a different version flips tools_hash → cache miss.
+	f.writeFile("spec/lazygen.yml", `commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v2.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
 `)
-	f.writeFile("aqua-checksums.json", `{
-  "checksums": [
-    {"id": "github.com/example/copier/releases/download/v2.0.0/copier.tar.gz", "algorithm": "sha256", "checksum": "feedface"}
-  ]
-}`)
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if f.markerCount() != 2 {
-		t.Errorf("aqua bump should re-run, marker=%d", f.markerCount())
+		t.Errorf("tool version bump should re-run, marker=%d", f.markerCount())
 	}
 }
 
 func TestRunner_OutputDriftInvalidates(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	f := loadFixture(t, fixtureScriptSimple)
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Modify the recorded output → output-comparison fails → re-run.
 	f.writeFile("spec/output.txt", "tampered")
-	if err := f.newRunner(false).Run(context.Background()); err != nil {
+	if err := f.newRunner().Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if f.markerCount() != 2 {
 		t.Errorf("output drift should re-run, marker=%d", f.markerCount())
 	}
-}
-
-func TestRunner_PreflightFailureAborts(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	f.removeFile("aqua-checksums.json")
-
-	err := f.newRunner(false).Run(context.Background())
-	if err == nil {
-		t.Fatal("expected preflight error")
-	}
-	if f.markerCount() != 0 {
-		t.Errorf("preflight failure must not run generators, marker=%d", f.markerCount())
-	}
-}
-
-func TestRunner_AllowStaleDepsSkipsRecordWrite(t *testing.T) {
-	f := loadFixture(t, fixtureAquaSimple)
-	f.removeFile("aqua-checksums.json")
-
-	if err := f.newRunner(true).Run(context.Background()); err != nil {
-		t.Fatalf("Run with ReadOnly should succeed: %v", err)
-	}
-	matches, _ := filepath.Glob(filepath.Join(f.root, ".lazygen", "cache", "**", "*.yml"))
-	if len(matches) != 0 {
-		t.Errorf("ReadOnly mode must not write records, got %v", matches)
-	}
-	if f.markerCount() != 1 {
-		t.Errorf("generator should still execute in ReadOnly mode, marker=%d", f.markerCount())
-	}
-}
-
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
 }

@@ -11,19 +11,19 @@ import (
 )
 
 type fakeResolver struct {
-	name             string
-	canResolve       bool
-	versions         []toolresolver.ToolVersion
-	err              error
-	calls            int
-	lastDeclaredKey  string
+	name         string
+	canResolve   bool
+	versions     []toolresolver.ToolVersion
+	err          error
+	calls        int
+	lastDeclared *toolresolver.DeclaredTool
 }
 
-func (f *fakeResolver) Name() string                                { return f.name }
-func (f *fakeResolver) CanResolve(string, []string) bool            { return f.canResolve }
-func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
+func (f *fakeResolver) Name() string                     { return f.name }
+func (f *fakeResolver) CanResolve(string, []string) bool { return f.canResolve }
+func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
 	f.calls++
-	f.lastDeclaredKey = declaredKey
+	f.lastDeclared = declared
 	return f.versions, f.err
 }
 
@@ -58,7 +58,8 @@ func TestRegistry_DeclaredOverridesAutoDispatch(t *testing.T) {
 	reg.Register(a)
 	reg.Register(b)
 
-	got, err := reg.Resolve(context.Background(), ".", []string{"x"}, []toolresolver.DeclaredTool{{Resolver: "b", Key: "thekey"}})
+	declared := []toolresolver.DeclaredTool{{Resolver: "b", Exec: []string{"the-exec"}, Extract: "the-extract"}}
+	got, err := reg.Resolve(context.Background(), ".", []string{"x"}, declared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +70,11 @@ func TestRegistry_DeclaredOverridesAutoDispatch(t *testing.T) {
 	if a.calls != 0 {
 		t.Errorf("declared should bypass auto-dispatch, a was called %d times", a.calls)
 	}
-	if b.lastDeclaredKey != "thekey" {
-		t.Errorf("declared key not propagated, got %q", b.lastDeclaredKey)
+	if b.lastDeclared == nil {
+		t.Fatal("declared not propagated to resolver")
+	}
+	if diff := cmp.Diff(&declared[0], b.lastDeclared); diff != "" {
+		t.Errorf("declared not propagated correctly (-want +got):\n%s", diff)
 	}
 }
 

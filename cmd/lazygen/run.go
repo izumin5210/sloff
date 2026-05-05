@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -12,11 +10,10 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/gitfile"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
-	preflightaqua "github.com/izumin5210/lazygen/internal/lazygen/preflight/aqua"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
-	resolveraqua "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/aqua"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
 const allowStaleDepsEnv = "LAZYGEN_ALLOW_STALE_DEPS"
@@ -53,49 +50,28 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 		return fmt.Errorf("discover specs: %w", err)
 	}
 
-	resolverReg, preflightReg, err := buildRegistries(root)
-	if err != nil {
-		return err
-	}
-
 	readOnly := os.Getenv(allowStaleDepsEnv) != ""
 
 	r := runner.New(runner.Options{
 		RepoRoot:  root,
 		Specs:     specs,
 		Storage:   gitfile.New(root),
-		Resolvers: resolverReg,
-		Preflight: preflightReg,
+		Resolvers: buildResolvers(root),
+		Preflight: preflight.NewRegistry(), // no concrete checkers in this build
 		ReadOnly:  readOnly,
 	})
 
 	return r.Run(ctx)
 }
 
-func buildRegistries(root string) (*toolresolver.Registry, *preflight.Registry, error) {
-	resolverReg := toolresolver.NewRegistry()
-	preflightReg := preflight.NewRegistry()
-
-	aquaPath := filepath.Join(root, resolveraqua.ConfigFileName)
-	if _, err := os.Stat(aquaPath); err == nil {
-		res, err := resolveraqua.New(root)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load aqua resolver: %w", err)
-		}
-		resolverReg.Register(res)
-
-		check, err := preflightaqua.New(root)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load aqua checker: %w", err)
-		}
-		preflightReg.Register(check)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, fmt.Errorf("stat aqua.yaml: %w", err)
-	}
-
-	resolverReg.SetFallback(func(cmd []string) {
+// buildResolvers wires up the resolver registry. PR1 ships only the script resolver,
+// which is universal (any prebuilt binary that has --version). Future PRs will register
+// pnpm-external / go-local / pnpm-local / buf alongside it.
+func buildResolvers(root string) *toolresolver.Registry {
+	reg := toolresolver.NewRegistry()
+	reg.Register(script.New(root))
+	reg.SetFallback(func(cmd []string) {
 		fmt.Fprintf(os.Stderr, "lazygen: no resolver matched cmd %v; tools_hash falls back to cmd-string only\n", cmd)
 	})
-
-	return resolverReg, preflightReg, nil
+	return reg
 }

@@ -57,15 +57,16 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
-			name: "command with tools",
+			name: "command with script tools",
 			yaml: `commands:
   - name: gen
     cmd: foo
     inputs: ["a"]
     outputs: ["b"]
     tools:
-      - aqua: bufbuild/buf
-      - go-external: google.golang.org/protobuf/cmd/protoc-gen-go
+      - exec: ["buf", "--version"]
+      - exec: ["go", "version"]
+        extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
 `,
 			want: &spec.File{
 				Commands: []spec.Command{{
@@ -74,8 +75,8 @@ func TestParse(t *testing.T) {
 					Inputs:  []string{"a"},
 					Outputs: []string{"b"},
 					Tools: []spec.DeclaredTool{
-						{Resolver: "aqua", Key: "bufbuild/buf"},
-						{Resolver: "go-external", Key: "google.golang.org/protobuf/cmd/protoc-gen-go"},
+						{Resolver: "script", Exec: []string{"buf", "--version"}},
+						{Resolver: "script", Exec: []string{"go", "version"}, Extract: `go[0-9]+\.[0-9]+(?:\.[0-9]+)?`},
 					},
 				}},
 			},
@@ -131,15 +132,14 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "tools entry with multiple keys fails",
+			name: "tools entry without recognized fields fails",
 			yaml: `commands:
   - name: gen
     cmd: foo
     inputs: ["a"]
     outputs: ["b"]
     tools:
-      - aqua: x
-        go-external: y
+      - unknown: x
 `,
 			wantErr: true,
 		},

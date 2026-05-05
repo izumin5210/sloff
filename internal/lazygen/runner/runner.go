@@ -275,7 +275,11 @@ func declaredFromSpec(tools []spec.DeclaredTool) []toolresolver.DeclaredTool {
 	}
 	out := make([]toolresolver.DeclaredTool, len(tools))
 	for i, t := range tools {
-		out[i] = toolresolver.DeclaredTool{Resolver: t.Resolver, Key: t.Key}
+		out[i] = toolresolver.DeclaredTool{
+			Resolver: t.Resolver,
+			Exec:     t.Exec,
+			Extract:  t.Extract,
+		}
 	}
 	return out
 }

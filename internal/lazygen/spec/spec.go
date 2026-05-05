@@ -46,27 +46,43 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 	return nil
 }
 
-// DeclaredTool is one entry of a command's tools: list. The YAML form is a single-key map,
-// e.g. `{aqua: bufbuild/buf}` or `{go-external: google.golang.org/protobuf/cmd/protoc-gen-go}`.
+// DeclaredTool is one entry of a command's tools: list. The resolver is determined by
+// which fields are present in the YAML; for the script resolver an `exec` field is
+// required and `extract` is optional.
+//
+// Example:
+//
+//	tools:
+//	  - exec: ["buf", "--version"]
+//	  - exec: ["go", "version"]
+//	    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
 type DeclaredTool struct {
-	Key      string // resolver-specific identifier, e.g. "bufbuild/buf"
-	Resolver string // resolver name, e.g. "aqua"
+	// Resolver is the resolver name inferred from the YAML shape, e.g. "script".
+	Resolver string
+
+	// Exec / Extract are the script resolver inputs.
+	Exec    []string
+	Extract string
+}
+
+type rawDeclaredTool struct {
+	Exec    []string `yaml:"exec"`
+	Extract string   `yaml:"extract"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
 func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
-	var m map[string]string
-	if err := yaml.Unmarshal(b, &m); err != nil {
-		return fmt.Errorf("tools entry must be a single-key map: %w", err)
+	var raw rawDeclaredTool
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("tools entry: %w", err)
 	}
-	if len(m) != 1 {
-		return fmt.Errorf("tools entry must have exactly one key, got %d", len(m))
+	if len(raw.Exec) > 0 {
+		d.Resolver = "script"
+		d.Exec = raw.Exec
+		d.Extract = raw.Extract
+		return nil
 	}
-	for k, v := range m {
-		d.Resolver = k
-		d.Key = v
-	}
-	return nil
+	return errors.New("tools entry: required field is missing (supported: exec [+ extract])")
 }
 
 // Parse reads a lazygen.yml document and validates the required fields.

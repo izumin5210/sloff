@@ -3,6 +3,7 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"sort"
 )
 
 // Registry holds preflight Checkers keyed by Name.
@@ -18,6 +19,16 @@ func NewRegistry() *Registry {
 // Register adds a Checker. Re-registering a name overwrites the previous entry.
 func (r *Registry) Register(c Checker) {
 	r.byName[c.Name()] = c
+}
+
+// Names returns every registered Checker's Name in registration-key (alphabetical) order.
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.byName))
+	for k := range r.byName {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Run executes the named Checkers (deduplicated) and aggregates their issues. The

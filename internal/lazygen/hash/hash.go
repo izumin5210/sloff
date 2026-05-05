@@ -74,6 +74,15 @@ func Input(filesHash, cmdHash, toolsHash string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// File returns the hex SHA-256 of a single file located at filepath.Join(root, path).
+func File(root, path string) (string, error) {
+	digest, err := fileSHA256(filepath.Join(root, path))
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest), nil
+}
+
 func fileSHA256(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {

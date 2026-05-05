@@ -61,6 +61,15 @@ type FileHash struct {
 // FileHashes is a deterministic, path-sorted set of FileHash entries.
 type FileHashes []FileHash
 
+// Paths returns just the path strings of the entries, in their current order.
+func (fh FileHashes) Paths() []string {
+	out := make([]string, len(fh))
+	for i, e := range fh {
+		out[i] = e.Path
+	}
+	return out
+}
+
 // MarshalYAML emits the entries as a path-sorted YAML mapping.
 func (fh FileHashes) MarshalYAML() (any, error) {
 	sorted := append(FileHashes(nil), fh...)

@@ -136,7 +136,8 @@ func TestInputHash_CombinesAllThree(t *testing.T) {
 }
 
 func TestInputHash_Deterministic(t *testing.T) {
-	if hash.Input("a", "b", "c") != hash.Input("a", "b", "c") {
+	files, cmd, tools := "aaa", "bbb", "ccc"
+	if hash.Input(files, cmd, tools) != hash.Input(files, cmd, tools) {
 		t.Error("Input must be deterministic")
 	}
 }

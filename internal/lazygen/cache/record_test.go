@@ -151,7 +151,7 @@ func TestMarshalIsByteStable(t *testing.T) {
 // topLevelKeys extracts top-level YAML keys (lines starting at column 0 with `key:`).
 func topLevelKeys(s string) []string {
 	var keys []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if line == "" || line[0] == ' ' || line[0] == '-' || line[0] == '#' {
 			continue
 		}

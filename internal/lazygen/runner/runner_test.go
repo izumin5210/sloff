@@ -307,6 +307,15 @@ func TestRunner_GoLocal_InputChangeInvalidates(t *testing.T) {
 	)
 }
 
+// TestRunner_GoLocal_NestedSpecResolvesCorrectly guards the resolver's specDir
+// rebasing: when lazygen.yml lives under spec/ and the cmd is `go run ./cmd/copy`,
+// the resolver must hand "./spec/cmd/copy" (not "./cmd/copy") to the lister, or
+// packages.Load fails to find the package. Without this fixture, regressions in
+// the rebase logic would only surface on user repos with nested specs.
+func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
+	runE2E(t, "golocal-nested-spec", runStep())
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and

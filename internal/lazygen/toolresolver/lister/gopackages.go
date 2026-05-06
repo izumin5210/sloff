@@ -57,7 +57,12 @@ func (l *goPackagesLister) List(ctx context.Context, entry string) (Listing, err
 	}
 
 	cfg := &packages.Config{
-		Mode:    packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+		// NeedEmbedFiles surfaces //go:embed targets in pkg.EmbedFiles. Without it,
+		// edits to embedded templates / schemas / data files would not change the
+		// tools_hash and lazygen would serve stale cache hits even though `go run`
+		// rebuilds the binary on every embed change.
+		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
+			packages.NeedImports | packages.NeedDeps | packages.NeedModule,
 		Dir:     l.repoRoot,
 		Context: ctx,
 	}
@@ -100,15 +105,20 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 		case pkg.Module == nil:
 			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral cache.
 		case pkg.Module.Main:
-			for _, f := range pkg.GoFiles {
-				rel, err := filepath.Rel(l.repoRoot, f)
-				if err != nil {
-					return fmt.Errorf("rel %q: %w", f, err)
+			// EmbedFiles is treated identically to GoFiles: both contribute to the
+			// binary that `go run` produces, so both must invalidate the cache when
+			// they change.
+			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles} {
+				for _, f := range group {
+					rel, err := filepath.Rel(l.repoRoot, f)
+					if err != nil {
+						return fmt.Errorf("rel %q: %w", f, err)
+					}
+					if strings.HasPrefix(rel, "..") {
+						return fmt.Errorf("internal file %q escapes repo root", f)
+					}
+					internalSet[rel] = struct{}{}
 				}
-				if strings.HasPrefix(rel, "..") {
-					return fmt.Errorf("internal file %q escapes repo root", f)
-				}
-				internalSet[rel] = struct{}{}
 			}
 		default:
 			path, version := externalLabel(pkg.Module)

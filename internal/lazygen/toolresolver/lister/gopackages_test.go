@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -104,6 +105,35 @@ func TestGoPackages_RejectsNonRelativeEntry(t *testing.T) {
 
 	if _, err := lister.NewGoPackages(root).List(context.Background(), "example.test/abs/cmd/tool"); err == nil {
 		t.Error("expected error when entry lacks ./ prefix")
+	}
+}
+
+func TestGoPackages_IncludesEmbedFiles(t *testing.T) {
+	requireGo(t)
+	root := t.TempDir()
+	mustWriteFile(t, root, "go.mod", "module example.test/embed\n\ngo 1.22\n")
+	mustWriteFile(t, root, "cmd/tool/main.go", `package main
+
+import (
+	_ "embed"
+	"fmt"
+)
+
+//go:embed asset.txt
+var asset string
+
+func main() { fmt.Print(asset) }
+`)
+	mustWriteFile(t, root, "cmd/tool/asset.txt", "v1\n")
+
+	got, err := lister.NewGoPackages(root).List(context.Background(), "./cmd/tool/...")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	wantAsset := filepath.FromSlash("cmd/tool/asset.txt")
+	if !slices.Contains(got.InternalFiles, wantAsset) {
+		t.Errorf("InternalFiles must include the //go:embed asset %q, got %v", wantAsset, got.InternalFiles)
 	}
 }
 

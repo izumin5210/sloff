@@ -140,6 +140,49 @@ func TestResolver_FailsOnDeclaredEntryWithoutLeadingDotSlash(t *testing.T) {
 	}
 }
 
+func TestResolver_RebasesEntryToRepoRootForLister(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"spec/cmd/tool/main.go": "package main\nfunc main() {}\n",
+	})
+	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"spec/cmd/tool/main.go"}}}
+
+	// The cmd is executed with cwd=<repoRoot>/spec, so `go run ./cmd/tool` refers to
+	// <repoRoot>/spec/cmd/tool. The lister, however, runs at repoRoot and must receive
+	// the repo-relative entry "./spec/cmd/tool" — otherwise it would mis-resolve to
+	// <repoRoot>/cmd/tool (which doesn't exist).
+	versions, err := golocal.New(root, stub).Resolve(
+		context.Background(), "spec", []string{"go", "run", "./cmd/tool"}, nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if stub.gotEntry != "./spec/cmd/tool" {
+		t.Errorf("lister received entry %q, want ./spec/cmd/tool (rebased to repo root)", stub.gotEntry)
+	}
+	// The version label, however, stays in spec-relative form so the same generator
+	// referenced from different specs keeps a stable display string.
+	if !strings.HasPrefix(versions[0].Version, "go-local:./cmd/tool@sha256:") {
+		t.Errorf("Version = %q, want spec-relative label", versions[0].Version)
+	}
+}
+
+func TestResolver_RebasesNestedSpecDirEntry(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"a/b/cmd/tool/main.go": "package main\nfunc main() {}\n",
+	})
+	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"a/b/cmd/tool/main.go"}}}
+
+	if _, err := golocal.New(root, stub).Resolve(
+		context.Background(), filepath.Join("a", "b"),
+		nil, &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool/..."},
+	); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if stub.gotEntry != "./a/b/cmd/tool/..." {
+		t.Errorf("lister received entry %q, want ./a/b/cmd/tool/...", stub.gotEntry)
+	}
+}
+
 func TestResolver_PropagatesListerError(t *testing.T) {
 	wantErr := errors.New("transitive load failed")
 	stub := &fakeLister{err: wantErr}

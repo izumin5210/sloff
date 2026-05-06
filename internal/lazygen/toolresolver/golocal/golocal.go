@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -65,19 +66,27 @@ func (r *Resolver) CanResolve(_ string, cmd []string) bool {
 // Resolve returns one ToolVersion. When declared is supplied, declared.Entry
 // names the main package; otherwise the entry is extracted from a `go run`
 // command. The returned Version is OS-neutral: `go-local:<entry>@sha256:<hex>`.
-func (r *Resolver) Resolve(ctx context.Context, _ string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
 	entry, err := r.resolveEntry(cmd, declared)
 	if err != nil {
 		return nil, err
 	}
 
-	listing, err := r.lister.List(ctx, entry)
+	// The cmd runs with cwd=<repoRoot>/<specDir>, so `go run ./cmd/foo` resolves
+	// against the spec directory. The lister, however, operates at repoRoot, so
+	// the entry must be rebased: `./cmd/foo` from spec "spec/sub" becomes
+	// `./spec/sub/cmd/foo`. The version label keeps the spec-relative form so
+	// the display string stays stable per generator regardless of where the
+	// spec sits in the repository.
+	listerEntry := rebaseEntryToRepoRoot(specDir, entry)
+
+	listing, err := r.lister.List(ctx, listerEntry)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: list sources for %q: %w", entry, err)
+		return nil, fmt.Errorf("go-local: list sources for %q: %w", listerEntry, err)
 	}
 	digest, err := hashListing(r.repoRoot, listing)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: hash sources for %q: %w", entry, err)
+		return nil, fmt.Errorf("go-local: hash sources for %q: %w", listerEntry, err)
 	}
 
 	source := Name + ":" + entry
@@ -86,6 +95,18 @@ func (r *Resolver) Resolve(ctx context.Context, _ string, cmd []string, declared
 		Source:  source,
 		Version: source + "@sha256:" + hex.EncodeToString(digest),
 	}}, nil
+}
+
+// rebaseEntryToRepoRoot prefixes a spec-relative entry like "./cmd/foo" with
+// the spec directory so the lister, which runs at repoRoot, sees the path it
+// expects. The trailing "/..." (Go's recursive package suffix) is preserved.
+func rebaseEntryToRepoRoot(specDir, entry string) string {
+	trimmed := strings.TrimPrefix(entry, "./")
+	slashDir := filepath.ToSlash(specDir)
+	if slashDir == "" || slashDir == "." {
+		return "./" + trimmed
+	}
+	return "./" + path.Join(slashDir, trimmed)
 }
 
 func (r *Resolver) resolveEntry(cmd []string, declared *toolresolver.DeclaredTool) (string, error) {

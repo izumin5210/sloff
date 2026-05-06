@@ -297,3 +297,48 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 		t.Errorf("cache record must not be written for failed run: %v", entries)
 	}
 }
+
+// TestRunner_PartialOutputPatternsAllowed verifies that a generator that produces some
+// declared output patterns but leaves others empty (e.g. a conditional artifact) is
+// treated as a successful run. The union safeguard only fails when no declared pattern
+// resolved to any file at all.
+func TestRunner_PartialOutputPatternsAllowed(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `commands:
+  - name: partial
+    cmd: ["sh", "-c", "cp input.txt produced.txt"]
+    inputs: ["input.txt"]
+    outputs: ["produced.txt", "optional/*.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+`
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("expected success when at least one declared pattern produced files, got: %v", err)
+	}
+}

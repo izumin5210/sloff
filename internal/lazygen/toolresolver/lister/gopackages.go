@@ -64,12 +64,15 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 		return Listing{}, fmt.Errorf("packages.Load %q: no packages matched", entry)
 	}
 
-	// Read go.sum from the *loaded module*, not from the repo root. In a
-	// nested-module monorepo (submodule/go.mod + submodule/go.sum) the
+	// Read go.sum from every *loaded* main module, not from the repo root.
+	// In a nested-module monorepo (submodule/go.mod + submodule/go.sum) the
 	// repo-root go.sum may not exist or may track an unrelated module set,
 	// so fingerprinting external deps against it would leave tools_hash
-	// stable across submodule dependency bumps and produce stale cache hits.
-	goSum, err := readGoSumForMainModule(pkgs)
+	// stable across submodule dependency bumps. When `go.work` brings
+	// several main modules into the same build, every module's go.sum is
+	// concatenated so external dep bumps in any sibling module flip the
+	// hash too.
+	goSum, err := readGoSumForMainModules(pkgs)
 	if err != nil {
 		return Listing{}, fmt.Errorf("read go.sum: %w", err)
 	}
@@ -81,21 +84,17 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	return listing, nil
 }
 
-// readGoSumForMainModule locates the (single) main module via the loaded
-// packages and reads <main module dir>/go.sum. Missing go.sum is not an
-// error: a fresh module before `go mod tidy` has no entries, and packages
-// whose only deps are stdlib have no use for it. In that case the empty
-// []byte ends up as empty GoSumLine values for any external modules, which
-// is honest about the missing cryptographic anchor.
+// readGoSumForMainModules locates every main module reachable from roots and
+// concatenates each <module dir>/go.sum. Multiple main modules show up when a
+// `go.work` file pulls several repo-local modules into one build; combining
+// their go.sum files lets dependency bumps in any used module flip
+// tools_hash. Missing go.sum is tolerated (fresh module before `go mod tidy`,
+// stdlib-only deps); empty go.sum ends up as empty GoSumLine values for any
+// external modules, which is honest about the missing cryptographic anchor.
 //
-// If the load surfaces *multiple* main modules — which happens when a
-// `go.work` file pulls several repo-local modules into one build — this
-// function fails fast. Without that, only the first module's go.sum would
-// be consulted and dependency bumps in sibling modules could leave
-// tools_hash unchanged. Supporting go.work properly requires combining
-// every used module's go.sum; until that is implemented the resolver
-// refuses to silently fingerprint a partial set.
-func readGoSumForMainModule(roots []*packages.Package) ([]byte, error) {
+// Module order is sorted by GoMod path so concatenation is deterministic
+// regardless of how packages.Load happened to enumerate them.
+func readGoSumForMainModules(roots []*packages.Package) ([]byte, error) {
 	seen := map[string]struct{}{}
 	var goModPaths []string
 	packages.Visit(roots, nil, func(pkg *packages.Package) {
@@ -108,23 +107,26 @@ func readGoSumForMainModule(roots []*packages.Package) ([]byte, error) {
 		seen[pkg.Module.GoMod] = struct{}{}
 		goModPaths = append(goModPaths, pkg.Module.GoMod)
 	})
-
-	switch len(goModPaths) {
-	case 0:
+	if len(goModPaths) == 0 {
 		return nil, nil
-	case 1:
-		b, err := os.ReadFile(filepath.Join(filepath.Dir(goModPaths[0]), "go.sum"))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	}
+	sort.Strings(goModPaths)
+
+	var combined []byte
+	for _, p := range goModPaths {
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(p), "go.sum"))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
-		return b, nil
-	default:
-		sort.Strings(goModPaths)
-		return nil, fmt.Errorf(
-			"go-local lister: multiple main modules detected (%s); go.work multi-module workspaces are not supported in this release",
-			strings.Join(goModPaths, ", "),
-		)
+		if len(combined) > 0 && combined[len(combined)-1] != '\n' {
+			combined = append(combined, '\n')
+		}
+		combined = append(combined, b...)
 	}
+	return combined, nil
 }
 
 func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listing, error) {
@@ -143,40 +145,29 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 		case pkg.Module == nil:
 			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral cache.
 		case pkg.Module.Main:
-			// GoFiles + EmbedFiles + IgnoredFiles + OtherFiles together capture
-			// every source file the package owns regardless of host build
-			// context. IgnoredFiles makes build-tag / GOOS-conditional sources
-			// (foo_linux.go, custom -tags) contribute uniformly across hosts;
-			// OtherFiles covers non-Go inputs that `go build` rebuilds on
-			// (.s assembly, cgo .c/.cc, .syso) — without it edits to those
-			// files would not change tools_hash even though `go run` produces
-			// a different binary. Paths are converted to slash form so the
-			// digest is identical on Windows and Unix.
-			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles, pkg.OtherFiles} {
-				for _, f := range group {
-					rel, err := filepath.Rel(l.repoRoot, f)
-					if err != nil {
-						return fmt.Errorf("rel %q: %w", f, err)
-					}
-					rel = filepath.ToSlash(rel)
-					if strings.HasPrefix(rel, "../") || rel == ".." {
-						return fmt.Errorf("internal file %q escapes repo root", f)
-					}
-					internalSet[rel] = struct{}{}
-				}
+			if err := l.collectInternalFiles(pkg, internalSet); err != nil {
+				return err
+			}
+		case pkg.Module.Replace != nil && pkg.Module.Replace.Version == "":
+			// Local replace (`replace example.com/a => ../local`) brings an
+			// arbitrary directory into the build that is not covered by go.sum.
+			// Treat its sources exactly like main-module sources so edits to
+			// the replaced directory invalidate tools_hash. The collector
+			// rejects paths that escape repoRoot — absolute-path replaces or
+			// `../sibling-repo` targets would tie tools_hash to per-developer
+			// machine layouts, which we leave to a future ADR.
+			if err := l.collectInternalFiles(pkg, internalSet); err != nil {
+				return fmt.Errorf("local replace %s => %s: %w",
+					pkg.Module.Path, pkg.Module.Replace.Path, err)
 			}
 		default:
 			labelPath, labelVersion, sumPath, sumVersion := externalLabel(pkg.Module)
 			key := labelPath + "@" + labelVersion
 			if _, ok := externalSet[key]; !ok {
-				var sumLine string
-				if sumPath != "" && sumVersion != "" {
-					sumLine = lookupGoSum(goSum, sumPath, sumVersion)
-				}
 				externalSet[key] = ExternalModule{
 					Path:      labelPath,
 					Version:   labelVersion,
-					GoSumLine: sumLine,
+					GoSumLine: lookupGoSum(goSum, sumPath, sumVersion),
 				}
 			}
 		}
@@ -216,31 +207,58 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 	return Listing{InternalFiles: internal, ExternalModules: external}, nil
 }
 
+// collectInternalFiles folds every source file pkg owns into internalSet,
+// keyed by its repo-relative slash-form path. The four file groups together
+// cover every input `go build` re-reads for that package:
+//
+//   - GoFiles: in-context Go sources
+//   - EmbedFiles: //go:embed assets
+//   - IgnoredFiles: build-tag / GOOS-conditional Go sources excluded from the
+//     current build context (required for OS-neutral hashing — without them
+//     foo_linux.go and foo_darwin.go would hash differently per host)
+//   - OtherFiles: non-Go inputs (.s assembly, cgo .c/.cc, .syso)
+//
+// Paths are converted to slash form so the digest is identical on Windows
+// and Unix. Files outside repoRoot are rejected because their absolute
+// location varies per developer machine, which would break OS-neutral
+// cache sharing.
+func (l *goPackagesLister) collectInternalFiles(pkg *packages.Package, internalSet map[string]struct{}) error {
+	for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles, pkg.OtherFiles} {
+		for _, f := range group {
+			rel, err := filepath.Rel(l.repoRoot, f)
+			if err != nil {
+				return fmt.Errorf("rel %q: %w", f, err)
+			}
+			rel = filepath.ToSlash(rel)
+			if strings.HasPrefix(rel, "../") || rel == ".." {
+				return fmt.Errorf("internal file %q escapes repo root", f)
+			}
+			internalSet[rel] = struct{}{}
+		}
+	}
+	return nil
+}
+
 // externalLabel returns two (path, version) pairs for one external module:
 //   - (labelPath, labelVersion) is the synthetic identity used as the hash
 //     key. The original import path drives this so user-facing references
 //     stay stable across replace directives.
 //   - (sumPath, sumVersion) is what to look up in go.sum. For versioned
 //     replace directives this is the *replacement* module, because go.sum
-//     is keyed by the replaced-with path. For local-directory replaces the
-//     pair is empty since go.sum has no entry to read.
+//     is keyed by the replaced-with path.
 //
-// Per resolver-go-local.md "replace は外部扱い", replace target contents are
-// not re-read; the synthetic labelVersion encodes the target path/version
-// so a change of replacement (e.g. `=> b v1` → `=> c v1`) flips the hash.
+// Local replace directives (`replace foo => ../foo`) are intentionally not
+// handled here — the caller rejects them upstream because they bypass go.sum
+// and would let replaced-module edits slip past the cache silently.
 func externalLabel(m *packages.Module) (labelPath, labelVersion, sumPath, sumVersion string) {
-	if m.Replace != nil {
-		if m.Replace.Version != "" {
-			// versioned replace: encode replacement path+version into the
-			// label, and use them for the go.sum lookup so an actual hash
-			// changes if the user upgrades the replacement target.
-			return m.Path,
-				"replace=" + m.Replace.Path + "@" + m.Replace.Version,
-				m.Replace.Path,
-				m.Replace.Version
-		}
-		// local-directory replace (`replace foo => ../foo`): no go.sum entry.
-		return m.Path, "replace=" + m.Replace.Path, "", ""
+	if m.Replace != nil && m.Replace.Version != "" {
+		// versioned replace: encode replacement path+version into the label,
+		// and use them for the go.sum lookup so the hash changes when the
+		// user upgrades the replacement target.
+		return m.Path,
+			"replace=" + m.Replace.Path + "@" + m.Replace.Version,
+			m.Replace.Path,
+			m.Replace.Version
 	}
 	return m.Path, m.Version, m.Path, m.Version
 }

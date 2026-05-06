@@ -120,7 +120,9 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 |---|---|---|
 | stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断キャッシュを壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
 | 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` + `pkg.OtherFiles` のファイル本体を SHA256 ( `IgnoredFiles` で GOOS / GOARCH / build-tag に非依存、 `OtherFiles` で `.s` / `.c` / `.cc` / `.syso` 等の非 Go ソース変更も捕捉) |
-| 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash ( replace ディレクティブも外部扱い)。 go.sum は **load された main module の `Module.GoMod` の隣** から読む ( nested-module monorepo で repo root の go.sum を引かないため) |
+| local replace 依存 | `pkg.Module.Replace != nil && Replace.Version == ""` | 内部コードと同じ hash 戦略 ( replace 先 directory の `GoFiles + EmbedFiles + IgnoredFiles + OtherFiles` をファイル本体で SHA256)。 go.sum で守られないため content hash が必須。 ただし replace 先が repoRoot 外を指す場合は OS 横断 cache を壊すため fail する |
+| versioned replace 依存 | `pkg.Module.Replace != nil && Replace.Version != ""` | 外部パッケージ扱い。 label は元 import path + `replace=<replace path>@<replace version>` で置換先まで含めて識別。 go.sum lookup は **置換先** の `Replace.Path` / `Replace.Version` で引く ( go.sum はその key で記録されるため) |
+| 外部パッケージ ( 通常依存) | `pkg.Module` が外部 module を指す ( replace なし) | `module path@version` 文字列 + go.sum 該当行の hash。 go.sum は **load された全 main module の `Module.GoMod` の隣** から読み、 連結する ( nested-module monorepo / `go.work` で複数の main module が visible なケースでも全 module の go.sum 行が引けるように) |
 
 ```go
 for each pkg in transitive(pkgs):
@@ -129,17 +131,28 @@ for each pkg in transitive(pkgs):
         // OS 横断キャッシュを破壊するため)。 Go toolchain bump は
         // tools: [{exec: ["go", "version"], extract: ...}] を併記して捕捉する。
     } else if pkg.Module.Main {
-        // 内部コード: ファイル本体を hash
-        // GoFiles + EmbedFiles ( //go:embed 対象) + IgnoredFiles
-        // ( 別 GOOS / build-tag のため現 build context で除外されたソース)
+        // 内部コード: ファイル本体を hash。 GoFiles + EmbedFiles ( //go:embed 対象)
+        // + IgnoredFiles ( 別 GOOS / build-tag のため現 build context で除外
+        // されたソース) + OtherFiles ( .s / .c / .cc / .syso 等の非 Go ソース)
         // を全部含めて、 host 環境非依存に hash する。 _test.go は除外。
-        for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles {
+        for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles + pkg.OtherFiles {
+            hash.Write(readFile(f))
+        }
+    } else if pkg.Module.Replace != nil && pkg.Module.Replace.Version == "" {
+        // local replace ( e.g. `replace foo => ../local`):
+        // go.sum で保護されないため、 内部コードと同じく置換先 directory の
+        // ファイル本体を hash する。 ただし replace 先が repoRoot 外を指す場合
+        // ( 絶対 path / `../sibling-repo` 等) は dev machine ごとに path が
+        // 異なって OS 横断 cache が破れるため fail する ( future work)。
+        for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles + pkg.OtherFiles {
             hash.Write(readFile(f))
         }
     } else {
-        // 外部パッケージ: version + go.sum 該当行で代用
-        hash.Write([]byte(pkg.Module.Path + "@" + pkg.Module.Version))
-        hash.Write([]byte(lookupGoSum(pkg.Module.Path, pkg.Module.Version)))
+        // 外部パッケージ ( 通常依存 or versioned replace): version + go.sum
+        // 該当行で代用。 versioned replace は label に置換先 path/version を
+        // 含めて識別、 go.sum lookup も置換先で引く。
+        hash.Write([]byte(label(pkg.Module)))
+        hash.Write([]byte(lookupGoSum(combinedGoSum, sumPath, sumVersion)))
     }
 ```
 
@@ -191,6 +204,7 @@ go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
 ## Open Questions
 
 - ~~`go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか~~ → [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一済み ( 両形式とも spec での明示宣言を必須とする)
-- ~~transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)~~ → 外部扱いに確定 ( replace 先のファイル本体は再読しない、 `Replace.Version` または `replace=<path>` ラベルで version diversity を表現)
+- ~~transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)~~ → versioned replace (`=> path version`) は外部扱い ( 置換先 path/version で go.sum lookup)、 local replace (`=> ../foo`) は内部扱い ( 置換先 directory のファイルを内部コードと同じく content hash)
+- ~~`go.work` で複数 repo-local module を束ねる構成~~ → サポート済み: `packages.Visit` で全 main module を見つけ、 各 module dir の go.sum を連結して lookup の母集団とする
 - 内製 protoc plugin が `go.mod` の `internal/...` パッケージに依存する場合の subset hash 戦略
-- `go.work` で複数 repo-local module を束ねる構成は **現状サポート外**。 transitive 依存が複数 main module にまたがると、 sibling module の go.sum lookup を取りこぼし得るため、 lister は複数の `Module.Main` を検出した時点で fail する。 必要になった段階で「全 main module の go.sum を結合する」拡張を ADR で起こす
+- repoRoot 外を指す local replace ( 絶対 path / `../sibling-repo` 等) は dev machine ごとに path が変わるため、 現状は fail させる。 必要になった段階で「外部 directory を sandbox に正規化して hash する」戦略を ADR で起こす

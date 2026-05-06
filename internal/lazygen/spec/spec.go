@@ -95,10 +95,12 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 		d.Extract = raw.Extract
 		return nil
 	case hasGoLocal:
-		// `./` prefix is required: it disambiguates a relative repo path from a Go
-		// module import path and matches the form expected by `go run` / `go/packages`.
-		if !strings.HasPrefix(raw.GoLocal, "./") {
-			return fmt.Errorf("tools entry: go-local must start with %q, got %q", "./", raw.GoLocal)
+		// `./` prefix or a bare "." is required: this disambiguates a relative
+		// repo path from a Go module import path and matches the forms expected
+		// by `go run` / `go/packages` (e.g. `go run .` for a generator whose
+		// main package is the spec directory itself).
+		if raw.GoLocal != "." && !strings.HasPrefix(raw.GoLocal, "./") {
+			return fmt.Errorf("tools entry: go-local must be %q or start with %q, got %q", ".", "./", raw.GoLocal)
 		}
 		d.Resolver = "go-local"
 		d.Entry = raw.GoLocal

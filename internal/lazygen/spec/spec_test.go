@@ -247,6 +247,28 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "go-local entry of bare . is accepted",
+			yaml: `commands:
+  - name: gen
+    cmd: go run .
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - go-local: .
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"go", "run", "."},
+					Inputs:  []string{"a"},
+					Outputs: []string{"b"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "go-local", Entry: "."},
+					},
+				}},
+			},
+		},
+		{
 			name: "empty commands fails",
 			yaml: `commands: []
 `,

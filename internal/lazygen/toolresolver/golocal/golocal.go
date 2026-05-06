@@ -93,8 +93,8 @@ func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, er
 	if declared.Entry == "" {
 		return "", errors.New("go-local: declared entry is required")
 	}
-	if !strings.HasPrefix(declared.Entry, "./") {
-		return "", fmt.Errorf("go-local: declared entry must start with %q, got %q", "./", declared.Entry)
+	if declared.Entry != "." && !strings.HasPrefix(declared.Entry, "./") {
+		return "", fmt.Errorf("go-local: declared entry must be %q or start with %q, got %q", ".", "./", declared.Entry)
 	}
 	return declared.Entry, nil
 }

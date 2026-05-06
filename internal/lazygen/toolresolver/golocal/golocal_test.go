@@ -92,6 +92,31 @@ func TestResolver_FailsOnDeclaredEntryWithoutLeadingDotSlash(t *testing.T) {
 	}
 }
 
+// TestResolver_AcceptsDotEntry guards that `go-local: .` (a generator whose
+// main package is the spec directory itself, invoked as `go run .`) is
+// resolvable end-to-end. Without this, that common pattern would be silently
+// unrepresentable in spec.
+func TestResolver_AcceptsDotEntry(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"main.go"}}}
+
+	versions, err := golocal.New(root, stub).Resolve(
+		context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "."},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if stub.gotEntry != "." {
+		t.Errorf("lister received entry %q, want %q", stub.gotEntry, ".")
+	}
+	if !strings.HasPrefix(versions[0].Version, "go-local:.@sha256:") {
+		t.Errorf("Version = %q, want go-local:.@sha256:...", versions[0].Version)
+	}
+}
+
 // TestResolver_PassesSpecDirToLister guards that the resolver propagates the
 // spec directory verbatim, so the lister can run packages.Load inside the
 // spec's working module (which is what makes nested-module monorepos work).

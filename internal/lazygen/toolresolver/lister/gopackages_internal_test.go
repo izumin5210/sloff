@@ -3,18 +3,19 @@ package lister
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/packages"
 )
 
-// TestReadGoSumForMainModule_ReadsFromLoadedModuleDir guards the fix for the
+// TestReadGoSumForMainModules_ReadsFromLoadedModuleDir guards the fix for the
 // nested-module go.sum bug: the lister must fingerprint external deps against
 // the go.sum that sits next to the *loaded* go.mod, not against repoRoot/go.sum.
 // Without this, bumping a dependency in submodule/ would leave tools_hash
 // unchanged and let lazygen serve stale outputs.
-func TestReadGoSumForMainModule_ReadsFromLoadedModuleDir(t *testing.T) {
+func TestReadGoSumForMainModules_ReadsFromLoadedModuleDir(t *testing.T) {
 	repoRoot := t.TempDir()
 	subDir := filepath.Join(repoRoot, "submodule")
 	if err := os.MkdirAll(subDir, 0o755); err != nil {
@@ -38,16 +39,16 @@ func TestReadGoSumForMainModule_ReadsFromLoadedModuleDir(t *testing.T) {
 		},
 	}
 
-	got, err := readGoSumForMainModule([]*packages.Package{pkg})
+	got, err := readGoSumForMainModules([]*packages.Package{pkg})
 	if err != nil {
-		t.Fatalf("readGoSumForMainModule: %v", err)
+		t.Fatalf("readGoSumForMainModules: %v", err)
 	}
 	if string(got) != "SUBMODULE\n" {
 		t.Errorf("read %q, want %q (must follow Module.GoMod, not repoRoot/go.sum)", got, "SUBMODULE\n")
 	}
 }
 
-func TestReadGoSumForMainModule_MissingGoSumIsNotAnError(t *testing.T) {
+func TestReadGoSumForMainModules_MissingGoSumIsNotAnError(t *testing.T) {
 	repoRoot := t.TempDir()
 	pkg := &packages.Package{
 		ID: "example.test/x",
@@ -57,41 +58,56 @@ func TestReadGoSumForMainModule_MissingGoSumIsNotAnError(t *testing.T) {
 			GoMod: filepath.Join(repoRoot, "go.mod"),
 		},
 	}
-	got, err := readGoSumForMainModule([]*packages.Package{pkg})
+	got, err := readGoSumForMainModules([]*packages.Package{pkg})
 	if err != nil {
-		t.Fatalf("readGoSumForMainModule: %v", err)
+		t.Fatalf("readGoSumForMainModules: %v", err)
 	}
 	if got != nil {
 		t.Errorf("read %q, want nil (missing go.sum is legitimate)", got)
 	}
 }
 
-func TestReadGoSumForMainModule_NoMainModuleReturnsEmpty(t *testing.T) {
+func TestReadGoSumForMainModules_NoMainModuleReturnsEmpty(t *testing.T) {
 	pkg := &packages.Package{
 		ID:     "example.test/no-module",
 		Module: nil, // stdlib-style package
 	}
-	got, err := readGoSumForMainModule([]*packages.Package{pkg})
+	got, err := readGoSumForMainModules([]*packages.Package{pkg})
 	if err != nil {
-		t.Fatalf("readGoSumForMainModule: %v", err)
+		t.Fatalf("readGoSumForMainModules: %v", err)
 	}
 	if got != nil {
 		t.Errorf("read %q, want nil (no main module visible)", got)
 	}
 }
 
-// TestReadGoSumForMainModule_MultipleMainModulesError guards the explicit
-// fail-fast for go.work multi-module workspaces. Reading only the first
-// module's go.sum would silently drop checksums for sibling modules and let
-// dependency bumps slip past tools_hash. Until proper go.work support lands,
-// the resolver must abort instead of returning a partial fingerprint.
-func TestReadGoSumForMainModule_MultipleMainModulesError(t *testing.T) {
+// TestReadGoSumForMainModules_ConcatenatesGoWorkSiblings guards multi-module
+// go.work support: when packages.Load surfaces two repo-local mains, both
+// modules' go.sum lines must end up in the result so that bumping a dep in
+// either module flips tools_hash.
+func TestReadGoSumForMainModules_ConcatenatesGoWorkSiblings(t *testing.T) {
+	repoRoot := t.TempDir()
+	dirA := filepath.Join(repoRoot, "a")
+	dirB := filepath.Join(repoRoot, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "go.sum"), []byte("MOD-A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "go.sum"), []byte("MOD-B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	a := &packages.Package{
 		ID: "example.test/a/cmd/tool",
 		Module: &packages.Module{
 			Main:  true,
 			Path:  "example.test/a",
-			GoMod: filepath.Join(t.TempDir(), "a", "go.mod"),
+			GoMod: filepath.Join(dirA, "go.mod"),
 		},
 	}
 	b := &packages.Package{
@@ -99,18 +115,54 @@ func TestReadGoSumForMainModule_MultipleMainModulesError(t *testing.T) {
 		Module: &packages.Module{
 			Main:  true,
 			Path:  "example.test/b",
-			GoMod: filepath.Join(t.TempDir(), "b", "go.mod"),
+			GoMod: filepath.Join(dirB, "go.mod"),
 		},
 	}
-	// Wire the second main as a transitive import of the first.
 	a.Imports = map[string]*packages.Package{b.ID: b}
 
-	_, err := readGoSumForMainModule([]*packages.Package{a})
-	if err == nil {
-		t.Fatal("expected error when multiple main modules are visible")
+	got, err := readGoSumForMainModules([]*packages.Package{a})
+	if err != nil {
+		t.Fatalf("readGoSumForMainModules: %v", err)
 	}
-	if !strings.Contains(err.Error(), "multiple main modules") {
-		t.Errorf("error %q must explain the cause", err)
+	if !strings.Contains(string(got), "MOD-A") || !strings.Contains(string(got), "MOD-B") {
+		t.Errorf("got %q, must contain go.sum lines from both workspace mains", got)
+	}
+}
+
+// TestReadGoSumForMainModules_TolerateMissingSiblingGoSum: if one main module
+// has a go.sum and the other doesn't, the result is the union of what exists.
+// Missing files must not abort the whole load.
+func TestReadGoSumForMainModules_TolerateMissingSiblingGoSum(t *testing.T) {
+	repoRoot := t.TempDir()
+	dirA := filepath.Join(repoRoot, "a")
+	dirB := filepath.Join(repoRoot, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "go.sum"), []byte("ONLY-A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// dirB has no go.sum on purpose.
+
+	a := &packages.Package{
+		ID:     "example.test/a",
+		Module: &packages.Module{Main: true, Path: "example.test/a", GoMod: filepath.Join(dirA, "go.mod")},
+	}
+	b := &packages.Package{
+		ID:     "example.test/b",
+		Module: &packages.Module{Main: true, Path: "example.test/b", GoMod: filepath.Join(dirB, "go.mod")},
+	}
+	a.Imports = map[string]*packages.Package{b.ID: b}
+
+	got, err := readGoSumForMainModules([]*packages.Package{a})
+	if err != nil {
+		t.Fatalf("readGoSumForMainModules: %v", err)
+	}
+	if string(got) != "ONLY-A\n" {
+		t.Errorf("got %q, want ONLY-A\\n", got)
 	}
 }
 
@@ -168,22 +220,80 @@ func TestExternalLabel_VersionedReplaceLooksUpGoSumByReplacementPath(t *testing.
 	}
 }
 
-func TestExternalLabel_LocalReplaceHasNoGoSumLookup(t *testing.T) {
-	m := &packages.Module{
-		Path: "example.com/a",
-		Replace: &packages.Module{
-			Path: "../local-fork", // no Version → local-directory replace
+// TestWalk_LocalReplaceHashesReplacedSourcesAsInternal guards that local
+// replace directives (`replace example.com/a => ../local`) are folded into
+// the internal-file set rather than treated as external label-only entries.
+// Without this, edits to the replaced module would leave tools_hash unchanged
+// even though `go run` rebuilds against the new code.
+func TestWalk_LocalReplaceHashesReplacedSourcesAsInternal(t *testing.T) {
+	repoRoot := t.TempDir()
+	replacedDir := filepath.Join(repoRoot, "vendor-fork", "pkg")
+	if err := os.MkdirAll(replacedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcPath := filepath.Join(replacedDir, "lib.go")
+	if err := os.WriteFile(srcPath, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pkg := &packages.Package{
+		ID:         "example.com/upstream/pkg",
+		GoFiles:    []string{srcPath},
+		EmbedFiles: nil,
+		Module: &packages.Module{
+			Path:    "example.com/upstream",
+			Version: "v0.0.0",
+			Replace: &packages.Module{
+				Path: "../vendor-fork", // no Version → local-directory replace
+				Dir:  filepath.Join(repoRoot, "vendor-fork"),
+			},
 		},
 	}
-	labelPath, labelVersion, sumPath, sumVersion := externalLabel(m)
-	if labelPath != "example.com/a" {
-		t.Errorf("labelPath = %q, want example.com/a", labelPath)
+	l := &goPackagesLister{repoRoot: repoRoot}
+	listing, err := l.walk([]*packages.Package{pkg}, nil)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
-	if !strings.Contains(labelVersion, "../local-fork") {
-		t.Errorf("labelVersion = %q must encode the replacement path so directive changes flip the hash", labelVersion)
+	want := "vendor-fork/pkg/lib.go"
+	if !slices.Contains(listing.InternalFiles, want) {
+		t.Errorf("InternalFiles = %v, must include %q", listing.InternalFiles, want)
 	}
-	if sumPath != "" || sumVersion != "" {
-		t.Errorf("local replace must skip go.sum lookup, got sumPath=%q sumVersion=%q", sumPath, sumVersion)
+	if len(listing.ExternalModules) != 0 {
+		t.Errorf("ExternalModules = %v, must be empty for local replace (handled as internal)", listing.ExternalModules)
+	}
+}
+
+// TestWalk_LocalReplaceRejectsOutsideRepoRoot guards the boundary: if a local
+// replace points outside repoRoot (absolute path or `../sibling-repo`), the
+// resulting file paths would vary per developer machine and break OS-neutral
+// cache sharing. Refuse to fingerprint instead of recording per-machine paths.
+func TestWalk_LocalReplaceRejectsOutsideRepoRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	outside := t.TempDir() // a separate tempdir, definitely outside repoRoot
+	srcPath := filepath.Join(outside, "lib.go")
+	if err := os.WriteFile(srcPath, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pkg := &packages.Package{
+		ID:      "example.com/upstream/pkg",
+		GoFiles: []string{srcPath},
+		Module: &packages.Module{
+			Path:    "example.com/upstream",
+			Version: "v0.0.0",
+			Replace: &packages.Module{
+				Path: outside,
+				Dir:  outside,
+			},
+		},
+	}
+	l := &goPackagesLister{repoRoot: repoRoot}
+	_, err := l.walk([]*packages.Package{pkg}, nil)
+	if err == nil {
+		t.Fatal("expected error when local replace target escapes repo root")
+	}
+	if !strings.Contains(err.Error(), "local replace") || !strings.Contains(err.Error(), "escapes repo root") {
+		t.Errorf("error %q must explain the cause", err)
 	}
 }
 

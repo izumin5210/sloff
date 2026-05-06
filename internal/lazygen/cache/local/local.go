@@ -134,6 +134,6 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 }
 
 func (s *Storage) pathFor(key cache.Key) string {
-	specOS := filepath.FromSlash(path.Clean("/"+key.SpecRelpath))[1:] // tolerate empty / leading slash
+	specOS := filepath.FromSlash(path.Clean("/" + key.SpecRelpath))[1:] // tolerate empty / leading slash
 	return filepath.Join(s.repoRoot, ".lazygen", "cache", specOS, key.TaskID, key.InputHash+".yml")
 }

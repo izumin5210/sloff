@@ -13,6 +13,12 @@ jobs:
         command:
           - name: build
             run: go build -v ./cmd/lazygen
+          - name: fix
+            run: go fix -v ./...
+          - name: format
+            run: go tool gofumpt -l -w -- .
+          - name: lint
+            run: go vet -v ./...
           - name: test
             run: go test -v ./...
       fail-fast: false
@@ -24,8 +30,10 @@ jobs:
     - uses: actions/setup-go@v6
       with:
         go-version: '1.26'
-    - name: test
-      run: go test -v ./...
+    - name: ${{ matrix.command.name }}
+      run: ${{ matrix.command.run }}
+    - name: Check for uncommitted changes
+      run: git diff --exit-code
 
   status-check:
     runs-on: ubuntu-latest

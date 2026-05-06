@@ -37,10 +37,10 @@ var fixedClock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
 type step func(t *testing.T, h *harness)
 
 type harness struct {
-	t            *testing.T
-	caseDir      string // testdata/e2e/runner/<name>
-	workdir      string // freshly-copied tempdir initialised from <caseDir>/initial
-	expectedDir  string // <caseDir>/expected
+	t           *testing.T
+	caseDir     string // testdata/e2e/runner/<name>
+	workdir     string // freshly-copied tempdir initialised from <caseDir>/initial
+	expectedDir string // <caseDir>/expected
 }
 
 func runE2E(t *testing.T, name string, steps ...step) {
@@ -213,7 +213,8 @@ func TestRunner_SecondRunHits(t *testing.T) {
 }
 
 func TestRunner_InputChangeInvalidates(t *testing.T) {
-	runE2E(t, "input-change-invalidates",
+	runE2E(
+		t, "input-change-invalidates",
 		runStep(),
 		writeStep("spec/input.txt", "world"),
 		runStep(),
@@ -221,7 +222,8 @@ func TestRunner_InputChangeInvalidates(t *testing.T) {
 }
 
 func TestRunner_ToolVersionBumpInvalidates(t *testing.T) {
-	runE2E(t, "tool-version-bump-invalidates",
+	runE2E(
+		t, "tool-version-bump-invalidates",
 		runStep(),
 		writeStep("spec/lazygen.yml", `commands:
   - name: copy
@@ -237,7 +239,8 @@ func TestRunner_ToolVersionBumpInvalidates(t *testing.T) {
 }
 
 func TestRunner_OutputDriftInvalidates(t *testing.T) {
-	runE2E(t, "output-drift-invalidates",
+	runE2E(
+		t, "output-drift-invalidates",
 		runStep(),
 		writeStep("spec/output.txt", "tampered"),
 		runStep(),

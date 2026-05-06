@@ -42,4 +42,4 @@ When adding E2E tests, create a dedicated fixture directory per test case under 
     - `Why`: reason for the change.
     - `Summary`: short overview of what changed.
 - If `Why` is unknown, ask the user before finalizing the PR description.
-- Write only about the PR's actual content. Do not narrate meta-process such as "going forward we will do X" or restate rules that the PR adds to CLAUDE.md / other docs — those rules apply by virtue of being merged, so repeating them in the PR body is noise.
+- Before writing a sentence (in PR descriptions, code comments, docs, etc.), ask "what does the reader lose if I delete this?" If nothing, delete it. The diff / code / source artifact is already there; prose should add what the artifact alone does not convey, not narrate it.

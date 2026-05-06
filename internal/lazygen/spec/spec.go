@@ -115,6 +115,12 @@ func validate(f *File) error {
 		if len(c.Outputs) == 0 {
 			return fmt.Errorf("commands[%d] (%s): outputs is required", i, c.Name)
 		}
+		if len(c.Tools) == 0 {
+			// tools is required because lazygen mixes the resolved tool versions into the
+			// cache key. Without it, upgrading a generator binary cannot invalidate the
+			// cache and stale outputs would be served indefinitely.
+			return fmt.Errorf("commands[%d] (%s): tools is required", i, c.Name)
+		}
 		if _, dup := seen[c.Name]; dup {
 			return fmt.Errorf("duplicate task name %q within the same lazygen.yml", c.Name)
 		}

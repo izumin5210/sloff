@@ -70,8 +70,5 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 func buildResolvers(root string) *toolresolver.Registry {
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(root))
-	reg.SetFallback(func(cmd []string) {
-		fmt.Fprintf(os.Stderr, "lazygen: no resolver matched cmd %v; tools_hash falls back to cmd-string only\n", cmd)
-	})
 	return reg
 }

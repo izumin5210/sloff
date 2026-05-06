@@ -29,6 +29,8 @@ func TestParse(t *testing.T) {
     outputs:
       - "**/*.pb.go"
       - "**/*.connect.go"
+    tools:
+      - exec: ["buf", "--version"]
 `,
 			want: &spec.File{
 				Commands: []spec.Command{{
@@ -36,6 +38,9 @@ func TestParse(t *testing.T) {
 					Cmd:     []string{"buf", "generate", "--template", "buf.gen.yaml"},
 					Inputs:  []string{"**/*.proto", "buf.gen.yaml"},
 					Outputs: []string{"**/*.pb.go", "**/*.connect.go"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"buf", "--version"}},
+					},
 				}},
 			},
 		},
@@ -46,6 +51,8 @@ func TestParse(t *testing.T) {
     cmd: ["foo", "bar baz"]
     inputs: ["a"]
     outputs: ["b"]
+    tools:
+      - exec: ["foo", "--version"]
 `,
 			want: &spec.File{
 				Commands: []spec.Command{{
@@ -53,6 +60,9 @@ func TestParse(t *testing.T) {
 					Cmd:     []string{"foo", "bar baz"},
 					Inputs:  []string{"a"},
 					Outputs: []string{"b"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"foo", "--version"}},
+					},
 				}},
 			},
 		},
@@ -199,12 +209,16 @@ func TestDiscover(t *testing.T) {
     cmd: do-a
     inputs: ["**/*.in"]
     outputs: ["**/*.out"]
+    tools:
+      - exec: ["do-a", "--version"]
 `)
 	mustWrite(t, filepath.Join(root, "nested", "b", "lazygen.yml"), `commands:
   - name: beta
     cmd: do-b
     inputs: ["**/*.in"]
     outputs: ["**/*.out"]
+    tools:
+      - exec: ["do-b", "--version"]
 `)
 	mustWrite(t, filepath.Join(root, "ignored", "other.yml"), "irrelevant")
 
@@ -233,12 +247,16 @@ func TestDiscover_DuplicateTaskAcrossSpecsAllowed(t *testing.T) {
     cmd: foo
     inputs: ["a.in"]
     outputs: ["a.out"]
+    tools:
+      - exec: ["foo", "--version"]
 `)
 	mustWrite(t, filepath.Join(root, "b", "lazygen.yml"), `commands:
   - name: gen
     cmd: bar
     inputs: ["b.in"]
     outputs: ["b.out"]
+    tools:
+      - exec: ["bar", "--version"]
 `)
 	got, err := spec.Discover(root, "**/lazygen.yml")
 	if err != nil {

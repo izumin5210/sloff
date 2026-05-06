@@ -1,0 +1,5 @@
+version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: 99999999999999999999999999999999
+    digest: shake256:bbb

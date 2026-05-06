@@ -7,6 +7,10 @@
 //   - every dep declared in a buf.yaml is recorded in the sibling buf.lock so
 //     `buf dep update` was run after the deps list was edited
 //
+// Parsing helpers (FindBufModuleRoot / LoadBufYAML / LoadBufLock /
+// StripDepVersion) live in the resolver package so the checker and the resolver
+// agree by construction; this package only contains preflight policy.
+//
 // The checker is constructed with the post-discovery spec list so that one Run
 // covers every buf subject in the repo. The Check call's specDir argument is
 // ignored because subjects are aggregated from the entire spec set, not scoped
@@ -15,15 +19,10 @@ package buf
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
-
-	yaml "github.com/goccy/go-yaml"
 
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
@@ -107,7 +106,7 @@ func (c *Checker) Check(_ context.Context, _ string) (preflight.Result, error) {
 		}
 		issues = append(issues, genIssues...)
 
-		moduleRoot, ok, err := c.findBufModuleRoot(s)
+		moduleRoot, ok, err := bufresolver.FindBufModuleRoot(c.repoRoot, s.SpecDir, s.GenPath)
 		if err != nil {
 			return preflight.Result{}, err
 		}
@@ -135,15 +134,9 @@ func (c *Checker) Check(_ context.Context, _ string) (preflight.Result, error) {
 // would also break the resolver, so failing the check loudly surfaces the
 // underlying spec problem instead of pretending the tools_hash is fine.
 func (c *Checker) lintBufGen(s subject) ([]preflight.Issue, error) {
-	full := filepath.Join(c.repoRoot, filepath.FromSlash(s.SpecDir), filepath.FromSlash(s.GenPath))
-	data, err := os.ReadFile(full)
+	doc, err := bufresolver.LoadBufGenYAML(c.repoRoot, s.SpecDir, s.GenPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path.Join(s.SpecDir, s.GenPath), err)
-	}
-
-	var doc bufGenDoc
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path.Join(s.SpecDir, s.GenPath), err)
+		return nil, fmt.Errorf("load %s: %w", path.Join(s.SpecDir, s.GenPath), err)
 	}
 
 	var issues []preflight.Issue
@@ -160,72 +153,32 @@ func (c *Checker) lintBufGen(s subject) ([]preflight.Issue, error) {
 	return issues, nil
 }
 
-// findBufModuleRoot walks up from the buf.gen.yaml's directory toward the repo
-// root looking for a buf.yaml. The buf module root may sit at the spec dir, a
-// subdirectory, or higher up; the first ancestor (or the dir itself) holding
-// buf.yaml is treated as authoritative. Returns false when no buf.yaml exists
-// anywhere on that chain — a legitimate setup if the repo doesn't use BSR
-// modules.
-//
-// Returned path is relative to repoRoot, OS-native.
-func (c *Checker) findBufModuleRoot(s subject) (string, bool, error) {
-	startRel := filepath.FromSlash(path.Join(s.SpecDir, path.Dir(s.GenPath)))
-	dir := startRel
-	for {
-		candidate := filepath.Join(c.repoRoot, dir, "buf.yaml")
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() {
-			return dir, true, nil
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return "", false, err
-		}
-
-		parent := filepath.Dir(dir)
-		// dir == "." means we reached the repo root; one more iteration would
-		// loop forever because filepath.Dir(".") is "." again.
-		if parent == dir || dir == "." {
-			return "", false, nil
-		}
-		dir = parent
-	}
-}
-
 // checkBufLock loads <moduleRoot>/buf.yaml and <moduleRoot>/buf.lock and
 // returns issues for every dep declared in buf.yaml that is missing from
 // buf.lock. An entirely-missing buf.lock when buf.yaml has at least one dep
 // is reported as a single issue (running `buf dep update` from scratch is
 // the right fix), rather than emitting one issue per dep.
 func (c *Checker) checkBufLock(moduleRoot string) ([]preflight.Issue, error) {
-	yamlPath := filepath.Join(c.repoRoot, moduleRoot, "buf.yaml")
-	yamlData, err := os.ReadFile(yamlPath)
+	bufYAML, ok, err := bufresolver.LoadBufYAML(c.repoRoot, moduleRoot)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), err)
+		return nil, fmt.Errorf("load %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), err)
 	}
-	var bufYAML bufYAMLDoc
-	if err := yaml.Unmarshal(yamlData, &bufYAML); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), err)
-	}
-	if len(bufYAML.Deps) == 0 {
+	if !ok || len(bufYAML.Deps) == 0 {
 		return nil, nil
 	}
 
-	lockPath := filepath.Join(c.repoRoot, moduleRoot, "buf.lock")
-	lockData, err := os.ReadFile(lockPath)
-	if errors.Is(err, fs.ErrNotExist) {
+	bufLock, lockExists, err := bufresolver.LoadBufLock(c.repoRoot, moduleRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.lock"), err)
+	}
+	if !lockExists {
 		return []preflight.Issue{{
 			Channel:    checkerName,
 			Detail:     fmt.Sprintf("%s declares deps but %s is missing", path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), path.Join(filepath.ToSlash(moduleRoot), "buf.lock")),
 			Suggestion: "buf dep update",
 		}}, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.lock"), err)
-	}
-	var bufLock bufLockDoc
-	if err := yaml.Unmarshal(lockData, &bufLock); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.lock"), err)
-	}
+
 	locked := map[string]struct{}{}
 	for _, d := range bufLock.Deps {
 		// buf.lock v2 uses `name`; v1 uses `remote/owner/repository`. We treat
@@ -238,7 +191,7 @@ func (c *Checker) checkBufLock(moduleRoot string) ([]preflight.Issue, error) {
 
 	var issues []preflight.Issue
 	for _, dep := range bufYAML.Deps {
-		base := stripVersion(dep)
+		base := bufresolver.StripDepVersion(dep)
 		if _, ok := locked[base]; ok {
 			continue
 		}
@@ -249,43 +202,4 @@ func (c *Checker) checkBufLock(moduleRoot string) ([]preflight.Issue, error) {
 		})
 	}
 	return issues, nil
-}
-
-// stripVersion drops a `:tag` suffix from a buf.yaml dep entry. buf accepts
-// both bare module identifiers and pinned ones; the lock keys on bare names,
-// so we normalise before comparing.
-func stripVersion(dep string) string {
-	for i := len(dep) - 1; i >= 0; i-- {
-		if dep[i] == ':' {
-			return dep[:i]
-		}
-		if dep[i] == '/' {
-			break
-		}
-	}
-	return dep
-}
-
-// bufGenDoc / bufYAMLDoc / bufLockDoc are the minimal projections of buf's
-// YAML schemas the checker reads. Fields we don't consume are dropped on
-// unmarshal so future schema additions parse silently.
-
-type bufGenDoc struct {
-	Plugins []bufGenPlugin `yaml:"plugins"`
-}
-
-type bufGenPlugin struct {
-	Remote string `yaml:"remote"`
-}
-
-type bufYAMLDoc struct {
-	Deps []string `yaml:"deps"`
-}
-
-type bufLockDoc struct {
-	Deps []bufLockDep `yaml:"deps"`
-}
-
-type bufLockDep struct {
-	Name string `yaml:"name"`
 }

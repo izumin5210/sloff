@@ -1,7 +1,9 @@
-// Package buf implements toolresolver.Resolver for the remote-plugin slice of a
-// buf.gen.yaml. It only emits ToolVersion entries for `remote:` plugins; the buf
-// binary itself, `protoc_builtin:` plugins, and `local:` plugins are declared
-// separately in spec tools[] and resolved by their own resolvers (per ADR-0006).
+// Package buf implements toolresolver.Resolver for the buf-driven slice of a
+// codegen task: it emits ToolVersion entries for `remote:` plugins declared in
+// buf.gen.yaml and for BSR module dependencies declared in the surrounding
+// buf.yaml / buf.lock pair. The buf binary, `protoc_builtin:` plugins, and
+// `local:` plugins are declared separately in spec tools[] and resolved by
+// their own resolvers (per ADR-0006).
 //
 // Hashing strategy:
 //   - parse the spec-relative buf.gen.yaml (v2; no v1 support today)
@@ -11,15 +13,26 @@
 //   - emit `buf-remote:<host>/<owner>/<name>@<version>+rev<revision>` so that
 //     repackaged-but-same-version BSR plugins still invalidate the cache via
 //     their `revision:` field
+//   - walk up from the buf.gen.yaml directory to find buf.yaml; for every
+//     dep declared there, look up the resolved commit in the sibling buf.lock
+//     and emit `buf-dep:<host>/<owner>/<name>@<commit>` so that `buf dep
+//     update` invalidates downstream caches even though the BSR module's name
+//     hasn't changed
+//
+// This package also exports the buf.yaml / buf.lock / module-root helpers so
+// the preflight checker can share the same parsing surface.
 package buf
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	yaml "github.com/goccy/go-yaml"
@@ -30,7 +43,7 @@ import (
 // Name is the resolver identifier referenced by spec tools[] entries.
 const Name = "buf"
 
-// Resolver resolves remote plugin versions declared in a buf.gen.yaml.
+// Resolver resolves remote plugin and BSR dep versions for a buf.gen.yaml.
 type Resolver struct {
 	repoRoot string
 }
@@ -58,14 +71,15 @@ func (r *Resolver) Resolve(_ context.Context, specDir string, _ []string, declar
 	}
 
 	rel := filepath.FromSlash(declared.BufGenPath)
+	bufGenLabel := filepath.Join(specDir, rel)
 	full := filepath.Join(r.repoRoot, specDir, rel)
 	data, err := os.ReadFile(full)
 	if err != nil {
-		return nil, fmt.Errorf("buf: read %s: %w", filepath.Join(specDir, rel), err)
+		return nil, fmt.Errorf("buf: read %s: %w", bufGenLabel, err)
 	}
 	doc, err := parseBufGen(data)
 	if err != nil {
-		return nil, fmt.Errorf("buf: parse %s: %w", filepath.Join(specDir, rel), err)
+		return nil, fmt.Errorf("buf: parse %s: %w", bufGenLabel, err)
 	}
 
 	versions := make([]toolresolver.ToolVersion, 0, len(doc.Plugins))
@@ -75,7 +89,7 @@ func (r *Resolver) Resolve(_ context.Context, specDir string, _ []string, declar
 		}
 		ref, err := parseRemote(plugin.Remote)
 		if err != nil {
-			return nil, fmt.Errorf("buf: %s plugins[%d]: %w", filepath.Join(specDir, rel), i, err)
+			return nil, fmt.Errorf("buf: %s plugins[%d]: %w", bufGenLabel, i, err)
 		}
 		identity := ref.Host + "/" + ref.Owner + "/" + ref.Name
 		versions = append(versions, toolresolver.ToolVersion{
@@ -84,6 +98,84 @@ func (r *Resolver) Resolve(_ context.Context, specDir string, _ []string, declar
 			Version: fmt.Sprintf("buf-remote:%s@%s+rev%d", identity, ref.Version, plugin.Revision),
 		})
 	}
+
+	depVersions, err := r.resolveBSRDeps(specDir, declared.BufGenPath)
+	if err != nil {
+		return nil, err
+	}
+	versions = append(versions, depVersions...)
+
+	return versions, nil
+}
+
+// resolveBSRDeps walks up from the buf.gen.yaml's directory looking for a
+// buf.yaml; if found, every dep declared there is paired with a buf.lock entry
+// and emitted as buf-dep:<host>/<owner>/<name>@<commit>. The walk anchors at
+// the buf.gen.yaml directory rather than the spec dir because nothing prevents
+// the spec dir from being deeper than the buf module root (the common case is
+// they coincide, but ad-hoc placements should still resolve correctly).
+//
+// Errors during this step are surfaced as resolver errors rather than silent
+// no-ops because trusting the cache requires every declared dep to map to a
+// known commit; a half-locked module would mean a bumped buf.yaml dep silently
+// shares a cache entry with the previous resolution.
+func (r *Resolver) resolveBSRDeps(specDir, bufGenPath string) ([]toolresolver.ToolVersion, error) {
+	moduleRoot, ok, err := FindBufModuleRoot(r.repoRoot, specDir, bufGenPath)
+	if err != nil {
+		return nil, fmt.Errorf("buf: find module root: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	bufYAML, _, err := LoadBufYAML(r.repoRoot, moduleRoot)
+	if err != nil {
+		return nil, fmt.Errorf("buf: load %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), err)
+	}
+	if bufYAML == nil || len(bufYAML.Deps) == 0 {
+		return nil, nil
+	}
+
+	bufLock, lockExists, err := LoadBufLock(r.repoRoot, moduleRoot)
+	if err != nil {
+		return nil, fmt.Errorf("buf: load %s: %w", path.Join(filepath.ToSlash(moduleRoot), "buf.lock"), err)
+	}
+	if !lockExists {
+		return nil, fmt.Errorf("buf: %s declares deps but %s is missing; run `buf dep update`",
+			path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"),
+			path.Join(filepath.ToSlash(moduleRoot), "buf.lock"))
+	}
+
+	locked := make(map[string]BufLockDep, len(bufLock.Deps))
+	for _, d := range bufLock.Deps {
+		if d.Name != "" {
+			locked[d.Name] = d
+		}
+	}
+
+	versions := make([]toolresolver.ToolVersion, 0, len(bufYAML.Deps))
+	for _, dep := range bufYAML.Deps {
+		base := StripDepVersion(dep)
+		entry, ok := locked[base]
+		if !ok {
+			return nil, fmt.Errorf("buf: %s declares dep %q but %s has no matching entry; run `buf dep update`",
+				path.Join(filepath.ToSlash(moduleRoot), "buf.yaml"), dep,
+				path.Join(filepath.ToSlash(moduleRoot), "buf.lock"))
+		}
+		if entry.Commit == "" {
+			return nil, fmt.Errorf("buf: %s entry for %q has empty commit; run `buf dep update`",
+				path.Join(filepath.ToSlash(moduleRoot), "buf.lock"), base)
+		}
+		versions = append(versions, toolresolver.ToolVersion{
+			Name:    base,
+			Source:  "buf-dep:" + base,
+			Version: fmt.Sprintf("buf-dep:%s@%s", base, entry.Commit),
+		})
+	}
+	// Sort so that deps appear in a stable order regardless of how the user
+	// wrote buf.yaml; the runner's tools_hash sort would catch reorderings
+	// anyway, but stabilising here keeps generator_version_snapshot readable.
+	sort.Slice(versions, func(i, j int) bool { return versions[i].Name < versions[j].Name })
 	return versions, nil
 }
 
@@ -201,4 +293,129 @@ type Plugin struct {
 	ProtocBuiltin string
 	Remote        string
 	Revision      int
+}
+
+// FindBufModuleRoot walks up from the directory containing bufGenPath toward
+// the repo root looking for a buf.yaml. Returns the module root relative to
+// repoRoot (OS-native), or false when no buf.yaml is found anywhere on the
+// chain — a legitimate setup if the repo doesn't use BSR modules.
+//
+// Anchoring at the buf.gen.yaml's directory (not the spec dir) lets the resolver
+// and the preflight agree even when a spec dir is deeper than the module root.
+func FindBufModuleRoot(repoRoot, specDir, bufGenPath string) (string, bool, error) {
+	startRel := filepath.FromSlash(path.Join(filepath.ToSlash(specDir), path.Dir(bufGenPath)))
+	dir := startRel
+	for {
+		candidate := filepath.Join(repoRoot, dir, "buf.yaml")
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return dir, true, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", false, err
+		}
+
+		parent := filepath.Dir(dir)
+		// dir == "." means we reached the repo root; one more iteration would
+		// loop forever because filepath.Dir(".") is "." again.
+		if parent == dir || dir == "." {
+			return "", false, nil
+		}
+		dir = parent
+	}
+}
+
+// BufYAML is the public projection of buf.yaml's deps surface. Other fields
+// (modules, lint config, breaking config, etc.) are intentionally dropped so
+// schema additions in upstream buf parse silently for the parts we don't read.
+type BufYAML struct {
+	Deps []string
+}
+
+// LoadBufYAML reads and parses <repoRoot>/<moduleRoot>/buf.yaml. The second
+// return value reports whether the file existed; (nil, false, nil) means
+// "no buf.yaml here" so callers can treat that as a benign signal rather than
+// an error.
+func LoadBufYAML(repoRoot, moduleRoot string) (*BufYAML, bool, error) {
+	full := filepath.Join(repoRoot, moduleRoot, "buf.yaml")
+	data, err := os.ReadFile(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var raw bufYAMLDoc
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, false, err
+	}
+	return &BufYAML{Deps: raw.Deps}, true, nil
+}
+
+type bufYAMLDoc struct {
+	Deps []string `yaml:"deps"`
+}
+
+// BufLock and BufLockDep are the public projection of buf.lock entries used
+// by both the resolver (for hashing dep commits) and the preflight checker
+// (for verifying every buf.yaml dep is locked).
+type BufLock struct {
+	Deps []BufLockDep
+}
+
+// BufLockDep mirrors one buf.lock v2 entry. Digest is read alongside Commit
+// because both surface drift between consecutive `buf dep update` runs even
+// when one of them is absent in older lockfiles.
+type BufLockDep struct {
+	Name   string
+	Commit string
+	Digest string
+}
+
+// LoadBufLock reads and parses <repoRoot>/<moduleRoot>/buf.lock. Returns
+// (nil, false, nil) when the file doesn't exist; callers decide whether
+// missing-when-deps-declared is an issue.
+func LoadBufLock(repoRoot, moduleRoot string) (*BufLock, bool, error) {
+	full := filepath.Join(repoRoot, moduleRoot, "buf.lock")
+	data, err := os.ReadFile(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var raw bufLockDoc
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, false, err
+	}
+	out := &BufLock{Deps: make([]BufLockDep, len(raw.Deps))}
+	for i, d := range raw.Deps {
+		out.Deps[i] = BufLockDep{Name: d.Name, Commit: d.Commit, Digest: d.Digest}
+	}
+	return out, true, nil
+}
+
+type bufLockDoc struct {
+	Deps []bufLockDep `yaml:"deps"`
+}
+
+type bufLockDep struct {
+	Name   string `yaml:"name"`
+	Commit string `yaml:"commit"`
+	Digest string `yaml:"digest"`
+}
+
+// StripDepVersion drops a `:tag` suffix from a buf.yaml dep entry. buf accepts
+// both bare module identifiers and tagged ones; the lock keys on bare names,
+// so callers normalise via this helper before comparing.
+func StripDepVersion(dep string) string {
+	for i := len(dep) - 1; i >= 0; i-- {
+		if dep[i] == ':' {
+			return dep[:i]
+		}
+		if dep[i] == '/' {
+			break
+		}
+	}
+	return dep
 }

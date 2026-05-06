@@ -333,6 +333,25 @@ plugins:
 	)
 }
 
+// TestRunner_Buf_DepBumpInvalidates guards the BSR-deps path: changing the
+// locked commit in buf.lock (i.e. running `buf dep update` and getting a new
+// pinned commit) must invalidate the cache. Without this hash material, a
+// dep upgrade that pulls in updated .proto schemas would silently reuse the
+// previous run's outputs.
+func TestRunner_Buf_DepBumpInvalidates(t *testing.T) {
+	runE2E(
+		t, "buf-dep-bump-invalidates",
+		runStep(),
+		writeStep("spec/buf.lock", `version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: 99999999999999999999999999999999
+    digest: shake256:bbb
+`),
+		runStep(),
+	)
+}
+
 // TestRunner_Buf_PreflightFailsOnUnpinnedRemote guards that the preflight
 // checker blocks a run before any task executes when buf.gen.yaml has an
 // unpinned remote plugin. Letting the run proceed would be the whole problem

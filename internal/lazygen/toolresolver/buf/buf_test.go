@@ -2,6 +2,7 @@ package buf_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,6 +284,263 @@ plugins:
 	}
 	if diff := cmp.Diff(v1, v2); diff != "" {
 		t.Errorf("version output is not stable across runs:\n%s", diff)
+	}
+}
+
+// TestResolver_EmitsBufDepFromBufLock guards the canonical BSR-deps path: a
+// buf.yaml dep paired with a buf.lock entry must produce a buf-dep ToolVersion
+// keyed on the locked commit, so that `buf dep update` invalidates the cache
+// even though the dep's name didn't change.
+func TestResolver_EmitsBufDepFromBufLock(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins:
+  - remote: buf.build/grpc/go:v1.5.1
+    out: gen
+`,
+		"proto/buf.yaml": `version: v2
+modules:
+  - path: .
+deps:
+  - buf.build/googleapis/googleapis
+`,
+		"proto/buf.lock": `version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: 28151c0d0a1641bf938a7672c500e01d
+    digest: shake256:abc123
+`,
+	})
+
+	versions, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("len(versions) = %d, want 2 (remote plugin + buf-dep): %+v", len(versions), versions)
+	}
+
+	var dep toolresolver.ToolVersion
+	for _, v := range versions {
+		if v.Source == "buf-dep:buf.build/googleapis/googleapis" {
+			dep = v
+			break
+		}
+	}
+	want := toolresolver.ToolVersion{
+		Name:    "buf.build/googleapis/googleapis",
+		Source:  "buf-dep:buf.build/googleapis/googleapis",
+		Version: "buf-dep:buf.build/googleapis/googleapis@28151c0d0a1641bf938a7672c500e01d",
+	}
+	if diff := cmp.Diff(want, dep); diff != "" {
+		t.Errorf("dep ToolVersion mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestResolver_BufDepsSortedDeterministically guards that emitted buf-dep
+// entries are sorted by name; otherwise reordering buf.yaml deps would shift
+// generator_version_snapshot and produce unstable record YAML even though the
+// hashed material is unchanged.
+func TestResolver_BufDepsSortedDeterministically(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/zeta/zeta
+  - buf.build/alpha/alpha
+`,
+		"proto/buf.lock": `version: v2
+deps:
+  - name: buf.build/alpha/alpha
+    commit: aaaa
+  - name: buf.build/zeta/zeta
+    commit: zzzz
+`,
+	})
+
+	versions, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("len(versions) = %d, want 2", len(versions))
+	}
+	if versions[0].Name >= versions[1].Name {
+		t.Errorf("expected dep ordering by Name, got %q before %q", versions[0].Name, versions[1].Name)
+	}
+}
+
+// TestResolver_BufDepCommitChangeShiftsVersion is the cache-invalidation guard
+// for `buf dep update`: the same dep with a different locked commit must
+// produce a different version string. Otherwise upgrading a dep would
+// silently hit the previous cache entry.
+func TestResolver_BufDepCommitChangeShiftsVersion(t *testing.T) {
+	makeRepo := func(commit string) string {
+		return setupRepo(t, map[string]string{
+			"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+			"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+`,
+			"proto/buf.lock": fmt.Sprintf(`version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: %s
+`, commit),
+		})
+	}
+	resolve := func(root string) string {
+		t.Helper()
+		v, err := buf.New(root).Resolve(
+			context.Background(), "proto", nil,
+			&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+		)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if len(v) != 1 {
+			t.Fatalf("len(versions) = %d, want 1: %+v", len(v), v)
+		}
+		return v[0].Version
+	}
+	v1 := resolve(makeRepo("aaaa"))
+	v2 := resolve(makeRepo("bbbb"))
+	if v1 == v2 {
+		t.Errorf("commit change must shift version, both runs returned %q", v1)
+	}
+}
+
+// TestResolver_BufDepStripsExplicitTag guards that a buf.yaml dep written with
+// an explicit `:vX.Y.Z` tag still matches the bare-name lock entry. Without
+// normalisation, every tagged dep would surface as "missing from buf.lock"
+// even though buf itself accepts the form.
+func TestResolver_BufDepStripsExplicitTag(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis:v1.0.0
+`,
+		"proto/buf.lock": `version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: aaaa
+`,
+	})
+
+	versions, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("len(versions) = %d, want 1: %+v", len(versions), versions)
+	}
+}
+
+// TestResolver_FailsWhenBufLockMissing guards against silent cache trust when
+// buf.yaml declares deps but buf.lock is absent. Preflight catches this earlier
+// in normal runs but the resolver must also fail so a preflight bypass (e.g.
+// LAZYGEN_ALLOW_STALE_DEPS) cannot lead to an unkeyed dep entering the hash.
+func TestResolver_FailsWhenBufLockMissing(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+`,
+	})
+
+	_, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err == nil {
+		t.Fatal("expected error when buf.lock is missing")
+	}
+	if !strings.Contains(err.Error(), "buf dep update") {
+		t.Errorf("error should suggest `buf dep update`, got: %v", err)
+	}
+}
+
+// TestResolver_FailsWhenDepNotInLock guards drift between a freshly-added
+// buf.yaml dep and the existing buf.lock. The resolver returns an error
+// rather than emitting a partial dep set.
+func TestResolver_FailsWhenDepNotInLock(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+  - buf.build/grpc-ecosystem/grpc-gateway
+`,
+		"proto/buf.lock": `version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: aaaa
+`,
+	})
+
+	_, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err == nil {
+		t.Fatal("expected error when a dep has no matching lock entry")
+	}
+	if !strings.Contains(err.Error(), "grpc-gateway") {
+		t.Errorf("error should mention the missing dep, got: %v", err)
+	}
+}
+
+// TestResolver_AncestorBufYAMLForDeps guards the module-root walk: buf.yaml
+// can live above the spec dir when one workspace hosts multiple per-language
+// buf.gen.yaml files. The resolver must walk up to find it.
+func TestResolver_AncestorBufYAMLForDeps(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+`,
+		"buf.lock": `version: v2
+deps:
+  - name: buf.build/googleapis/googleapis
+    commit: aaaa
+`,
+		"proto/buf.gen.yaml": `version: v2
+plugins:
+  - remote: buf.build/grpc/go:v1.5.1
+    out: gen
+`,
+	})
+
+	versions, err := buf.New(root).Resolve(
+		context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "proto/buf.gen.yaml"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("len(versions) = %d, want 2 (remote + dep): %+v", len(versions), versions)
 	}
 }
 

@@ -1,0 +1,9 @@
+commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
+    inputs: ["input.txt", "buf.gen.yaml", "buf.yaml", "buf.lock"]
+    outputs: ["output.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+      - buf: buf.gen.yaml

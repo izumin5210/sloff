@@ -8,7 +8,7 @@
 
 ## Context
 
-`buf generate` task は通常複数の plugin を組み合わせて実行する複合 cmd で、 `buf.gen.yaml` に plugin が宣言される。 plugin は 3 形式 ( local / protoc_builtin / remote) があり、 それぞれ解決経路が異なる。 単純な `cmd[0] = buf` から auto-dispatch するだけでは plugin 群の version を取得できないため、 `bufResolver` という名前付き専用 resolver で `buf.gen.yaml` を静的 parse する。
+`buf generate` task は通常複数の plugin を組み合わせて実行する複合 cmd で、 `buf.gen.yaml` に plugin が宣言される。 plugin は 3 形式 ( local / protoc_builtin / remote) があり、 それぞれ解決経路が異なる。 [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により lazygen には auto-dispatch が無く、 `buf` 経路は `tools: [{buf: <buf.gen.yaml の相対パス>}]` のような明示宣言で起動する想定。 `bufResolver` は宣言を受けて `buf.gen.yaml` を静的 parse し、 buf 本体 + 各 plugin の version を resolve する。
 
 ## Resolver の動作
 
@@ -36,53 +36,52 @@ package buf
 
 import (
     "context"
-    "path/filepath"
+    "errors"
+    "fmt"
 
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 )
 
+const Name = "buf"
+
 type Resolver struct {
-    registry *toolresolver.Registry // 他 resolver への再帰 dispatch
+    registry *toolresolver.Registry // local plugin / buf 本体の再帰 resolve に使う
 }
 
-func New(registry *toolresolver.Registry) toolresolver.Resolver {
+func New(registry *toolresolver.Registry) *Resolver {
     return &Resolver{registry: registry}
 }
 
-func (r *Resolver) Name() string { return "buf" }
+func (r *Resolver) Name() string { return Name }
 
-func (r *Resolver) CanResolve(specDir string, cmd []string) bool {
-    return filepath.Base(cmd[0]) == "buf" && hasGenerateSubcommand(cmd)
-}
+// Resolve は declared 経由でのみ呼ばれる ( ADR-0005)。 declared には buf.gen.yaml
+// の spec-dir-relative path を持つフィールド ( 例: `BufGenPath`) を将来追加する想定。
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+    if declared == nil {
+        return nil, errors.New("buf: requires explicit tools[] declaration")
+    }
 
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
-    bufGen, err := loadBufGenYAML(specDir, cmd) // --template flag or default buf.gen.yaml
+    bufGen, err := loadBufGenYAML(specDir, declared) // 宣言で指定された buf.gen.yaml を読む
     if err != nil {
         return nil, err
     }
 
     var versions []toolresolver.ToolVersion
 
-    // buf 本体は scriptResolver から取得 ( spec の tools[] で `exec: ["buf", "--version"]` の宣言を期待、 もしくは buf resolver 内部で自動的に script declared dispatch を組む)
-    bufVersions, err := r.registry.Resolve(ctx, specDir, []string{"buf"}, nil)
-    if err != nil {
-        return nil, err
-    }
-    versions = append(versions, bufVersions...)
+    // buf 本体は spec 側で `tools: [{exec: ["buf", "--version"]}]` も並べて宣言してもらうのが
+    // 素直な運用。 buf resolver 内部で script declared を自前生成して registry 経由で
+    // 呼び出す案もあるが、 declared-only の原則と整合させるなら spec に寄せる方が良い。
 
     // 各 plugin を type 別に解決
     for _, plugin := range bufGen.Plugins {
         switch {
         case plugin.Local != "":
-            // 通常の Resolver dispatch に再帰
-            v, err := r.registry.Resolve(ctx, specDir, []string{plugin.Local}, nil)
-            if err != nil {
-                return nil, err
-            }
-            versions = append(versions, v...)
+            // local plugin は spec 側の tools[] 宣言で別 resolver に振ってもらう前提。
+            // ( 例: `local: protoc-gen-go` なら `tools: [{exec: ["protoc-gen-go", "--version"]}]`)
+            // buf resolver は plugin 名のみ記録し、 実 version は他宣言の結果と合流する。
 
         case plugin.ProtocBuiltin != "":
-            // buf 本体 version で代用 ( 既に追加済みなら skip)
+            // buf 本体 version で代用 ( buf 本体の宣言が tools[] に並んでいる前提)。
 
         case plugin.Remote != "":
             // pinned tag 検証 → そのまま hash 入力に
@@ -100,6 +99,8 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, de
     return versions, nil
 }
 ```
+
+> NOTE: 実装着手時に `DeclaredTool` への buf 用フィールド ( `BufGenPath` 等) 追加と、 local plugin の version を spec 側で並列宣言させる運用 / buf resolver 内で script declared を自動生成する運用のどちらを採るかを ADR で確定させること。
 
 ## remote plugin の解決: pinned tag 強制 + 静的 parse
 

@@ -6,11 +6,10 @@
 // version is the SHA256 of their transitive source contributions, computed via
 // an injectable lister.SourceLister.
 //
-// The resolver covers two entry shapes:
-//   - cmd auto-dispatch: `go run ./cmd/foo[/...]` triggers CanResolve
-//   - explicit declaration: spec entry `tools: [{go-local: ./cmd/foo}]` selects
-//     this resolver via Registry.byName, even when the actual cmd is a prebuilt
-//     binary (e.g. installed by `go build -o bin/foo`)
+// Per ADR-0005 the resolver is declared-only: it is invoked when the spec wrote
+// `tools: [{go-local: ./cmd/foo}]` for the task. The same declaration form is
+// used regardless of whether the cmd is `go run ./cmd/foo` or a prebuilt
+// binary produced from those sources.
 //
 // Hashing strategy follows resolver-go-local.md:
 //   - internal files (main module / repo-local sources) are SHA256'd by content

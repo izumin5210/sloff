@@ -66,12 +66,11 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 	return r.Run(ctx)
 }
 
-// buildResolvers wires up the resolver registry. The script resolver covers
-// any prebuilt binary that exposes --version; the go-local resolver auto-
-// dispatches `go run ./...` cmds and is also reachable via explicit
-// `tools: [{go-local: ./cmd/foo}]` declarations. The goPackagesLister is
-// memoised so repeated tasks against the same entry only pay packages.Load
-// once per run.
+// buildResolvers wires up the resolver registry. Per ADR-0005 every resolver
+// is declared-only: the script resolver runs for `tools: [{exec: [...]}]`
+// entries and the go-local resolver runs for `tools: [{go-local: ./cmd/foo}]`
+// entries. The goPackagesLister is memoised so repeated tasks against the
+// same entry only pay packages.Load once per run.
 func buildResolvers(root string) *toolresolver.Registry {
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(root))

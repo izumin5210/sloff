@@ -71,16 +71,16 @@ commands:
 
 cmd 文字列だけで `tools_hash` を fallback 計算するような暗黙挙動は **入れない**。 「version が取れていない」事故を構造的に防ぐため、 失敗は明示する。
 
-### CanResolve / dispatch
+### Dispatch (declared-only)
 
-script resolver は spec で **明示宣言された場合のみ動作** する ( auto-dispatch には参加しない)。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により、 lazygen には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も spec の `tools:` 宣言を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
 
 ```yaml
 tools:
   - exec: ["buf", "--version"]
 ```
 
-宣言が無いまま script resolver の対象になりそうな cmd ( aqua 配布物等) を実行した場合、 [Architecture > Dispatch](./architecture.md#dispatch-ヒューリスティック--明示宣言ハイブリッド) で説明される fallback ( cmd 文字列だけで `tools_hash` を計算) に落ちる。 この fallback は cmd の変更には反応するがツール本体の変更には反応しないため、 重要な generator では必ず `tools` 宣言を書く運用とする。
+宣言が欠けている spec は [ADR-0004 D1](../adr/0004-spec-validation-and-output-conflict-policy.md) の `tools:` 必須化により spec validation で fail する。 「宣言なしで script resolver に落ちる」 fallback 経路は存在しない。
 
 ### Resolver 実装イメージ
 
@@ -88,86 +88,113 @@ tools:
 package script
 
 import (
+    "bytes"
     "context"
+    "errors"
     "fmt"
     "os/exec"
     "path/filepath"
     "regexp"
     "strings"
+    "sync"
 
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 )
 
+const Name = "script"
+
 type Resolver struct {
     repoRoot string
-    cache    map[string]string // (exec joined + extract) → version 文字列のメモ化
+
+    mu    sync.Mutex
+    cache map[string]string // (exec joined + extract) → 解決済み version 文字列のメモ化
 }
 
 func New(repoRoot string) *Resolver {
     return &Resolver{repoRoot: repoRoot, cache: map[string]string{}}
 }
 
-func (r *Resolver) Name() string { return "script" }
+func (r *Resolver) Name() string { return Name }
 
-// CanResolve は常に false。 declared 宣言経由でのみ呼ばれる。
-func (r *Resolver) CanResolve(string, []string) bool { return false }
+// Resolve は declared 経由でのみ呼ばれる ( ADR-0005)。 declared.Exec が
+// script resolver の入力で、 declared.Extract が任意の正規表現。
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+    if declared == nil {
+        return nil, errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
+    }
+    if len(declared.Exec) == 0 {
+        return nil, errors.New("script: exec is required")
+    }
 
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
-    spec, err := parseDeclaration(declaredKey)        // "buf --version" 等の文字列でも、 yaml で構造的に渡しても良い
+    cacheKey := strings.Join(declared.Exec, "\x00") + "\x01" + declared.Extract
+
+    r.mu.Lock()
+    if cached, ok := r.cache[cacheKey]; ok {
+        r.mu.Unlock()
+        return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}, nil
+    }
+    r.mu.Unlock()
+
+    stdout, err := r.runVersion(ctx, specDir, declared.Exec)
     if err != nil {
         return nil, err
     }
-    cacheKey := spec.cacheKey()
-    if v, ok := r.cache[cacheKey]; ok {
-        return []toolresolver.ToolVersion{{Name: spec.execName(), Version: v, Source: "script:" + cacheKey}}, nil
+    captured, err := applyExtract(stdout, declared.Extract)
+    if err != nil {
+        return nil, err
     }
 
-    out, err := runVersion(ctx, r.repoRoot, specDir, spec.exec)
-    if err != nil {
-        return nil, err
-    }
-    captured, err := applyExtract(out, spec.extract)
-    if err != nil {
-        return nil, err
-    }
-    version := fmt.Sprintf("script:%s@%s", filepath.Base(spec.exec[0]), captured)
-    r.cache[cacheKey] = version
-    return []toolresolver.ToolVersion{{Name: spec.execName(), Version: version, Source: "script:" + cacheKey}}, nil
+    r.mu.Lock()
+    r.cache[cacheKey] = captured
+    r.mu.Unlock()
+
+    return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}, nil
 }
 
-func runVersion(ctx context.Context, repoRoot, specDir string, argv []string) (string, error) {
+func (r *Resolver) runVersion(ctx context.Context, specDir string, argv []string) (string, error) {
     c := exec.CommandContext(ctx, argv[0], argv[1:]...)
-    c.Dir = filepath.Join(repoRoot, specDir)
-    var sb strings.Builder
-    c.Stdout = &sb
+    c.Dir = filepath.Join(r.repoRoot, specDir)
+    var out bytes.Buffer
+    c.Stdout = &out
     if err := c.Run(); err != nil {
         return "", fmt.Errorf("script: %s failed: %w", strings.Join(argv, " "), err)
     }
-    return strings.TrimSpace(sb.String()), nil
+    return strings.TrimSpace(out.String()), nil
 }
 
-func applyExtract(out, pattern string) (string, error) {
+func applyExtract(stdout, pattern string) (string, error) {
     if pattern == "" {
-        if out == "" {
-            return "", fmt.Errorf("script: empty stdout, extract not configured")
+        if stdout == "" {
+            return "", errors.New("script: stdout is empty (no extract pattern configured)")
         }
-        return out, nil
+        return stdout, nil
     }
     re, err := regexp.Compile(pattern)
     if err != nil {
-        return "", fmt.Errorf("script: invalid extract regexp %q: %w", pattern, err)
+        return "", fmt.Errorf("script: invalid extract pattern %q: %w", pattern, err)
     }
-    m := re.FindStringSubmatch(out)
+    m := re.FindStringSubmatch(stdout)
     switch {
     case m == nil:
-        return "", fmt.Errorf("script: extract pattern %q did not match stdout %q", pattern, out)
+        return "", fmt.Errorf("script: extract pattern %q did not match stdout %q", pattern, stdout)
     case len(m) >= 2:
         return m[1], nil
     default:
         return m[0], nil
     }
 }
+
+func makeVersion(execHead, captured string) toolresolver.ToolVersion {
+    bin := filepath.Base(execHead)
+    return toolresolver.ToolVersion{
+        Name:    bin,
+        Source:  "script:" + bin,
+        Version: "script:" + bin + "@" + captured,
+    }
+}
 ```
+
+`Source` には `exec[0]` の base name のみを使う ( e.g. `"script:buf"`)。 `extract` regex やフルコマンドラインを混ぜないのは、 record の `tools[].source` を読み解く際に「どの binary の version か」が即座に分かるようにするため。
 
 ### 1 run 内のメモ化
 

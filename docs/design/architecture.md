@@ -124,7 +124,7 @@ commands:
 ```
 <repo_root>/
 └── .lazygen/cache/
-    └── <spec_relpath>/             # spec dir からの相対パス。"/" を "_" に置換
+    └── <spec_relpath>/             # spec dir からの相対パス ( ディレクトリ階層をそのまま展開)
         └── <task_id>/              # spec.commands[*].name の slug
             └── <input_hash>.yml    # 1 ファイル = 1 record
 ```
@@ -132,8 +132,10 @@ commands:
 例: `path/to/spec/lazygen.yml` の `protoc-gen-go` タスクの場合
 
 ```
-.lazygen/cache/path_to_spec/protoc-gen-go/3f9a1c....yml
+.lazygen/cache/path/to/spec/protoc-gen-go/3f9a1c....yml
 ```
+
+`spec_relpath` は階層を verbatim に保持する ( `"/"` を `"_"` 等に置換しない)。これにより `Storage.List` が record パスから `spec_relpath` をロスレスに復元でき、 spec dir 名にアンダースコアを含むケースでも識別が破綻しない。
 
 #### YAML schema
 

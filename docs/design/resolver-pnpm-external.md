@@ -42,9 +42,9 @@ importer ( workspace package) の `dependencies` / `devDependencies` から pack
 
 scoped package (`@scope/name`) も非 scoped package (`some-cli`) も同じ形式で扱う。
 
-### CanResolve / dispatch
+### Dispatch (declared-only)
 
-`cmd[0]` が `pnpm exec <name>` / `npx <name>` / `node ./node_modules/.bin/<name>` のいずれかで、 `<name>` が `pnpm-lock.yaml` の **外部公開パッケージ** ( `workspace:*` 参照ではない) として解決できれば true。 workspace 内パッケージは [pnpmLocalResolver](./resolver-pnpm-local.md) の領域。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により lazygen は declared-only。 spec 側で例えば `tools: [{pnpm-external: <package-name>}]` のように宣言された場合に起動し、 cmd 形状からの auto-dispatch は持たない。 declared.PackageName ( DeclaredTool に追加予定のフィールド) を `pnpm-lock.yaml` で lookup し、 `workspace:*` 参照は弾く ( workspace 内パッケージは [pnpmLocalResolver](./resolver-pnpm-local.md) の領域)。
 
 ### Resolver 実装イメージ
 
@@ -53,15 +53,18 @@ package pnpmexternal
 
 import (
     "context"
+    "errors"
 
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 )
+
+const Name = "pnpm-external"
 
 type Resolver struct {
     lockfile *pnpmLockfile
 }
 
-func New(repoRoot string) (toolresolver.Resolver, error) {
+func New(repoRoot string) (*Resolver, error) {
     lf, err := loadPnpmLockfile(repoRoot)
     if err != nil {
         return nil, err
@@ -69,27 +72,20 @@ func New(repoRoot string) (toolresolver.Resolver, error) {
     return &Resolver{lockfile: lf}, nil
 }
 
-func (r *Resolver) Name() string { return "pnpm-external" }
+func (r *Resolver) Name() string { return Name }
 
-func (r *Resolver) CanResolve(specDir string, cmd []string) bool {
-    bin, ok := extractBinaryName(cmd) // pnpm exec / npx / node_modules/.bin/ から抽出
-    if !ok {
-        return false
+// Resolve は declared 経由でのみ呼ばれる ( ADR-0005)。 declared.PackageName が
+// pnpm-external resolver の入力 ( 将来 DeclaredTool に追加予定)。
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+    if declared == nil {
+        return nil, errors.New("pnpm-external: requires explicit tools[] declaration")
     }
-    pkg := r.lockfile.lookupBinary(specDir, bin)
-    return pkg != nil && !pkg.IsWorkspace
-}
-
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
-    var pkg *pnpmPackage
-    if declaredKey != "" {
-        pkg = r.lockfile.lookupByName(specDir, declaredKey)
-    } else {
-        bin, _ := extractBinaryName(cmd)
-        pkg = r.lockfile.lookupBinary(specDir, bin)
-    }
-    if pkg == nil || pkg.IsWorkspace {
+    pkg := r.lockfile.lookupByName(specDir, declared.PackageName)
+    if pkg == nil {
         return nil, errPackageNotFound
+    }
+    if pkg.IsWorkspace {
+        return nil, errors.New("pnpm-external: workspace:* package belongs to pnpm-local resolver")
     }
     return []toolresolver.ToolVersion{{
         Name:    pkg.Name,

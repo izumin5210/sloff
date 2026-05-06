@@ -255,6 +255,42 @@ plugins:
 	}
 }
 
+// TestChecker_AcceptsV1BufLock guards that a v1 lockfile (with the
+// `remote`/`owner`/`repository` triple instead of v2's `name`) is treated as
+// evidence the dep is locked. Without this, every dep in repos that haven't
+// run `buf migrate` would surface as "missing from buf.lock" even though the
+// file is present.
+func TestChecker_AcceptsV1BufLock(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+`,
+		"proto/buf.lock": `version: v1
+deps:
+  - remote: buf.build
+    owner: googleapis
+    repository: googleapis
+    commit: abc
+    digest: shake256:000
+`,
+		"proto/buf.gen.yaml": `version: v2
+plugins:
+  - remote: buf.build/grpc/go:v1.5.1
+    out: gen
+`,
+	})
+	specs := []spec.Spec{makeSpec("proto", "gen", "buf.gen.yaml")}
+
+	res, err := buf.New(root, specs).Check(context.Background(), ".")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !res.OK || len(res.Issues) > 0 {
+		t.Errorf("expected OK with v1 lockfile, got %+v", res)
+	}
+}
+
 // makeSpec assembles a spec.Spec with a single command that declares a buf
 // tool. Inputs/outputs/cmd carry placeholder values because the preflight
 // checker only inspects tools[].

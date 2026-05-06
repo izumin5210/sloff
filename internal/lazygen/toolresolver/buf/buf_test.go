@@ -511,6 +511,50 @@ deps:
 	}
 }
 
+// TestResolver_AcceptsV1BufLock guards backward compatibility with the v1
+// lockfile schema (`remote` / `owner` / `repository` fields instead of
+// `name`). Repos that haven't run `buf migrate` still ship v1 lockfiles, and
+// silently failing them would surface as spurious "dep missing from buf.lock"
+// errors even though the file is present and complete.
+func TestResolver_AcceptsV1BufLock(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"proto/buf.gen.yaml": `version: v2
+plugins: []
+`,
+		"proto/buf.yaml": `version: v2
+deps:
+  - buf.build/googleapis/googleapis
+`,
+		"proto/buf.lock": `version: v1
+deps:
+  - remote: buf.build
+    owner: googleapis
+    repository: googleapis
+    commit: 28151c0d0a1641bf938a7672c500e01d
+    digest: shake256:aaa
+`,
+	})
+
+	versions, err := buf.New(root).Resolve(
+		context.Background(), "proto", nil,
+		&toolresolver.DeclaredTool{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("len(versions) = %d, want 1: %+v", len(versions), versions)
+	}
+	want := toolresolver.ToolVersion{
+		Name:    "buf.build/googleapis/googleapis",
+		Source:  "buf-dep:buf.build/googleapis/googleapis",
+		Version: "buf-dep:buf.build/googleapis/googleapis@28151c0d0a1641bf938a7672c500e01d",
+	}
+	if diff := cmp.Diff(want, versions[0]); diff != "" {
+		t.Errorf("v1 lock dep mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestResolver_AncestorBufYAMLForDeps guards the module-root walk: buf.yaml
 // can live above the spec dir when one workspace hosts multiple per-language
 // buf.gen.yaml files. The resolver must walk up to find it.

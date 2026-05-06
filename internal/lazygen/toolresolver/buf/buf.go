@@ -363,9 +363,10 @@ type BufLock struct {
 	Deps []BufLockDep
 }
 
-// BufLockDep mirrors one buf.lock v2 entry. Digest is read alongside Commit
-// because both surface drift between consecutive `buf dep update` runs even
-// when one of them is absent in older lockfiles.
+// BufLockDep mirrors one buf.lock entry, normalised across both v1 and v2
+// schemas. Digest is read alongside Commit because both surface drift between
+// consecutive `buf dep update` runs even when one of them is absent in older
+// lockfiles.
 type BufLockDep struct {
 	Name   string
 	Commit string
@@ -375,6 +376,12 @@ type BufLockDep struct {
 // LoadBufLock reads and parses <repoRoot>/<moduleRoot>/buf.lock. Returns
 // (nil, false, nil) when the file doesn't exist; callers decide whether
 // missing-when-deps-declared is an issue.
+//
+// buf has shipped two lockfile schemas: v1 splits the dep identity across
+// `remote` / `owner` / `repository` fields, while v2 collapses them into a
+// single `name` field. We accept either by synthesising a slash-joined Name
+// from the v1 fields when the v2 Name is missing; downstream callers therefore
+// don't need to branch on schema version.
 func LoadBufLock(repoRoot, moduleRoot string) (*BufLock, bool, error) {
 	full := filepath.Join(repoRoot, moduleRoot, "buf.lock")
 	data, err := os.ReadFile(full)
@@ -390,9 +397,23 @@ func LoadBufLock(repoRoot, moduleRoot string) (*BufLock, bool, error) {
 	}
 	out := &BufLock{Deps: make([]BufLockDep, len(raw.Deps))}
 	for i, d := range raw.Deps {
-		out.Deps[i] = BufLockDep{Name: d.Name, Commit: d.Commit, Digest: d.Digest}
+		out.Deps[i] = BufLockDep{
+			Name:   normaliseLockName(d),
+			Commit: d.Commit,
+			Digest: d.Digest,
+		}
 	}
 	return out, true, nil
+}
+
+func normaliseLockName(d bufLockDep) string {
+	if d.Name != "" {
+		return d.Name
+	}
+	if d.Remote != "" && d.Owner != "" && d.Repository != "" {
+		return d.Remote + "/" + d.Owner + "/" + d.Repository
+	}
+	return ""
 }
 
 type bufLockDoc struct {
@@ -400,7 +421,13 @@ type bufLockDoc struct {
 }
 
 type bufLockDep struct {
-	Name   string `yaml:"name"`
+	// v2 schema
+	Name string `yaml:"name"`
+	// v1 schema (still seen in repos that haven't run `buf migrate`)
+	Remote     string `yaml:"remote"`
+	Owner      string `yaml:"owner"`
+	Repository string `yaml:"repository"`
+	// shared between v1 and v2
 	Commit string `yaml:"commit"`
 	Digest string `yaml:"digest"`
 }

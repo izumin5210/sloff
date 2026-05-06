@@ -181,9 +181,8 @@ func (c *Checker) checkBufLock(moduleRoot string) ([]preflight.Issue, error) {
 
 	locked := map[string]struct{}{}
 	for _, d := range bufLock.Deps {
-		// buf.lock v2 uses `name`; v1 uses `remote/owner/repository`. We treat
-		// either as evidence the dep is locked because lazygen does not (yet)
-		// support v1 explicitly but should not produce false positives for it.
+		// LoadBufLock normalises both schemas: v1's remote/owner/repository
+		// triple is joined into Name so this side can key on a single field.
 		if d.Name != "" {
 			locked[d.Name] = struct{}{}
 		}

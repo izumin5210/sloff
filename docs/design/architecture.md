@@ -167,7 +167,7 @@ generated_at: 2026-05-05T12:34:56Z      # 情報用。hash 計算には含めな
 
 #### Deterministic ordering 規約 ( R2)
 
-- YAML key は alphabetical 固定順 ( `gopkg.in/yaml.v3` のデフォルト挙動を override)
+- YAML key は alphabetical 固定順 ( `goccy/go-yaml` の struct field 宣言順出力を利用するため、 Go struct 側の field 順を alphabetical に揃える)
 - `output.files` および `generator_version_snapshot` は path / name 昇順
 - `generated_at` / `generator_version_snapshot` は人間可読性のためだけに保持し、 hash 計算には絶対に含めない
 - ファイル末尾は LF 1 個で終端

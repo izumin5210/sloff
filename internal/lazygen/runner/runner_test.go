@@ -18,6 +18,8 @@ import (
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/golocal"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
@@ -93,6 +95,7 @@ func runStep() step {
 		}
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
+		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
@@ -247,6 +250,72 @@ func TestRunner_OutputDriftInvalidates(t *testing.T) {
 	)
 }
 
+// goLocalGeneratorV2 is the post-edit body of cmd/copy/main.go used to flip the
+// go-local resolver's source hash. The generator stays valid Go and produces a
+// different output.txt so the test exercises both invalidate paths
+// (tools_hash via source change AND output_hash via content change).
+const goLocalGeneratorV2 = `package main
+
+import (
+	"io"
+	"os"
+)
+
+func main() {
+	in, err := os.Open("input.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer in.Close()
+	out, err := os.Create("output.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		panic(err)
+	}
+	if _, err := out.WriteString("v2\n"); err != nil {
+		panic(err)
+	}
+}
+`
+
+func TestRunner_GoLocal_FirstRunWritesRecord(t *testing.T) {
+	runE2E(t, "golocal-first-run-writes-record", runStep())
+}
+
+func TestRunner_GoLocal_SecondRunHits(t *testing.T) {
+	runE2E(t, "golocal-second-run-hits", runStep(), runStep())
+}
+
+func TestRunner_GoLocal_SourceChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "golocal-source-change-invalidates",
+		runStep(),
+		writeStep("cmd/copy/main.go", goLocalGeneratorV2),
+		runStep(),
+	)
+}
+
+func TestRunner_GoLocal_InputChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "golocal-input-change-invalidates",
+		runStep(),
+		writeStep("input.txt", "world\n"),
+		runStep(),
+	)
+}
+
+// TestRunner_GoLocal_NestedSpecResolvesCorrectly guards the resolver's specDir
+// rebasing: when lazygen.yml lives under spec/ and the cmd is `go run ./cmd/copy`,
+// the resolver must hand "./spec/cmd/copy" (not "./cmd/copy") to the lister, or
+// packages.Load fails to find the package. Without this fixture, regressions in
+// the rebase logic would only surface on user repos with nested specs.
+func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
+	runE2E(t, "golocal-nested-spec", runStep())
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and
@@ -279,6 +348,7 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	}
 	resolverReg := toolresolver.NewRegistry()
 	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
@@ -342,6 +412,7 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 	}
 	resolverReg := toolresolver.NewRegistry()
 	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
@@ -393,6 +464,7 @@ func TestRunner_PartialOutputPatternsAllowed(t *testing.T) {
 	}
 	resolverReg := toolresolver.NewRegistry()
 	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,

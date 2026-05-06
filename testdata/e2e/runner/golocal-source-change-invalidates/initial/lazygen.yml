@@ -1,0 +1,7 @@
+commands:
+  - name: copy
+    cmd: go run ./cmd/copy
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools:
+      - go-local: ./cmd/copy

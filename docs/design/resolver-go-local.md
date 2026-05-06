@@ -31,11 +31,14 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 例: `"go-local:./cmd/protoc-gen-foo@sha256:abcd1234..."`
 
-### CanResolve / dispatch
+### Dispatch ( declared-only)
 
-- `cmd[0]` が `go run ./<path>/...` 形式で、 `./<path>` がリポジトリ内 main package を指す → true
-- spec で `tools: [{go-local: <import-path>}]` のように明示宣言 → true
-- build 済み binary を直接呼ぶケース ( 例: `cmd: protoc-gen-foo`) は spec で明示宣言を必須
+go-local resolver は spec の `tools: [{go-local: <import-path>}]` で明示宣言された場合にのみ起動する ([ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md))。
+
+- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は spec dir 相対 ( `./` / `../` 始まり、 または bare `.` / `..`)。 nested spec が parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
+- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の宣言を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
+- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に declared を併記する
+- 同じ cmd で go-local 以外の resolver も使いたい場合 ( 例: Go toolchain 自体の bump も captureしたい) は `tools:` に複数 entry を書く: `tools: [{go-local: ./cmd/protoc-gen-foo}, {exec: ["go", "version"], extract: '...'}]`
 
 ### Resolver 実装イメージ
 
@@ -45,33 +48,32 @@ package golocal
 import (
     "context"
     "encoding/hex"
+    "errors"
 
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 )
 
 type Resolver struct {
-    lister lister.SourceLister // DI: 標準は goPackagesLister
+    repoRoot string
+    lister   lister.SourceLister // DI: 標準は goPackagesLister
 }
 
-func New(l lister.SourceLister) toolresolver.Resolver {
-    return &Resolver{lister: l}
+func New(repoRoot string, l lister.SourceLister) toolresolver.Resolver {
+    return &Resolver{repoRoot: repoRoot, lister: l}
 }
 
 func (r *Resolver) Name() string { return "go-local" }
 
-func (r *Resolver) CanResolve(specDir string, cmd []string) bool {
-    return looksLikeGoRun(cmd) // "go run ./..." パターン
-}
-
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
-    var entry string
-    if declaredKey != "" {
-        entry = declaredKey
-    } else {
-        entry = extractGoRunPath(cmd) // "go run ./cmd/foo/..." → "./cmd/foo/..."
+func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+    if declared == nil || declared.Entry == "" {
+        return nil, errors.New("go-local: declared entry is required")
     }
-    files, err := r.lister.List(ctx, entry)
+    entry := declared.Entry // spec dir 相対 ( "./cmd/foo")
+    // SourceLister は specDir を受け取り <repoRoot>/<specDir> を作業ディレクトリとして
+    // entry を評価する。 こうすることで複数 Go module を含む monorepo でも、
+    // spec の隣にある go.mod を参照して `go run ./cmd/foo` と同じ解決ができる。
+    files, err := r.lister.List(ctx, specDir, entry)
     if err != nil {
         return nil, err
     }
@@ -92,8 +94,14 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, de
 import "golang.org/x/tools/go/packages"
 
 cfg := &packages.Config{
-    Mode: packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
-    Dir:  repoRoot,
+    // NeedEmbedFiles で //go:embed 対象を、 IgnoredFiles ( NeedFiles で取得) で
+    // 別 GOOS/GOARCH 用 build-tag ファイルを hash 入力に取り込む。 これらが無いと
+    // embed アセット変更や OS 違いで cache 健全性 / OS 横断キャッシュが破れる。
+    Mode: packages.NeedFiles | packages.NeedEmbedFiles |
+        packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+    // spec の作業ディレクトリ ( <repoRoot>/<specDir>) を Dir にする。
+    // 多 Go module の monorepo で spec の隣に go.mod がある構成でも正しく解決される。
+    Dir:  filepath.Join(repoRoot, specDir),
 }
 pkgs, err := packages.Load(cfg, "./cmd/protoc-gen-foo/...")
 ```
@@ -110,20 +118,41 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 
 | 種別 | 判定 | hash 入力 |
 |---|---|---|
-| 内部コード | `pkg.Module == nil` ( stdlib) または `pkg.Module.Main` ( 自リポジトリの module) | ファイル本体を SHA256 ( ソーステキスト hash) |
-| 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash |
+| stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断キャッシュを壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
+| 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` + `pkg.OtherFiles` のファイル本体を SHA256 ( `IgnoredFiles` で GOOS / GOARCH / build-tag に非依存、 `OtherFiles` で `.s` / `.c` / `.cc` / `.syso` 等の非 Go ソース変更も捕捉) |
+| local replace 依存 | `pkg.Module.Replace != nil && Replace.Version == ""` | 内部コードと同じ hash 戦略 ( replace 先 directory の `GoFiles + EmbedFiles + IgnoredFiles + OtherFiles` をファイル本体で SHA256)。 go.sum で守られないため content hash が必須。 ただし replace 先が repoRoot 外を指す場合は OS 横断 cache を壊すため fail する |
+| versioned replace 依存 | `pkg.Module.Replace != nil && Replace.Version != ""` | 外部パッケージ扱い。 label は元 import path + `replace=<replace path>@<replace version>` で置換先まで含めて識別。 go.sum lookup は **置換先** の `Replace.Path` / `Replace.Version` で引く ( go.sum はその key で記録されるため) |
+| 外部パッケージ ( 通常依存) | `pkg.Module` が外部 module を指す ( replace なし) | `module path@version` 文字列 + go.sum 該当行の hash。 go.sum は **load された全 main module の `Module.GoMod` の隣** から読み、 連結する ( nested-module monorepo / `go.work` で複数の main module が visible なケースでも全 module の go.sum 行が引けるように) |
 
 ```go
 for each pkg in transitive(pkgs):
-    if pkg.Module == nil || pkg.Module.Main {
-        // 内部コード: ファイル本体を hash
-        for f in pkg.GoFiles {  // _test.go は除外
+    if pkg.Module == nil {
+        // stdlib: ファイル本体は hash しない ( $GOROOT 配下の絶対 path が
+        // OS 横断キャッシュを破壊するため)。 Go toolchain bump は
+        // tools: [{exec: ["go", "version"], extract: ...}] を併記して捕捉する。
+    } else if pkg.Module.Main {
+        // 内部コード: ファイル本体を hash。 GoFiles + EmbedFiles ( //go:embed 対象)
+        // + IgnoredFiles ( 別 GOOS / build-tag のため現 build context で除外
+        // されたソース) + OtherFiles ( .s / .c / .cc / .syso 等の非 Go ソース)
+        // を全部含めて、 host 環境非依存に hash する。 _test.go は除外。
+        for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles + pkg.OtherFiles {
+            hash.Write(readFile(f))
+        }
+    } else if pkg.Module.Replace != nil && pkg.Module.Replace.Version == "" {
+        // local replace ( e.g. `replace foo => ../local`):
+        // go.sum で保護されないため、 内部コードと同じく置換先 directory の
+        // ファイル本体を hash する。 ただし replace 先が repoRoot 外を指す場合
+        // ( 絶対 path / `../sibling-repo` 等) は dev machine ごとに path が
+        // 異なって OS 横断 cache が破れるため fail する ( future work)。
+        for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles + pkg.OtherFiles {
             hash.Write(readFile(f))
         }
     } else {
-        // 外部パッケージ: version + go.sum 該当行で代用
-        hash.Write([]byte(pkg.Module.Path + "@" + pkg.Module.Version))
-        hash.Write([]byte(lookupGoSum(pkg.Module.Path, pkg.Module.Version)))
+        // 外部パッケージ ( 通常依存 or versioned replace): version + go.sum
+        // 該当行で代用。 versioned replace は label に置換先 path/version を
+        // 含めて識別、 go.sum lookup も置換先で引く。
+        hash.Write([]byte(label(pkg.Module)))
+        hash.Write([]byte(lookupGoSum(combinedGoSum, sumPath, sumVersion)))
     }
 ```
 
@@ -133,7 +162,8 @@ for each pkg in transitive(pkgs):
 - 同 version なら中身を読まないので高速 ( `$GOMODCACHE` は数 GB 規模になりうる、 全 .go を SHA256 すると重い)
 - go.sum で「version → 中身」が暗号学的に保証されているため、 「version + go.sum hash」が「中身全 hash」と等価な強度を持つ
 - 内部コードは細かい変更にも敏感 ( `_test.go` 除外以外は普通の hash 戦略)
-- stdlib ( `pkg.Module == nil`) は Go バージョン自体に紐づくため、 spec 側で `tools: [{exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'}]` のような script resolver 宣言を併記すれば Go toolchain 更新による invalidate を捕捉できる
+- 内部コードに `IgnoredFiles` を含めることで、 host の GOOS / GOARCH / build-tag 状態に依存せず同一 hash になる ( 別 OS の CI で計算しても同じ digest)
+- stdlib は hash から除外。 Go toolchain bump を捕捉したい場合は spec 側で `tools: [{exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'}]` のような script resolver 宣言を併記する
 
 ### `globLister` への retreat
 
@@ -173,6 +203,8 @@ go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
 
 ## Open Questions
 
-- `go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか
-- transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)
+- ~~`go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか~~ → [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一済み ( 両形式とも spec での明示宣言を必須とする)
+- ~~transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)~~ → versioned replace (`=> path version`) は外部扱い ( 置換先 path/version で go.sum lookup)、 local replace (`=> ../foo`) は内部扱い ( 置換先 directory のファイルを内部コードと同じく content hash)
+- ~~`go.work` で複数 repo-local module を束ねる構成~~ → サポート済み: `packages.Visit` で全 main module を見つけ、 各 module dir の go.sum を連結して lookup の母集団とする
 - 内製 protoc plugin が `go.mod` の `internal/...` パッケージに依存する場合の subset hash 戦略
+- repoRoot 外を指す local replace ( 絶対 path / `../sibling-repo` 等) は dev machine ごとに path が変わるため、 現状は fail させる。 必要になった段階で「外部 directory を sandbox に正規化して hash する」戦略を ADR で起こす

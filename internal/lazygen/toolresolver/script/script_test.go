@@ -13,14 +13,10 @@ import (
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
-func TestResolver_NameAndCanResolveAreInert(t *testing.T) {
+func TestResolver_Name(t *testing.T) {
 	r := script.New("/tmp")
 	if r.Name() != "script" {
 		t.Errorf("Name() = %q, want script", r.Name())
-	}
-	// CanResolve always false: script resolver is declared-only, never auto-dispatch.
-	if r.CanResolve(".", []string{"buf", "--version"}) {
-		t.Error("CanResolve must return false")
 	}
 }
 

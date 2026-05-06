@@ -48,7 +48,8 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 
 // DeclaredTool is one entry of a command's tools: list. The resolver is determined by
 // which fields are present in the YAML; for the script resolver an `exec` field is
-// required and `extract` is optional.
+// required and `extract` is optional, and for the go-local resolver a `go-local` field
+// names the main package import path.
 //
 // Example:
 //
@@ -56,6 +57,7 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 //	  - exec: ["buf", "--version"]
 //	  - exec: ["go", "version"]
 //	    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
+//	  - go-local: ./cmd/protoc-gen-foo/...
 type DeclaredTool struct {
 	// Resolver is the resolver name inferred from the YAML shape, e.g. "script".
 	Resolver string
@@ -63,11 +65,16 @@ type DeclaredTool struct {
 	// Exec / Extract are the script resolver inputs.
 	Exec    []string
 	Extract string
+
+	// Entry is the go-local resolver input: the main package import path
+	// (must begin with "./").
+	Entry string
 }
 
 type rawDeclaredTool struct {
 	Exec    []string `yaml:"exec"`
 	Extract string   `yaml:"extract"`
+	GoLocal string   `yaml:"go-local"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
@@ -76,13 +83,41 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	if err := yaml.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("tools entry: %w", err)
 	}
-	if len(raw.Exec) > 0 {
+	hasExec := len(raw.Exec) > 0
+	hasGoLocal := raw.GoLocal != ""
+	if hasExec && hasGoLocal {
+		return errors.New("tools entry: exec and go-local are mutually exclusive")
+	}
+	switch {
+	case hasExec:
 		d.Resolver = "script"
 		d.Exec = raw.Exec
 		d.Extract = raw.Extract
 		return nil
+	case hasGoLocal:
+		// Spec-relative entries must start with `./` or `../` (or be a bare
+		// `.` / `..`): these forms disambiguate a relative repo path from a
+		// Go module import path and match what `go run` / `go/packages`
+		// accept. Parent-relative paths matter for nested specs that share a
+		// generator with their parent directory (`go run ../cmd/gen`).
+		if !isRelativeEntry(raw.GoLocal) {
+			return fmt.Errorf("tools entry: go-local must start with %q or %q (or be %q / %q), got %q",
+				"./", "../", ".", "..", raw.GoLocal)
+		}
+		d.Resolver = "go-local"
+		d.Entry = raw.GoLocal
+		return nil
+	default:
+		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local)")
 	}
-	return errors.New("tools entry: required field is missing (supported: exec [+ extract])")
+}
+
+// isRelativeEntry reports whether s is in the spec-relative entry form
+// accepted by `go run` / `go/packages`: bare "." / "..", or starting with
+// "./" / "../".
+func isRelativeEntry(s string) bool {
+	return s == "." || s == ".." ||
+		strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
 // Parse reads a lazygen.yml document and validates the required fields.

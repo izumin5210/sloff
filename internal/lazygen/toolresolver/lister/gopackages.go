@@ -146,13 +146,17 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 				}
 			}
 		default:
-			path, version := externalLabel(pkg.Module)
-			key := path + "@" + version
+			labelPath, labelVersion, sumPath, sumVersion := externalLabel(pkg.Module)
+			key := labelPath + "@" + labelVersion
 			if _, ok := externalSet[key]; !ok {
+				var sumLine string
+				if sumPath != "" && sumVersion != "" {
+					sumLine = lookupGoSum(goSum, sumPath, sumVersion)
+				}
 				externalSet[key] = ExternalModule{
-					Path:      path,
-					Version:   version,
-					GoSumLine: lookupGoSum(goSum, path, version),
+					Path:      labelPath,
+					Version:   labelVersion,
+					GoSumLine: sumLine,
 				}
 			}
 		}
@@ -192,19 +196,33 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 	return Listing{InternalFiles: internal, ExternalModules: external}, nil
 }
 
-// externalLabel returns the (path, version) pair used to identify an external
-// module in the listing. Per resolver-go-local.md "replace は外部扱い", local
-// replace targets keep the original module path but use a synthetic version
-// label so the hash flips when the replace directive is added or changed.
-// The replace target's contents are intentionally not re-read.
-func externalLabel(m *packages.Module) (string, string) {
+// externalLabel returns two (path, version) pairs for one external module:
+//   - (labelPath, labelVersion) is the synthetic identity used as the hash
+//     key. The original import path drives this so user-facing references
+//     stay stable across replace directives.
+//   - (sumPath, sumVersion) is what to look up in go.sum. For versioned
+//     replace directives this is the *replacement* module, because go.sum
+//     is keyed by the replaced-with path. For local-directory replaces the
+//     pair is empty since go.sum has no entry to read.
+//
+// Per resolver-go-local.md "replace は外部扱い", replace target contents are
+// not re-read; the synthetic labelVersion encodes the target path/version
+// so a change of replacement (e.g. `=> b v1` → `=> c v1`) flips the hash.
+func externalLabel(m *packages.Module) (labelPath, labelVersion, sumPath, sumVersion string) {
 	if m.Replace != nil {
 		if m.Replace.Version != "" {
-			return m.Path, m.Replace.Version
+			// versioned replace: encode replacement path+version into the
+			// label, and use them for the go.sum lookup so an actual hash
+			// changes if the user upgrades the replacement target.
+			return m.Path,
+				"replace=" + m.Replace.Path + "@" + m.Replace.Version,
+				m.Replace.Path,
+				m.Replace.Version
 		}
-		return m.Path, "replace=" + m.Replace.Path
+		// local-directory replace (`replace foo => ../foo`): no go.sum entry.
+		return m.Path, "replace=" + m.Replace.Path, "", ""
 	}
-	return m.Path, m.Version
+	return m.Path, m.Version, m.Path, m.Version
 }
 
 // lookupGoSum returns the verbatim go.sum line(s) recorded for path@version,

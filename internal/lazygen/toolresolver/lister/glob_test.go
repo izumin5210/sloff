@@ -25,10 +25,11 @@ func TestGlob_IncludesAndExcludes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
+	// Listings use slash-form paths so the hash is identical across OS.
 	want := lister.Listing{InternalFiles: []string{
-		filepath.FromSlash("cmd/foo/main.go"),
-		filepath.FromSlash("cmd/foo/sub/sub.go"),
-		filepath.FromSlash("cmd/foo/util.go"),
+		"cmd/foo/main.go",
+		"cmd/foo/sub/sub.go",
+		"cmd/foo/util.go",
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
@@ -45,7 +46,7 @@ func TestGlob_NormalizesEntryShape(t *testing.T) {
 		if err != nil {
 			t.Fatalf("List(%q): %v", entry, err)
 		}
-		want := []string{filepath.FromSlash("cmd/foo/main.go")}
+		want := []string{"cmd/foo/main.go"}
 		if diff := cmp.Diff(want, got.InternalFiles); diff != "" {
 			t.Errorf("entry=%q mismatch (-want +got):\n%s", entry, diff)
 		}

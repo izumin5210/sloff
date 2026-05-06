@@ -90,10 +90,12 @@ func normalizeEntry(entry string) (string, error) {
 }
 
 // joinRel joins a normalized base with a forward-slash glob match and returns a
-// repo-relative OS-native path.
+// repo-relative slash-form path. Slashes (not OS-native separators) are required
+// so the same source tree hashes identically across Windows and Unix; downstream
+// callers that need to read the file convert with filepath.FromSlash.
 func joinRel(base, match string) string {
 	if base == "." {
-		return filepath.FromSlash(match)
+		return match
 	}
-	return filepath.FromSlash(path.Join(filepath.ToSlash(base), match))
+	return path.Join(filepath.ToSlash(base), match)
 }

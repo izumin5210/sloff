@@ -39,12 +39,6 @@ func New(repoRoot string) *Resolver {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// CanResolve always returns false. The script resolver is declared-only because
-// auto-dispatch ("just call cmd[0] --version") could silently capture build timestamps,
-// commit hashes, or OS/arch tokens in --version output and break OS-neutral caching.
-// Users opt in by writing tools: [{exec: [...]}] in spec.
-func (r *Resolver) CanResolve(string, []string) bool { return false }
-
 // Resolve implements toolresolver.Resolver. declared must be non-nil and must specify Exec.
 func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
 	if declared == nil {

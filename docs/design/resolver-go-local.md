@@ -31,11 +31,14 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 例: `"go-local:./cmd/protoc-gen-foo@sha256:abcd1234..."`
 
-### CanResolve / dispatch
+### Dispatch ( declared-only)
 
-- `cmd[0]` が `go run ./<path>/...` 形式で、 `./<path>` がリポジトリ内 main package を指す → true
-- spec で `tools: [{go-local: <import-path>}]` のように明示宣言 → true
-- build 済み binary を直接呼ぶケース ( 例: `cmd: protoc-gen-foo`) は spec で明示宣言を必須
+go-local resolver は spec の `tools: [{go-local: <import-path>}]` で明示宣言された場合にのみ起動する ([ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md))。
+
+- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は必ず `./` で始まる spec dir 相対の import path
+- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の宣言を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
+- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に declared を併記する
+- 同じ cmd で go-local 以外の resolver も使いたい場合 ( 例: Go toolchain 自体の bump も captureしたい) は `tools:` に複数 entry を書く: `tools: [{go-local: ./cmd/protoc-gen-foo}, {exec: ["go", "version"], extract: '...'}]`
 
 ### Resolver 実装イメージ
 
@@ -45,33 +48,30 @@ package golocal
 import (
     "context"
     "encoding/hex"
+    "errors"
 
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 )
 
 type Resolver struct {
-    lister lister.SourceLister // DI: 標準は goPackagesLister
+    repoRoot string
+    lister   lister.SourceLister // DI: 標準は goPackagesLister
 }
 
-func New(l lister.SourceLister) toolresolver.Resolver {
-    return &Resolver{lister: l}
+func New(repoRoot string, l lister.SourceLister) toolresolver.Resolver {
+    return &Resolver{repoRoot: repoRoot, lister: l}
 }
 
 func (r *Resolver) Name() string { return "go-local" }
 
-func (r *Resolver) CanResolve(specDir string, cmd []string) bool {
-    return looksLikeGoRun(cmd) // "go run ./..." パターン
-}
-
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]toolresolver.ToolVersion, error) {
-    var entry string
-    if declaredKey != "" {
-        entry = declaredKey
-    } else {
-        entry = extractGoRunPath(cmd) // "go run ./cmd/foo/..." → "./cmd/foo/..."
+func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+    if declared == nil || declared.Entry == "" {
+        return nil, errors.New("go-local: declared entry is required")
     }
-    files, err := r.lister.List(ctx, entry)
+    entry := declared.Entry // spec dir 相対 ( "./cmd/foo")
+    listerEntry := rebaseToRepoRoot(specDir, entry) // "spec/cmd/foo" 等 repo root 相対へ
+    files, err := r.lister.List(ctx, listerEntry)
     if err != nil {
         return nil, err
     }
@@ -173,6 +173,6 @@ go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
 
 ## Open Questions
 
-- `go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか
-- transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)
+- ~~`go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか~~ → [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一済み ( 両形式とも spec での明示宣言を必須とする)
+- ~~transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)~~ → 外部扱いに確定 ( replace 先のファイル本体は再読しない、 `Replace.Version` または `replace=<path>` ラベルで version diversity を表現)
 - 内製 protoc plugin が `go.mod` の `internal/...` パッケージに依存する場合の subset hash 戦略

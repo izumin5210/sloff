@@ -311,12 +311,12 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 ```mermaid
 flowchart LR
-    SPEC["CmdSpec.Cmd / tools[]"] --> DISP["resolver dispatch"]
-    DISP -->|"declared exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go / ...)"]
-    DISP -->|"buf generate"| BUF["bufResolver<br/>(buf 本体は script に再帰)"]
-    DISP -->|"go run ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister"]
-    DISP -->|"pnpm exec <external>"| PNPMEXT["pnpmExternalResolver"]
-    DISP -->|"pnpm exec <workspace local>"| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister"]
+    SPEC["CmdSpec.tools[]<br/>(必須・declared のみ)"] --> DISP["Registry.byName lookup"]
+    DISP -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go / ...)"]
+    DISP -->|"buf-generate: ..."| BUF["bufResolver<br/>(buf 本体は script に再帰)"]
+    DISP -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister"]
+    DISP -->|"pnpm-external: ..."| PNPMEXT["pnpmExternalResolver"]
+    DISP -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister"]
     SCRIPT --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
     BUF --> CONCAT
     GOLOC --> CONCAT
@@ -324,12 +324,16 @@ flowchart LR
     PNPMLOC --> CONCAT
 ```
 
-#### Dispatch: 明示宣言を基本に少数の名前付き dispatch
+#### Dispatch: declared-only
 
-- spec の `tools: [...]` で明示宣言があればそれを優先
-- 一部の channel ( `bufResolver` / `pnpmLocalResolver` 等) は `cmd[0]` の base name や cmd 形状から auto-dispatch する。 prebuilt binary 全般を覆う script resolver は **明示宣言された場合のみ動く** ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
-- `buf generate` のような複合 cmd は名前付き専用 resolver (`bufResolver`) が `buf.gen.yaml` を読んで plugin 一覧を返す
-- どの resolver にも該当しない場合は警告ログを出し、 cmd 文字列のみを `tools_hash` 入力にフォールバック (= ツール変更には反応しないが、 cmd 変更には最低限反応)。 重要な generator では必ず `tools` 宣言を書く運用とする
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により、 resolver の起動経路は **`tools:` の明示宣言のみ** に統一する。 cmd 形状 (`cmd[0] == "go run ..."` 等) から resolver が自動で名乗り出る auto-dispatch は持たない。
+
+- spec の `tools: [...]` の各 entry に対応する resolver name を `Registry.byName` で引き、 該当 resolver の `Resolve` を呼ぶ
+- 一つの cmd に複数の resolver が必要な場合 ( 例: `cmd: ["go", "run", "./cmd/gen"]` を Go toolchain と go-local の両方で hash したい) は、 `tools:` に両方の entry を併記する
+- prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
+- `buf generate` のような複合 cmd を扱う resolver は、 declared 経由で起動された後に resolver 内部で `cmd` を解釈して plugin 一覧を抽出する
+
+declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) 参照。
 
 具体的な Resolver / Registry の interface 定義は [resolver / preflight の拡張性](#resolver--preflight-の拡張性-interface-設計) 節にまとめる。
 
@@ -394,11 +398,10 @@ type Resolver interface {
     // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される
     Name() string
 
-    // CanResolve は与えられた cmd を本 resolver が解決できるかを判定する (auto-dispatch 用)
-    CanResolve(specDir string, cmd []string) bool
-
-    // Resolve は cmd / declared tool key から OS 非依存な ToolVersion を返す
-    Resolve(ctx context.Context, specDir string, cmd []string, declaredKey string) ([]ToolVersion, error)
+    // Resolve は declared tool 宣言と cmd から OS 非依存な ToolVersion を返す。
+    // declared は spec の `tools:` entry そのままで、 必ず非 nil ( ADR-0005 で
+    // declared-only に統一)。
+    Resolve(ctx context.Context, specDir string, cmd []string, declared *DeclaredTool) ([]ToolVersion, error)
 }
 
 type ToolVersion struct {
@@ -415,16 +418,16 @@ Registry:
 ```go
 // internal/lazygen/toolresolver/registry.go
 type Registry struct {
-    byName    map[string]Resolver  // 明示宣言の dispatch
-    inDispatchOrder []Resolver     // auto-dispatch の試行順
+    byName map[string]Resolver  // 明示宣言の dispatch ( ADR-0005 で declared-only)
 }
 
 func (r *Registry) Register(rs Resolver) { /* ... */ }
 
 func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, declared []DeclaredTool) ([]ToolVersion, error) {
-    // 1. declared ありなら、 各 entry の resolver name で byName lookup
-    // 2. なければ inDispatchOrder で CanResolve(true) になる最初の resolver
-    // 3. どれも該当しなければ警告ログ + cmd 文字列 fallback
+    // declared の各 entry について resolver name で byName lookup し、
+    // 各 resolver の Resolve を呼んで結果を結合する。
+    // declared が空の経路は spec.validate ( ADR-0004 D1) で弾かれているため
+    // 到達しない。
 }
 ```
 

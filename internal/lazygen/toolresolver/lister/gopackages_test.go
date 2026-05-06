@@ -57,8 +57,8 @@ func TestGoPackages_ListsMainModuleFilesAndExcludesTests(t *testing.T) {
 	}
 
 	wantFiles := []string{
-		filepath.FromSlash("cmd/tool/main.go"),
-		filepath.FromSlash("pkg/util/util.go"),
+		"cmd/tool/main.go",
+		"pkg/util/util.go",
 	}
 	sort.Strings(got.InternalFiles)
 	if diff := cmpStringSlices(wantFiles, got.InternalFiles); diff != "" {
@@ -131,7 +131,7 @@ func main() { fmt.Print(asset) }
 		t.Fatalf("List: %v", err)
 	}
 
-	wantAsset := filepath.FromSlash("cmd/tool/asset.txt")
+	wantAsset := "cmd/tool/asset.txt"
 	if !slices.Contains(got.InternalFiles, wantAsset) {
 		t.Errorf("InternalFiles must include the //go:embed asset %q, got %v", wantAsset, got.InternalFiles)
 	}

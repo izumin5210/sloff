@@ -55,19 +55,13 @@ func New(repoRoot string, l lister.SourceLister) *Resolver {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// CanResolve auto-dispatches `go run ./...` shaped commands. Build-installed
-// binaries (e.g. `bin/protoc-gen-foo`) must be opted in via tools[] declaration
-// because there is no signal in the cmd that they are repo-local.
-func (r *Resolver) CanResolve(_ string, cmd []string) bool {
-	_, ok := extractGoRunEntry(cmd)
-	return ok
-}
-
-// Resolve returns one ToolVersion. When declared is supplied, declared.Entry
-// names the main package; otherwise the entry is extracted from a `go run`
-// command. The returned Version is OS-neutral: `go-local:<entry>@sha256:<hex>`.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
-	entry, err := r.resolveEntry(cmd, declared)
+// Resolve returns one ToolVersion. declared.Entry names the main package
+// (spec-dir-relative, must start with "./"). Per ADR-0005 there is no
+// auto-dispatch path: the resolver only runs when the spec wrote
+// `tools: [{go-local: ./...}]` for this task. The returned Version is
+// OS-neutral: `go-local:<entry>@sha256:<hex>`.
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+	entry, err := r.resolveEntry(declared)
 	if err != nil {
 		return nil, err
 	}
@@ -109,41 +103,17 @@ func rebaseEntryToRepoRoot(specDir, entry string) string {
 	return "./" + path.Join(slashDir, trimmed)
 }
 
-func (r *Resolver) resolveEntry(cmd []string, declared *toolresolver.DeclaredTool) (string, error) {
-	if declared != nil {
-		if declared.Entry == "" {
-			return "", errors.New("go-local: declared entry is required")
-		}
-		if !strings.HasPrefix(declared.Entry, "./") {
-			return "", fmt.Errorf("go-local: declared entry must start with %q, got %q", "./", declared.Entry)
-		}
-		return declared.Entry, nil
+func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, error) {
+	if declared == nil {
+		return "", errors.New("go-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
 	}
-	entry, ok := extractGoRunEntry(cmd)
-	if !ok {
-		return "", fmt.Errorf("go-local: cmd is not a `go run ./...` form: %v", cmd)
+	if declared.Entry == "" {
+		return "", errors.New("go-local: declared entry is required")
 	}
-	return entry, nil
-}
-
-// extractGoRunEntry returns the first relative argument of a `go run ./...`
-// invocation. Flags before the entry are tolerated (e.g.
-// `go run -tags foo ./cmd/bar`); the entry is the first arg starting with "./".
-// Returns false when cmd is not a go run command, or when no relative entry was
-// found in its arguments.
-func extractGoRunEntry(cmd []string) (string, bool) {
-	if len(cmd) < 3 {
-		return "", false
+	if !strings.HasPrefix(declared.Entry, "./") {
+		return "", fmt.Errorf("go-local: declared entry must start with %q, got %q", "./", declared.Entry)
 	}
-	if filepath.Base(cmd[0]) != "go" || cmd[1] != "run" {
-		return "", false
-	}
-	for _, a := range cmd[2:] {
-		if strings.HasPrefix(a, "./") {
-			return a, true
-		}
-	}
-	return "", false
+	return declared.Entry, nil
 }
 
 // hashListing folds the listing into a deterministic SHA256 by:

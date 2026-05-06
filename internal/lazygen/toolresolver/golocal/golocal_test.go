@@ -32,70 +32,20 @@ func (f *fakeLister) List(_ context.Context, entry string) (lister.Listing, erro
 	return f.listing, nil
 }
 
-func TestResolver_NameAndCanResolve(t *testing.T) {
+func TestResolver_Name(t *testing.T) {
 	r := golocal.New(t.TempDir(), &fakeLister{})
-
 	if r.Name() != "go-local" {
 		t.Errorf("Name() = %q, want go-local", r.Name())
 	}
-
-	cases := []struct {
-		cmd  []string
-		want bool
-	}{
-		{[]string{"go", "run", "./cmd/foo/..."}, true},
-		{[]string{"go", "run", "./cmd/foo"}, true},
-		{[]string{"go", "run", "-tags", "dev", "./cmd/foo"}, true},
-		{[]string{"go", "build", "./cmd/foo"}, false},
-		{[]string{"buf", "generate"}, false},
-		{[]string{"go", "run"}, false},
-		{[]string{"go", "run", "example.com/foo"}, false}, // module path, not relative
-	}
-	for _, c := range cases {
-		if got := r.CanResolve("", c.cmd); got != c.want {
-			t.Errorf("CanResolve(%v) = %v, want %v", c.cmd, got, c.want)
-		}
-	}
 }
 
-func TestResolver_AutoDispatchExtractsEntryFromGoRun(t *testing.T) {
-	root := setupRepo(t, map[string]string{
-		"cmd/foo/main.go": "package main\nfunc main() {}\n",
-	})
-	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/foo/main.go"}}}
-
-	versions, err := golocal.New(root, stub).Resolve(
-		context.Background(), ".", []string{"go", "run", "./cmd/foo/..."}, nil,
-	)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	if stub.gotEntry != "./cmd/foo/..." {
-		t.Errorf("lister received entry %q, want ./cmd/foo/...", stub.gotEntry)
-	}
-	if len(versions) != 1 {
-		t.Fatalf("len(versions) = %d, want 1", len(versions))
-	}
-	v := versions[0]
-	if v.Name != "./cmd/foo/..." {
-		t.Errorf("Name = %q, want ./cmd/foo/...", v.Name)
-	}
-	if v.Source != "go-local:./cmd/foo/..." {
-		t.Errorf("Source = %q", v.Source)
-	}
-	if !strings.HasPrefix(v.Version, "go-local:./cmd/foo/...@sha256:") {
-		t.Errorf("Version = %q", v.Version)
-	}
-}
-
-func TestResolver_DeclaredEntryOverridesCmd(t *testing.T) {
+func TestResolver_DeclaredEntryDrivesResolution(t *testing.T) {
 	root := setupRepo(t, map[string]string{
 		"cmd/bar/main.go": "package main\nfunc main() {}\n",
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/bar/main.go"}}}
 
-	// cmd is a prebuilt binary invocation; declared entry is what wins.
+	// Per ADR-0005 the resolver is declared-only; the cmd shape is irrelevant.
 	versions, err := golocal.New(root, stub).Resolve(
 		context.Background(), ".", []string{"bin/protoc-gen-bar"},
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/bar"},
@@ -111,12 +61,12 @@ func TestResolver_DeclaredEntryOverridesCmd(t *testing.T) {
 	}
 }
 
-func TestResolver_FailsWhenAutoDispatchedAgainstNonGoRunCmd(t *testing.T) {
+func TestResolver_FailsWithoutDeclaration(t *testing.T) {
 	r := golocal.New(t.TempDir(), &fakeLister{})
 
-	_, err := r.Resolve(context.Background(), ".", []string{"buf", "generate"}, nil)
+	_, err := r.Resolve(context.Background(), ".", []string{"go", "run", "./cmd/foo"}, nil)
 	if err == nil {
-		t.Fatal("expected error when cmd is not `go run ./...` and no declaration was supplied")
+		t.Fatal("expected error when called without a declared tool (ADR-0005: no auto-dispatch)")
 	}
 }
 
@@ -146,12 +96,12 @@ func TestResolver_RebasesEntryToRepoRootForLister(t *testing.T) {
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"spec/cmd/tool/main.go"}}}
 
-	// The cmd is executed with cwd=<repoRoot>/spec, so `go run ./cmd/tool` refers to
-	// <repoRoot>/spec/cmd/tool. The lister, however, runs at repoRoot and must receive
-	// the repo-relative entry "./spec/cmd/tool" — otherwise it would mis-resolve to
-	// <repoRoot>/cmd/tool (which doesn't exist).
+	// The spec lives under spec/, so the declared spec-relative entry "./cmd/tool"
+	// must reach the lister as "./spec/cmd/tool" — otherwise packages.Load (running
+	// at repoRoot) would mis-resolve to <repoRoot>/cmd/tool (which doesn't exist).
 	versions, err := golocal.New(root, stub).Resolve(
-		context.Background(), "spec", []string{"go", "run", "./cmd/tool"}, nil,
+		context.Background(), "spec", nil,
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool"},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -188,7 +138,8 @@ func TestResolver_PropagatesListerError(t *testing.T) {
 	stub := &fakeLister{err: wantErr}
 
 	_, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", []string{"go", "run", "./cmd/foo"}, nil,
+		context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
 	)
 	if err == nil {
 		t.Fatal("expected lister error to propagate")

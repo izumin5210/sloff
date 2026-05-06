@@ -107,14 +107,17 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 		case pkg.Module.Main:
 			// EmbedFiles is treated identically to GoFiles: both contribute to the
 			// binary that `go run` produces, so both must invalidate the cache when
-			// they change.
+			// they change. Paths are converted to slash form so the same source tree
+			// hashes identically on Windows and Unix (otherwise filepath.Rel would
+			// emit "cmd\foo\main.go" on Windows and break OS-neutral cache sharing).
 			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles} {
 				for _, f := range group {
 					rel, err := filepath.Rel(l.repoRoot, f)
 					if err != nil {
 						return fmt.Errorf("rel %q: %w", f, err)
 					}
-					if strings.HasPrefix(rel, "..") {
+					rel = filepath.ToSlash(rel)
+					if strings.HasPrefix(rel, "../") || rel == ".." {
 						return fmt.Errorf("internal file %q escapes repo root", f)
 					}
 					internalSet[rel] = struct{}{}

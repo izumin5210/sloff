@@ -12,46 +12,21 @@ import (
 
 type fakeResolver struct {
 	name         string
-	canResolve   bool
 	versions     []toolresolver.ToolVersion
 	err          error
 	calls        int
 	lastDeclared *toolresolver.DeclaredTool
 }
 
-func (f *fakeResolver) Name() string                     { return f.name }
-func (f *fakeResolver) CanResolve(string, []string) bool { return f.canResolve }
+func (f *fakeResolver) Name() string { return f.name }
 func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
 	f.calls++
 	f.lastDeclared = declared
 	return f.versions, f.err
 }
 
-func TestRegistry_AutoDispatchPicksFirstCanResolve(t *testing.T) {
-	a := &fakeResolver{name: "a", canResolve: false}
-	b := &fakeResolver{name: "b", canResolve: true, versions: []toolresolver.ToolVersion{{Name: "b", Version: "v1"}}}
-	c := &fakeResolver{name: "c", canResolve: true, versions: []toolresolver.ToolVersion{{Name: "c", Version: "vC"}}}
-
-	reg := toolresolver.NewRegistry()
-	reg.Register(a)
-	reg.Register(b)
-	reg.Register(c)
-
-	got, err := reg.Resolve(context.Background(), ".", []string{"x"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []toolresolver.ToolVersion{{Name: "b", Version: "v1"}}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("mismatch (-want +got):\n%s", diff)
-	}
-	if c.calls != 0 {
-		t.Errorf("dispatch should stop at the first match, c was called %d times", c.calls)
-	}
-}
-
-func TestRegistry_DeclaredOverridesAutoDispatch(t *testing.T) {
-	a := &fakeResolver{name: "a", canResolve: true, versions: []toolresolver.ToolVersion{{Name: "a", Version: "vA"}}}
+func TestRegistry_DeclaredCallsNamedResolver(t *testing.T) {
+	a := &fakeResolver{name: "a", versions: []toolresolver.ToolVersion{{Name: "a", Version: "vA"}}}
 	b := &fakeResolver{name: "b", versions: []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}}
 
 	reg := toolresolver.NewRegistry()
@@ -68,7 +43,7 @@ func TestRegistry_DeclaredOverridesAutoDispatch(t *testing.T) {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 	if a.calls != 0 {
-		t.Errorf("declared should bypass auto-dispatch, a was called %d times", a.calls)
+		t.Errorf("only the declared resolver should run, a was called %d times", a.calls)
 	}
 	if b.lastDeclared == nil {
 		t.Fatal("declared not propagated to resolver")
@@ -78,7 +53,7 @@ func TestRegistry_DeclaredOverridesAutoDispatch(t *testing.T) {
 	}
 }
 
-func TestRegistry_MultipleDeclaredUnionsVersions(t *testing.T) {
+func TestRegistry_MultipleDeclaredConcatenateVersionsInOrder(t *testing.T) {
 	a := &fakeResolver{name: "a", versions: []toolresolver.ToolVersion{{Name: "a", Version: "vA"}}}
 	b := &fakeResolver{name: "b", versions: []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}}
 
@@ -87,13 +62,14 @@ func TestRegistry_MultipleDeclaredUnionsVersions(t *testing.T) {
 	reg.Register(b)
 
 	got, err := reg.Resolve(context.Background(), ".", []string{"x"},
-		[]toolresolver.DeclaredTool{{Resolver: "a"}, {Resolver: "b"}})
+		[]toolresolver.DeclaredTool{{Resolver: "b"}, {Resolver: "a"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The result preserves the spec's tools[] order, not the registration order.
 	want := []toolresolver.ToolVersion{
-		{Name: "a", Version: "vA"},
 		{Name: "b", Version: "vB"},
+		{Name: "a", Version: "vA"},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
@@ -111,22 +87,27 @@ func TestRegistry_UnknownDeclaredResolverErrors(t *testing.T) {
 	}
 }
 
-func TestRegistry_NoResolverMatchedErrors(t *testing.T) {
+// TestRegistry_EmptyDeclaredErrors guards the contract that all callers go through
+// spec validation (ADR-0004 D1), which requires a non-empty tools[] list. Reaching
+// Resolve with no declared tools indicates a programmer error elsewhere; per
+// ADR-0005 the registry has no auto-dispatch fallback to silently fill the gap.
+func TestRegistry_EmptyDeclaredErrors(t *testing.T) {
 	reg := toolresolver.NewRegistry()
-	reg.Register(&fakeResolver{name: "a", canResolve: false})
+	reg.Register(&fakeResolver{name: "a"})
 
-	_, err := reg.Resolve(context.Background(), ".", []string{"unknown"}, nil)
+	_, err := reg.Resolve(context.Background(), ".", []string{"x"}, nil)
 	if err == nil {
-		t.Fatal("expected error when no resolver matches and no tools were declared")
+		t.Fatal("expected error when declared tools[] is empty")
 	}
 }
 
 func TestRegistry_PropagatesResolverError(t *testing.T) {
 	want := errors.New("boom")
 	reg := toolresolver.NewRegistry()
-	reg.Register(&fakeResolver{name: "a", canResolve: true, err: want})
+	reg.Register(&fakeResolver{name: "a", err: want})
 
-	_, err := reg.Resolve(context.Background(), ".", []string{"x"}, nil)
+	_, err := reg.Resolve(context.Background(), ".", []string{"x"},
+		[]toolresolver.DeclaredTool{{Resolver: "a"}})
 	if !errors.Is(err, want) {
 		t.Errorf("err = %v, want wrap of %v", err, want)
 	}

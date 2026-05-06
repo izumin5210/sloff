@@ -31,16 +31,25 @@ func Build(tasks []Task) ([]Task, error) {
 		keyToIdx[taskKey(t)] = i
 	}
 
-	// outputProducer: file path → idx of the task that produces it.
-	// If two tasks produce the same file, that is a spec conflict; record only the first
-	// (Build does not need to police this here, but it is worth surfacing later).
+	// outputProducer: file path → idx of the task that produces it. Two tasks producing
+	// the same path is a spec conflict that would leave execution order undefined and
+	// downstream cache decisions wired to the wrong writer; surface every conflicting task.
 	outputProducer := make(map[string]idx)
+	conflicts := make(map[string][]idx)
 	for i, t := range tasks {
 		for _, out := range t.Outputs {
-			if _, exists := outputProducer[out]; !exists {
-				outputProducer[out] = i
+			if existing, exists := outputProducer[out]; exists {
+				if _, recorded := conflicts[out]; !recorded {
+					conflicts[out] = []idx{existing}
+				}
+				conflicts[out] = append(conflicts[out], i)
+				continue
 			}
+			outputProducer[out] = i
 		}
+	}
+	if len(conflicts) > 0 {
+		return nil, conflictError(tasks, conflicts)
 	}
 
 	// edges[i] = set of tasks that must run before i (i depends on them)
@@ -113,6 +122,32 @@ func sortByKey(indices []int, tasks []Task) {
 	sort.SliceStable(indices, func(i, j int) bool {
 		return taskKey(tasks[indices[i]]) < taskKey(tasks[indices[j]])
 	})
+}
+
+func conflictError(tasks []Task, conflicts map[string][]int) error {
+	paths := make([]string, 0, len(conflicts))
+	for p := range conflicts {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	parts := make([]string, 0, len(paths))
+	for _, p := range paths {
+		producers := conflicts[p]
+		labels := make([]string, 0, len(producers))
+		for _, idx := range producers {
+			labels = append(labels, taskLabel(tasks[idx]))
+		}
+		sort.Strings(labels)
+		parts = append(parts, fmt.Sprintf("%s -> [%s]", p, strings.Join(labels, ", ")))
+	}
+	return fmt.Errorf("duplicate output producers: %s", strings.Join(parts, "; "))
+}
+
+func taskLabel(t Task) string {
+	if t.SpecRelpath == "" {
+		return t.Name
+	}
+	return t.SpecRelpath + ":" + t.Name
 }
 
 func remainingTaskKeys(all, emitted []Task) string {

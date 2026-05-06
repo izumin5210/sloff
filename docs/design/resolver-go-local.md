@@ -120,7 +120,7 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 |---|---|---|
 | stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断キャッシュを壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
 | 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` のファイル本体を SHA256 ( IgnoredFiles を含めることで GOOS / GOARCH / build-tag に非依存) |
-| 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash ( replace ディレクティブも外部扱い) |
+| 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash ( replace ディレクティブも外部扱い)。 go.sum は **load された main module の `Module.GoMod` の隣** から読む ( nested-module monorepo で repo root の go.sum を引かないため) |
 
 ```go
 for each pkg in transitive(pkgs):

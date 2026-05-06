@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -33,22 +32,6 @@ func NewGoPackages(repoRoot string) SourceLister {
 
 type goPackagesLister struct {
 	repoRoot string
-
-	once     sync.Once
-	goSum    []byte
-	goSumErr error
-}
-
-func (l *goPackagesLister) loadGoSum() ([]byte, error) {
-	l.once.Do(func() {
-		b, err := os.ReadFile(filepath.Join(l.repoRoot, "go.sum"))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			l.goSumErr = err
-			return
-		}
-		l.goSum = b
-	})
-	return l.goSum, l.goSumErr
 }
 
 func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Listing, error) {
@@ -81,7 +64,12 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 		return Listing{}, fmt.Errorf("packages.Load %q: no packages matched", entry)
 	}
 
-	goSum, err := l.loadGoSum()
+	// Read go.sum from the *loaded module*, not from the repo root. In a
+	// nested-module monorepo (submodule/go.mod + submodule/go.sum) the
+	// repo-root go.sum may not exist or may track an unrelated module set,
+	// so fingerprinting external deps against it would leave tools_hash
+	// stable across submodule dependency bumps and produce stale cache hits.
+	goSum, err := readGoSumForMainModule(pkgs)
 	if err != nil {
 		return Listing{}, fmt.Errorf("read go.sum: %w", err)
 	}
@@ -91,6 +79,34 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 		return Listing{}, err
 	}
 	return listing, nil
+}
+
+// readGoSumForMainModule locates the main module via the loaded packages and
+// reads <main module dir>/go.sum. Missing go.sum is not an error: a fresh
+// module before `go mod tidy` has no entries, and packages whose only deps
+// are stdlib have no use for it. In that case the empty []byte ends up as
+// empty GoSumLine values for any external modules, which is honest about the
+// missing cryptographic anchor.
+func readGoSumForMainModule(roots []*packages.Package) ([]byte, error) {
+	var goModPath string
+	packages.Visit(roots, func(pkg *packages.Package) bool {
+		if goModPath != "" {
+			return false
+		}
+		if pkg.Module != nil && pkg.Module.Main && pkg.Module.GoMod != "" {
+			goModPath = pkg.Module.GoMod
+			return false
+		}
+		return true
+	}, nil)
+	if goModPath == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(goModPath), "go.sum"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	return b, nil
 }
 
 func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listing, error) {

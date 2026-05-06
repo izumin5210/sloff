@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -66,21 +65,17 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 		return nil, err
 	}
 
-	// The cmd runs with cwd=<repoRoot>/<specDir>, so `go run ./cmd/foo` resolves
-	// against the spec directory. The lister, however, operates at repoRoot, so
-	// the entry must be rebased: `./cmd/foo` from spec "spec/sub" becomes
-	// `./spec/sub/cmd/foo`. The version label keeps the spec-relative form so
-	// the display string stays stable per generator regardless of where the
-	// spec sits in the repository.
-	listerEntry := rebaseEntryToRepoRoot(specDir, entry)
-
-	listing, err := r.lister.List(ctx, listerEntry)
+	// The lister evaluates entry inside the spec's working directory, matching
+	// where `go run ./cmd/foo` actually executes. This is what makes monorepos
+	// with multiple Go modules work: a spec under submodule/ asks the lister to
+	// resolve against submodule's go.mod, not the repo-root module.
+	listing, err := r.lister.List(ctx, specDir, entry)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: list sources for %q: %w", listerEntry, err)
+		return nil, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
 	}
 	digest, err := hashListing(r.repoRoot, listing)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: hash sources for %q: %w", listerEntry, err)
+		return nil, fmt.Errorf("go-local: hash sources for %q (spec %q): %w", entry, specDir, err)
 	}
 
 	source := Name + ":" + entry
@@ -89,18 +84,6 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 		Source:  source,
 		Version: source + "@sha256:" + hex.EncodeToString(digest),
 	}}, nil
-}
-
-// rebaseEntryToRepoRoot prefixes a spec-relative entry like "./cmd/foo" with
-// the spec directory so the lister, which runs at repoRoot, sees the path it
-// expects. The trailing "/..." (Go's recursive package suffix) is preserved.
-func rebaseEntryToRepoRoot(specDir, entry string) string {
-	trimmed := strings.TrimPrefix(entry, "./")
-	slashDir := filepath.ToSlash(specDir)
-	if slashDir == "" || slashDir == "." {
-		return "./" + trimmed
-	}
-	return "./" + path.Join(slashDir, trimmed)
 }
 
 func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, error) {

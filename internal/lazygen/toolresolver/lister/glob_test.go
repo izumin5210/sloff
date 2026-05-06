@@ -21,7 +21,7 @@ func TestGlob_IncludesAndExcludes(t *testing.T) {
 
 	l := lister.NewGlob(root, []string{"**/*.go"}, []string{"**/*_test.go"})
 
-	got, err := l.List(context.Background(), "./cmd/foo/...")
+	got, err := l.List(context.Background(), "", "./cmd/foo/...")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestGlob_NormalizesEntryShape(t *testing.T) {
 
 	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
 	for _, entry := range []string{"./cmd/foo", "./cmd/foo/", "./cmd/foo/..."} {
-		got, err := l.List(context.Background(), entry)
+		got, err := l.List(context.Background(), "", entry)
 		if err != nil {
 			t.Fatalf("List(%q): %v", entry, err)
 		}
@@ -53,12 +53,30 @@ func TestGlob_NormalizesEntryShape(t *testing.T) {
 	}
 }
 
+// TestGlob_PrefixesSpecDirInResults guards that paths returned for a nested
+// spec are recorded relative to the repo root, not the spec dir, so that
+// downstream hashListing resolves them correctly.
+func TestGlob_PrefixesSpecDirInResults(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "submodule/cmd/foo/main.go", "package main\n")
+
+	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
+	got, err := l.List(context.Background(), "submodule", "./cmd/foo")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{"submodule/cmd/foo/main.go"}
+	if diff := cmp.Diff(want, got.InternalFiles); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestGlob_NeverReturnsExternalModules(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, root, "cmd/foo/main.go", "package main\n")
 
 	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
-	got, err := l.List(context.Background(), "./cmd/foo")
+	got, err := l.List(context.Background(), "", "./cmd/foo")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -72,7 +90,7 @@ func TestGlob_RejectsAbsoluteOrEscapingEntry(t *testing.T) {
 	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
 
 	for _, entry := range []string{"cmd/foo", "/etc", "../escape"} {
-		if _, err := l.List(context.Background(), entry); err == nil {
+		if _, err := l.List(context.Background(), "", entry); err == nil {
 			t.Errorf("List(%q) succeeded; want error", entry)
 		}
 	}
@@ -85,7 +103,7 @@ func TestGlob_EmptyDirectoryReturnsNoFiles(t *testing.T) {
 	}
 
 	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
-	got, err := l.List(context.Background(), "./cmd/empty")
+	got, err := l.List(context.Background(), "", "./cmd/empty")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

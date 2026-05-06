@@ -51,7 +51,7 @@ func TestGoPackages_ListsMainModuleFilesAndExcludesTests(t *testing.T) {
 	requireGo(t)
 	root := scaffoldModule(t, "example.test/scaffold")
 
-	got, err := lister.NewGoPackages(root).List(context.Background(), "./cmd/tool/...")
+	got, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/tool/...")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -71,6 +71,55 @@ func TestGoPackages_ListsMainModuleFilesAndExcludesTests(t *testing.T) {
 	}
 }
 
+// TestGoPackages_ResolvesAgainstNestedModule guards that packages.Load is
+// invoked inside the spec's working directory, not at repo root. Without
+// this, a sub-module's `go run ./cmd/tool` would fail to resolve because
+// the loader would look at the (unrelated) repo-root module.
+func TestGoPackages_ResolvesAgainstNestedModule(t *testing.T) {
+	requireGo(t)
+	root := t.TempDir()
+	// Repo root has no go.mod; the only module sits under submodule/.
+	mustWriteFile(t, root, "submodule/go.mod", "module example.test/sub\n\ngo 1.22\n")
+	mustWriteFile(t, root, "submodule/cmd/tool/main.go", "package main\n\nfunc main() {}\n")
+
+	got, err := lister.NewGoPackages(root).List(context.Background(), "submodule", "./cmd/tool/...")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := "submodule/cmd/tool/main.go"
+	if !slices.Contains(got.InternalFiles, want) {
+		t.Errorf("InternalFiles = %v, want to contain %q", got.InternalFiles, want)
+	}
+}
+
+// TestGoPackages_IncludesIgnoredFilesForBuildTagSources guards that build-
+// tagged sources (foo_linux.go, foo_darwin.go, files behind custom -tags)
+// also contribute to the hash. Without this, the same generator would hash
+// to different values depending on the host GOOS/GOARCH and break the
+// resolver's OS-neutral cache contract.
+func TestGoPackages_IncludesIgnoredFilesForBuildTagSources(t *testing.T) {
+	requireGo(t)
+	root := t.TempDir()
+	mustWriteFile(t, root, "go.mod", "module example.test/buildtag\n\ngo 1.22\n")
+	mustWriteFile(t, root, "cmd/tool/main.go", "package main\n\nfunc main() {}\n")
+	mustWriteFile(t, root, "cmd/tool/main_linux.go", "//go:build linux\n\npackage main\n")
+	mustWriteFile(t, root, "cmd/tool/main_darwin.go", "//go:build darwin\n\npackage main\n")
+
+	got, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/tool/...")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, want := range []string{
+		"cmd/tool/main.go",
+		"cmd/tool/main_linux.go",
+		"cmd/tool/main_darwin.go",
+	} {
+		if !slices.Contains(got.InternalFiles, want) {
+			t.Errorf("InternalFiles = %v, must include %q (build-tag sources are required for OS-neutral hashing)", got.InternalFiles, want)
+		}
+	}
+}
+
 func TestGoPackages_StdlibIsNotIncluded(t *testing.T) {
 	requireGo(t)
 	root := scaffoldModule(t, "example.test/stdlib")
@@ -84,7 +133,7 @@ import "fmt"
 func Greet() string { return fmt.Sprint("hi") }
 `)
 
-	got, err := lister.NewGoPackages(root).List(context.Background(), "./cmd/tool/...")
+	got, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/tool/...")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -103,7 +152,7 @@ func TestGoPackages_RejectsNonRelativeEntry(t *testing.T) {
 	requireGo(t)
 	root := scaffoldModule(t, "example.test/abs")
 
-	if _, err := lister.NewGoPackages(root).List(context.Background(), "example.test/abs/cmd/tool"); err == nil {
+	if _, err := lister.NewGoPackages(root).List(context.Background(), "", "example.test/abs/cmd/tool"); err == nil {
 		t.Error("expected error when entry lacks ./ prefix")
 	}
 }
@@ -126,7 +175,7 @@ func main() { fmt.Print(asset) }
 `)
 	mustWriteFile(t, root, "cmd/tool/asset.txt", "v1\n")
 
-	got, err := lister.NewGoPackages(root).List(context.Background(), "./cmd/tool/...")
+	got, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/tool/...")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -141,7 +190,7 @@ func TestGoPackages_FailsOnMissingPackage(t *testing.T) {
 	requireGo(t)
 	root := scaffoldModule(t, "example.test/missing")
 
-	if _, err := lister.NewGoPackages(root).List(context.Background(), "./cmd/does-not-exist"); err == nil {
+	if _, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/does-not-exist"); err == nil {
 		t.Error("expected error when entry does not match any package")
 	}
 }

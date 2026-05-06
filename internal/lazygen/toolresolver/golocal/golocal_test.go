@@ -14,16 +14,18 @@ import (
 )
 
 // fakeLister is a stub SourceLister that records calls and returns a fixed
-// listing per entry. It lets golocal tests exercise hashing logic without
-// depending on `go list` / packages.Load.
+// listing. It lets golocal tests exercise hashing logic without depending on
+// `go list` / packages.Load.
 type fakeLister struct {
-	gotEntry string
-	calls    int
-	listing  lister.Listing
-	err      error
+	gotSpecDir string
+	gotEntry   string
+	calls      int
+	listing    lister.Listing
+	err        error
 }
 
-func (f *fakeLister) List(_ context.Context, entry string) (lister.Listing, error) {
+func (f *fakeLister) List(_ context.Context, specDir, entry string) (lister.Listing, error) {
+	f.gotSpecDir = specDir
 	f.gotEntry = entry
 	f.calls++
 	if f.err != nil {
@@ -90,15 +92,15 @@ func TestResolver_FailsOnDeclaredEntryWithoutLeadingDotSlash(t *testing.T) {
 	}
 }
 
-func TestResolver_RebasesEntryToRepoRootForLister(t *testing.T) {
+// TestResolver_PassesSpecDirToLister guards that the resolver propagates the
+// spec directory verbatim, so the lister can run packages.Load inside the
+// spec's working module (which is what makes nested-module monorepos work).
+func TestResolver_PassesSpecDirToLister(t *testing.T) {
 	root := setupRepo(t, map[string]string{
 		"spec/cmd/tool/main.go": "package main\nfunc main() {}\n",
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"spec/cmd/tool/main.go"}}}
 
-	// The spec lives under spec/, so the declared spec-relative entry "./cmd/tool"
-	// must reach the lister as "./spec/cmd/tool" — otherwise packages.Load (running
-	// at repoRoot) would mis-resolve to <repoRoot>/cmd/tool (which doesn't exist).
 	versions, err := golocal.New(root, stub).Resolve(
 		context.Background(), "spec", nil,
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool"},
@@ -106,17 +108,20 @@ func TestResolver_RebasesEntryToRepoRootForLister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if stub.gotEntry != "./spec/cmd/tool" {
-		t.Errorf("lister received entry %q, want ./spec/cmd/tool (rebased to repo root)", stub.gotEntry)
+	if stub.gotSpecDir != "spec" {
+		t.Errorf("lister received specDir %q, want spec", stub.gotSpecDir)
 	}
-	// The version label, however, stays in spec-relative form so the same generator
-	// referenced from different specs keeps a stable display string.
+	// The entry stays spec-relative — the lister anchors at <repoRoot>/<specDir>
+	// and resolves "./cmd/tool" from there, matching where the cmd actually runs.
+	if stub.gotEntry != "./cmd/tool" {
+		t.Errorf("lister received entry %q, want ./cmd/tool (no rebasing)", stub.gotEntry)
+	}
 	if !strings.HasPrefix(versions[0].Version, "go-local:./cmd/tool@sha256:") {
 		t.Errorf("Version = %q, want spec-relative label", versions[0].Version)
 	}
 }
 
-func TestResolver_RebasesNestedSpecDirEntry(t *testing.T) {
+func TestResolver_PropagatesNestedSpecDir(t *testing.T) {
 	root := setupRepo(t, map[string]string{
 		"a/b/cmd/tool/main.go": "package main\nfunc main() {}\n",
 	})
@@ -128,8 +133,11 @@ func TestResolver_RebasesNestedSpecDirEntry(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if stub.gotEntry != "./a/b/cmd/tool/..." {
-		t.Errorf("lister received entry %q, want ./a/b/cmd/tool/...", stub.gotEntry)
+	if stub.gotSpecDir != filepath.Join("a", "b") {
+		t.Errorf("lister received specDir %q, want %q", stub.gotSpecDir, filepath.Join("a", "b"))
+	}
+	if stub.gotEntry != "./cmd/tool/..." {
+		t.Errorf("lister received entry %q, want ./cmd/tool/...", stub.gotEntry)
 	}
 }
 

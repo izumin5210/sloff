@@ -51,7 +51,7 @@ func (l *goPackagesLister) loadGoSum() ([]byte, error) {
 	return l.goSum, l.goSumErr
 }
 
-func (l *goPackagesLister) List(ctx context.Context, entry string) (Listing, error) {
+func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Listing, error) {
 	if !strings.HasPrefix(entry, "./") && entry != "." {
 		return Listing{}, fmt.Errorf("entry must start with %q, got %q", "./", entry)
 	}
@@ -63,7 +63,11 @@ func (l *goPackagesLister) List(ctx context.Context, entry string) (Listing, err
 		// rebuilds the binary on every embed change.
 		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedModule,
-		Dir:     l.repoRoot,
+		// Run packages.Load in the spec's working directory so monorepo specs
+		// whose go.mod sits beside their lazygen.yml resolve correctly. Without
+		// this the loader would always anchor at the repo root and fail (or
+		// pick the wrong module) for nested-module repositories.
+		Dir:     filepath.Join(l.repoRoot, specDir),
 		Context: ctx,
 	}
 	pkgs, err := packages.Load(cfg, entry)
@@ -105,12 +109,14 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 		case pkg.Module == nil:
 			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral cache.
 		case pkg.Module.Main:
-			// EmbedFiles is treated identically to GoFiles: both contribute to the
-			// binary that `go run` produces, so both must invalidate the cache when
-			// they change. Paths are converted to slash form so the same source tree
-			// hashes identically on Windows and Unix (otherwise filepath.Rel would
-			// emit "cmd\foo\main.go" on Windows and break OS-neutral cache sharing).
-			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles} {
+			// GoFiles + EmbedFiles + IgnoredFiles together capture every source
+			// file that the package owns regardless of the host build context.
+			// IgnoredFiles is critical: without it, build-tagged sources like
+			// foo_linux.go / foo_darwin.go / files behind custom -tags would
+			// produce different hashes per OS and break the OS-neutral cache
+			// contract this resolver promises. Paths are converted to slash
+			// form so the digest is identical on Windows and Unix.
+			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles} {
 				for _, f := range group {
 					rel, err := filepath.Rel(l.repoRoot, f)
 					if err != nil {

@@ -17,10 +17,14 @@ import (
 // the logical version of an internal Go tool. The go-local resolver consumes
 // the listing to compute its tools_hash component.
 type SourceLister interface {
-	// List returns the listing for the given entry. The entry is the main
-	// package import path in `go run`-compatible form, e.g. "./cmd/foo" or
-	// "./cmd/foo/...".
-	List(ctx context.Context, entry string) (Listing, error)
+	// List returns the listing for the given entry, evaluated with the given
+	// spec directory as the working module context. specDir is repo-relative
+	// using OS-native separators (e.g. "" or "submodule"). entry is the main
+	// package import path in `go run`-compatible spec-relative form
+	// (e.g. "./cmd/foo" or "./cmd/foo/..."). Implementations must run
+	// packages.Load (or equivalent) at <repoRoot>/<specDir> so that nested
+	// monorepo specs whose go.mod sits beside lazygen.yml resolve correctly.
+	List(ctx context.Context, specDir, entry string) (Listing, error)
 }
 
 // Listing is the union of source contributions enumerated for one entry.
@@ -55,10 +59,11 @@ type ExternalModule struct {
 	GoSumLine string
 }
 
-// Memoized wraps a SourceLister with a per-entry result cache valid for the
-// lifetime of the wrapper. It exists so that a single lazygen run that resolves
-// the same entry from many tasks pays the underlying List cost exactly once;
-// the result is a pure function of the entry, so caching is safe.
+// Memoized wraps a SourceLister with a per-(specDir, entry) result cache valid
+// for the lifetime of the wrapper. It exists so that a single lazygen run that
+// resolves the same generator from many tasks pays the underlying List cost
+// exactly once; the result is a pure function of (specDir, entry), so caching
+// is safe.
 type Memoized struct {
 	inner SourceLister
 	mu    sync.Mutex
@@ -71,22 +76,24 @@ func NewMemoized(inner SourceLister) *Memoized {
 }
 
 // List delegates to the wrapped SourceLister, caching successful results by
-// entry. Errors are not cached so transient failures can be retried.
-func (m *Memoized) List(ctx context.Context, entry string) (Listing, error) {
+// (specDir, entry). Errors are not cached so transient failures can be retried.
+func (m *Memoized) List(ctx context.Context, specDir, entry string) (Listing, error) {
+	key := specDir + "\x00" + entry
+
 	m.mu.Lock()
-	if l, ok := m.cache[entry]; ok {
+	if l, ok := m.cache[key]; ok {
 		m.mu.Unlock()
 		return l, nil
 	}
 	m.mu.Unlock()
 
-	l, err := m.inner.List(ctx, entry)
+	l, err := m.inner.List(ctx, specDir, entry)
 	if err != nil {
 		return Listing{}, err
 	}
 
 	m.mu.Lock()
-	m.cache[entry] = l
+	m.cache[key] = l
 	m.mu.Unlock()
 	return l, nil
 }

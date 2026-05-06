@@ -13,36 +13,37 @@ import (
 
 // stubLister records every List call and returns a programmable response.
 type stubLister struct {
-	calls    atomic.Int32
-	listing  lister.Listing
-	err      error
-	perEntry map[string]lister.Listing
+	calls   atomic.Int32
+	listing lister.Listing
+	err     error
+	perKey  map[string]lister.Listing // key: specDir + "\x00" + entry
 }
 
-func (s *stubLister) List(_ context.Context, entry string) (lister.Listing, error) {
+func (s *stubLister) List(_ context.Context, specDir, entry string) (lister.Listing, error) {
 	s.calls.Add(1)
 	if s.err != nil {
 		return lister.Listing{}, s.err
 	}
-	if s.perEntry != nil {
-		if l, ok := s.perEntry[entry]; ok {
+	if s.perKey != nil {
+		if l, ok := s.perKey[specDir+"\x00"+entry]; ok {
 			return l, nil
 		}
 	}
 	return s.listing, nil
 }
 
-func TestMemoized_CachesByEntry(t *testing.T) {
+func TestMemoized_CachesByKey(t *testing.T) {
 	stub := &stubLister{
-		perEntry: map[string]lister.Listing{
-			"./cmd/a": {InternalFiles: []string{"cmd/a/main.go"}},
-			"./cmd/b": {InternalFiles: []string{"cmd/b/main.go"}},
+		perKey: map[string]lister.Listing{
+			"\x00./cmd/a":    {InternalFiles: []string{"cmd/a/main.go"}},
+			"\x00./cmd/b":    {InternalFiles: []string{"cmd/b/main.go"}},
+			"sub\x00./cmd/a": {InternalFiles: []string{"sub/cmd/a/main.go"}},
 		},
 	}
 	m := lister.NewMemoized(stub)
 
 	for range 3 {
-		got, err := m.List(context.Background(), "./cmd/a")
+		got, err := m.List(context.Background(), "", "./cmd/a")
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -51,13 +52,17 @@ func TestMemoized_CachesByEntry(t *testing.T) {
 			t.Errorf("a mismatch (-want +got):\n%s", diff)
 		}
 	}
-	if _, err := m.List(context.Background(), "./cmd/b"); err != nil {
+	if _, err := m.List(context.Background(), "", "./cmd/b"); err != nil {
 		t.Fatalf("List b: %v", err)
 	}
+	// Same entry under a different specDir is a distinct cache key.
+	if _, err := m.List(context.Background(), "sub", "./cmd/a"); err != nil {
+		t.Fatalf("List sub/a: %v", err)
+	}
 
-	// Same entry hits cache; distinct entries each invoke the inner lister once.
-	if got := stub.calls.Load(); got != 2 {
-		t.Errorf("inner List invoked %d times, want 2 (one per distinct entry)", got)
+	// Same key hits cache; distinct keys each invoke the inner lister once.
+	if got := stub.calls.Load(); got != 3 {
+		t.Errorf("inner List invoked %d times, want 3 (one per distinct (specDir, entry))", got)
 	}
 }
 
@@ -67,7 +72,7 @@ func TestMemoized_DoesNotCacheErrors(t *testing.T) {
 	m := lister.NewMemoized(stub)
 
 	for range 3 {
-		if _, err := m.List(context.Background(), "./cmd/x"); !errors.Is(err, wantErr) {
+		if _, err := m.List(context.Background(), "", "./cmd/x"); !errors.Is(err, wantErr) {
 			t.Fatalf("err = %v, want %v", err, wantErr)
 		}
 	}

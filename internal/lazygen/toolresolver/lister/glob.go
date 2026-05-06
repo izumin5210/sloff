@@ -33,12 +33,12 @@ type globLister struct {
 	excludes []string
 }
 
-func (l *globLister) List(_ context.Context, entry string) (Listing, error) {
+func (l *globLister) List(_ context.Context, specDir, entry string) (Listing, error) {
 	base, err := normalizeEntry(entry)
 	if err != nil {
 		return Listing{}, err
 	}
-	absBase := filepath.Join(l.repoRoot, base)
+	absBase := filepath.Join(l.repoRoot, specDir, base)
 	fsys := os.DirFS(absBase)
 
 	seen := map[string]struct{}{}
@@ -48,7 +48,7 @@ func (l *globLister) List(_ context.Context, entry string) (Listing, error) {
 			return Listing{}, fmt.Errorf("glob include %q: %w", p, err)
 		}
 		for _, m := range matches {
-			seen[joinRel(base, m)] = struct{}{}
+			seen[joinRel(specDir, base, m)] = struct{}{}
 		}
 	}
 	for _, p := range l.excludes {
@@ -57,7 +57,7 @@ func (l *globLister) List(_ context.Context, entry string) (Listing, error) {
 			return Listing{}, fmt.Errorf("glob exclude %q: %w", p, err)
 		}
 		for _, m := range matches {
-			delete(seen, joinRel(base, m))
+			delete(seen, joinRel(specDir, base, m))
 		}
 	}
 
@@ -89,13 +89,17 @@ func normalizeEntry(entry string) (string, error) {
 	return filepath.FromSlash(e), nil
 }
 
-// joinRel joins a normalized base with a forward-slash glob match and returns a
-// repo-relative slash-form path. Slashes (not OS-native separators) are required
+// joinRel composes a repo-relative slash-form path from specDir, the normalized
+// entry base, and a glob match. Slashes (not OS-native separators) are required
 // so the same source tree hashes identically across Windows and Unix; downstream
 // callers that need to read the file convert with filepath.FromSlash.
-func joinRel(base, match string) string {
-	if base == "." {
-		return match
+func joinRel(specDir, base, match string) string {
+	parts := match
+	if base != "." {
+		parts = path.Join(filepath.ToSlash(base), parts)
 	}
-	return path.Join(filepath.ToSlash(base), match)
+	if slashSpec := filepath.ToSlash(specDir); slashSpec != "" && slashSpec != "." {
+		parts = path.Join(slashSpec, parts)
+	}
+	return parts
 }

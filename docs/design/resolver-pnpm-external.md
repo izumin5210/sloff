@@ -5,13 +5,13 @@
 関連:
 - [Architecture](./architecture.md)
 - [Resolver: pnpm-local](./resolver-pnpm-local.md) ( workspace 内 内製パッケージ側の対応物)
-- [Resolver: go-external](./resolver-go-external.md) ( Go 側の対応物 = go.mod 経由の外部 module)
+- [Resolver: script](./resolver-script.md) ( prebuilt binary 全般 — 同じ「外部配布 / runtime と整合する logical version」のもう一つの解として、 lockfile 不要バージョン)
 
 ## Context
 
 pnpm は `pnpm-lock.yaml` に依存パッケージの resolved version を完全 pinned で記録する。 npm registry や GitHub Packages 等から配布される外部公開パッケージは、 同じ lockfile から install すれば全環境で同じ実体が手に入る ( pnpm が SHA512 / integrity hash で検証する)。 そのため lockfile の resolved version を **論理 version 文字列** として使える。
 
-「外部配布 ( = `external`)」という意味では [go-external](./resolver-go-external.md) の対応物。 「pnpm ecosystem の registry 経由」と「Go ecosystem の go.mod 経由」が概念的に対をなす。
+「外部配布 ( = `external`)」という意味では [script resolver](./resolver-script.md) と並び立つ位置だが、 pnpm 配布物は実行時に Node が間に挟まり、 binary の `--version` を当てにできるとは限らない ( workspace 内 entry script が直接 import する形が多い)。 そのため pnpm ecosystem では lockfile を SSoT にする方が素直で、 lockfile vs `node_modules` の整合は preflight で検証する。
 
 ## Resolver の動作
 

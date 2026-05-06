@@ -4,14 +4,14 @@
 
 関連:
 - [Architecture](./architecture.md)
-- [Resolver: go-external](./resolver-go-external.md) ( 外部配布 Go ツール側の対応物)
+- [Resolver: script](./resolver-script.md) ( 外部配布 Go ツール側は script resolver で `<bin> --version` を取る)
 - [Resolver: pnpm-local](./resolver-pnpm-local.md) ( pnpm 側の対応物 = workspace 内 内製パッケージ)
 
 ## Context
 
 Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ツールを構成するソースファイル全集合の hash** を論理 version 文字列として用いる。
 
-「内製ソース ( = `local`)」という意味では [pnpm-local](./resolver-pnpm-local.md) の対応物。 「Go ecosystem の repo local main package」と「pnpm ecosystem の workspace 内 local package」が概念的に対をなす。
+「内製ソース ( = `local`)」という意味では [pnpm-local](./resolver-pnpm-local.md) の対応物。 「Go ecosystem の repo local main package」と「pnpm ecosystem の workspace 内 local package」が概念的に対をなす。 外部配布 ( aqua / `go tool` 経由) のツールは [script resolver](./resolver-script.md) で `<bin> --version` を直接取るアプローチに統一されている。
 
 ソースファイル列挙には Resolver 内部 helper の `SourceLister` を使う。 標準実装は **`golang.org/x/tools/go/packages` の Go API を直接 import した `goPackagesLister`** で、 entry main package から transitive な依存解析で関係する `.go` ファイルのみを抽出する。
 
@@ -133,7 +133,7 @@ for each pkg in transitive(pkgs):
 - 同 version なら中身を読まないので高速 ( `$GOMODCACHE` は数 GB 規模になりうる、 全 .go を SHA256 すると重い)
 - go.sum で「version → 中身」が暗号学的に保証されているため、 「version + go.sum hash」が「中身全 hash」と等価な強度を持つ
 - 内部コードは細かい変更にも敏感 ( `_test.go` 除外以外は普通の hash 戦略)
-- stdlib ( `pkg.Module == nil`) は Go バージョン自体に紐づくため、 [go-external](./resolver-go-external.md) 経由の Go tool ディレクティブの version 解決と組み合わせて間接的に invalidate される
+- stdlib ( `pkg.Module == nil`) は Go バージョン自体に紐づくため、 spec 側で `tools: [{exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'}]` のような script resolver 宣言を併記すれば Go toolchain 更新による invalidate を捕捉できる
 
 ### `globLister` への retreat
 
@@ -157,7 +157,7 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
 
 ### 検証内容
 
-`go list -deps -json ./<main_package>/...` ( in-process で `packages.Load`) がエラー無く完走するかを確認する。 transitive 依存が `$GOMODCACHE` に存在しないと `packages.Load` がエラーを返すため、 これを代理シグナルにする ( go-external resolver の preflight と重複する部分は cache 共通化で軽減)。
+`go list -deps -json ./<main_package>/...` ( in-process で `packages.Load`) がエラー無く完走するかを確認する。 transitive 依存が `$GOMODCACHE` に存在しないと `packages.Load` がエラーを返すため、 これを代理シグナルにする。 script resolver は preflight を持たないため、 Go toolchain 自体の install 状態 ( e.g., `go` が `$PATH` 上に居るか) は本 Checker と script resolver 実行時のエラーで間接検出する。
 
 ### 不整合検出時
 
@@ -169,7 +169,7 @@ go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
   please run: go mod download
 ```
 
-実質 `goExternalChecker` と同じ install 状態を見ているため、 まとめて 1 回の `packages.Load` で済ませる実装最適化が可能。
+`packages.Load` を呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっており、 別途 preflight Checker を立てる必要は無い。
 
 ## Open Questions
 

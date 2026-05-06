@@ -4,7 +4,7 @@
 
 関連:
 - [Architecture](./architecture.md)
-- [Resolver: aqua](./resolver-aqua.md), [go-external](./resolver-go-external.md), [go-local](./resolver-go-local.md), [pnpm-external](./resolver-pnpm-external.md), [pnpm-local](./resolver-pnpm-local.md) ( buf 経由で再帰的にディスパッチされる)
+- [Resolver: script](./resolver-script.md), [go-local](./resolver-go-local.md), [pnpm-external](./resolver-pnpm-external.md), [pnpm-local](./resolver-pnpm-local.md) ( buf 経由で再帰的にディスパッチされる)
 
 ## Context
 
@@ -16,16 +16,16 @@
 
 | plugin type ( buf.gen.yaml v2) | 例 | 解決経路 |
 |---|---|---|
-| `local: <name>` | `local: protoc-gen-go` | name を cmd[0] として通常の Resolver dispatch に再帰 ( aqua / go-external / go-local / pnpm-external / pnpm-local のいずれか) |
-| `protoc_builtin: <name>` | `protoc_builtin: java` | `buf` 本体に組み込まれた plugin。 buf 本体の version で代用 ( aquaResolver で buf の version 取得) |
+| `local: <name>` | `local: protoc-gen-go` | name を cmd[0] として通常の Resolver dispatch に再帰 ( script / go-local / pnpm-external / pnpm-local のいずれか) |
+| `protoc_builtin: <name>` | `protoc_builtin: java` | `buf` 本体に組み込まれた plugin。 buf 本体の version で代用 ( script resolver で `buf --version` 取得) |
 | `remote: <bsr-url>:<tag>` | `remote: buf.build/protocolbuffers/go:v1.35.2` | tag が pinned 必須 ( 後述)。 hash 入力 = `("buf-remote", host, owner, name, version, revision_or_empty)` |
 
 ### 論理 version 文字列の形式
 
 `bufResolver` は単一 version ではなく、 buf 本体 + plugin 群の `[]ToolVersion` を返す ( Resolver interface は複数返却を許容している):
 
-- buf 本体: `"aqua:bufbuild/buf@v1.30.0"` ( aquaResolver から)
-- local plugin: 各 plugin に対応する resolver から ( 例: `"go-external:google.golang.org/protobuf@v1.34.2"`)
+- buf 本体: `"script:buf@1.30.0"` 形式 ( scriptResolver が `buf --version` で取得)
+- local plugin: 各 plugin に対応する resolver から ( 例: `"script:protoc-gen-go@v1.34.2"` を scriptResolver で取得)
 - protoc_builtin: buf 本体の version と同じ ( 重複なら排除)
 - remote plugin: `"buf-remote:<host>/<owner>/<name>@<version>+rev<revision>"`
 
@@ -63,7 +63,7 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, de
 
     var versions []toolresolver.ToolVersion
 
-    // buf 本体は aquaResolver 等から取得
+    // buf 本体は scriptResolver から取得 ( spec の tools[] で `exec: ["buf", "--version"]` の宣言を期待、 もしくは buf resolver 内部で自動的に script declared dispatch を組む)
     bufVersions, err := r.registry.Resolve(ctx, specDir, []string{"buf"}, nil)
     if err != nil {
         return nil, err
@@ -137,7 +137,7 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, de
 |---|---|
 | `buf.yaml` BSR 依存 | `buf.yaml` の `deps:` 行と `buf.lock` の resolved version が一致するか (`buf mod update` 未実行で `buf.yaml` だけ進んだ状態を検出)。 さらに `buf.lock` で参照されるモジュールが BSR cache (`~/.cache/buf/` 等) に取得済みか |
 | `buf.gen.yaml` remote plugin の pinned 強制 | 各 entry が pinned tag (`:vX.Y.Z`) を持っているかを spec lint で検証 ( `:latest` / version 省略を検出したら fail) |
-| `buf.gen.yaml` local plugin | 対応する resolver の preflight に再帰的に委譲 ( aqua / go-external / go-local / pnpm-external / pnpm-local ) |
+| `buf.gen.yaml` local plugin | 対応する resolver の preflight に再帰的に委譲 ( pnpm-external / pnpm-local ; script / go-local は preflight 不要なので素通り) |
 
 ### 不整合検出時
 

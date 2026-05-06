@@ -80,6 +80,40 @@ func TestReadGoSumForMainModule_NoMainModuleReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestReadGoSumForMainModule_MultipleMainModulesError guards the explicit
+// fail-fast for go.work multi-module workspaces. Reading only the first
+// module's go.sum would silently drop checksums for sibling modules and let
+// dependency bumps slip past tools_hash. Until proper go.work support lands,
+// the resolver must abort instead of returning a partial fingerprint.
+func TestReadGoSumForMainModule_MultipleMainModulesError(t *testing.T) {
+	a := &packages.Package{
+		ID: "example.test/a/cmd/tool",
+		Module: &packages.Module{
+			Main:  true,
+			Path:  "example.test/a",
+			GoMod: filepath.Join(t.TempDir(), "a", "go.mod"),
+		},
+	}
+	b := &packages.Package{
+		ID: "example.test/b/pkg/util",
+		Module: &packages.Module{
+			Main:  true,
+			Path:  "example.test/b",
+			GoMod: filepath.Join(t.TempDir(), "b", "go.mod"),
+		},
+	}
+	// Wire the second main as a transitive import of the first.
+	a.Imports = map[string]*packages.Package{b.ID: b}
+
+	_, err := readGoSumForMainModule([]*packages.Package{a})
+	if err == nil {
+		t.Fatal("expected error when multiple main modules are visible")
+	}
+	if !strings.Contains(err.Error(), "multiple main modules") {
+		t.Errorf("error %q must explain the cause", err)
+	}
+}
+
 // TestExternalLabel_VersionedReplaceDistinguishesTarget guards that
 // `replace example.com/a => example.com/b v1.2.3` and `=> example.com/c v1.2.3`
 // hash to different labels. Without encoding the replacement path, both would

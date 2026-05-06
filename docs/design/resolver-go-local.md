@@ -119,7 +119,7 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 | 種別 | 判定 | hash 入力 |
 |---|---|---|
 | stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断キャッシュを壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
-| 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` のファイル本体を SHA256 ( IgnoredFiles を含めることで GOOS / GOARCH / build-tag に非依存) |
+| 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` + `pkg.OtherFiles` のファイル本体を SHA256 ( `IgnoredFiles` で GOOS / GOARCH / build-tag に非依存、 `OtherFiles` で `.s` / `.c` / `.cc` / `.syso` 等の非 Go ソース変更も捕捉) |
 | 外部パッケージ | `pkg.Module` が外部 module を指す | `module path@version` 文字列 + go.sum 該当行の hash ( replace ディレクティブも外部扱い)。 go.sum は **load された main module の `Module.GoMod` の隣** から読む ( nested-module monorepo で repo root の go.sum を引かないため) |
 
 ```go
@@ -193,3 +193,4 @@ go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
 - ~~`go run` 形式 ( CLI から呼ぶたびに `go build` する) と build 済み binary 形式の使い分け。 spec で明示宣言する形を採るか、 CLI 形式を auto-detect するか~~ → [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一済み ( 両形式とも spec での明示宣言を必須とする)
 - ~~transitive 依存に `replace` ディレクティブで local 置換された module が混じった場合の扱い ( 内部コード扱いにする / 外部扱いにする)~~ → 外部扱いに確定 ( replace 先のファイル本体は再読しない、 `Replace.Version` または `replace=<path>` ラベルで version diversity を表現)
 - 内製 protoc plugin が `go.mod` の `internal/...` パッケージに依存する場合の subset hash 戦略
+- `go.work` で複数 repo-local module を束ねる構成は **現状サポート外**。 transitive 依存が複数 main module にまたがると、 sibling module の go.sum lookup を取りこぼし得るため、 lister は複数の `Module.Main` を検出した時点で fail する。 必要になった段階で「全 main module の go.sum を結合する」拡張を ADR で起こす

@@ -120,6 +120,28 @@ func TestGoPackages_IncludesIgnoredFilesForBuildTagSources(t *testing.T) {
 	}
 }
 
+// TestGoPackages_IncludesOtherFiles guards that non-Go source files reported
+// by packages.Package.OtherFiles (.s / .c / .cc / .syso) are also folded into
+// the hash. `go run` rebuilds when these files change, so omitting them would
+// let edits to assembly or cgo sources pass without invalidating tools_hash.
+func TestGoPackages_IncludesOtherFiles(t *testing.T) {
+	requireGo(t)
+	root := t.TempDir()
+	mustWriteFile(t, root, "go.mod", "module example.test/other\n\ngo 1.22\n")
+	mustWriteFile(t, root, "cmd/tool/main.go", "package main\n\nfunc add(a, b int) int\n\nfunc main() { _ = add(1, 2) }\n")
+	// Minimal Go-syntax assembly stub so packages.Load reports it in OtherFiles.
+	mustWriteFile(t, root, "cmd/tool/add_amd64.s", "TEXT ·add(SB), $0-24\n\tMOVQ a+0(FP), AX\n\tADDQ b+8(FP), AX\n\tMOVQ AX, ret+16(FP)\n\tRET\n")
+
+	got, err := lister.NewGoPackages(root).List(context.Background(), "", "./cmd/tool/...")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := "cmd/tool/add_amd64.s"
+	if !slices.Contains(got.InternalFiles, want) {
+		t.Errorf("InternalFiles = %v, must include %q (non-Go sources change the built binary)", got.InternalFiles, want)
+	}
+}
+
 func TestGoPackages_StdlibIsNotIncluded(t *testing.T) {
 	requireGo(t)
 	root := scaffoldModule(t, "example.test/stdlib")

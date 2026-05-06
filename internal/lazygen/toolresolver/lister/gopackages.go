@@ -81,32 +81,50 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	return listing, nil
 }
 
-// readGoSumForMainModule locates the main module via the loaded packages and
-// reads <main module dir>/go.sum. Missing go.sum is not an error: a fresh
-// module before `go mod tidy` has no entries, and packages whose only deps
-// are stdlib have no use for it. In that case the empty []byte ends up as
-// empty GoSumLine values for any external modules, which is honest about the
-// missing cryptographic anchor.
+// readGoSumForMainModule locates the (single) main module via the loaded
+// packages and reads <main module dir>/go.sum. Missing go.sum is not an
+// error: a fresh module before `go mod tidy` has no entries, and packages
+// whose only deps are stdlib have no use for it. In that case the empty
+// []byte ends up as empty GoSumLine values for any external modules, which
+// is honest about the missing cryptographic anchor.
+//
+// If the load surfaces *multiple* main modules — which happens when a
+// `go.work` file pulls several repo-local modules into one build — this
+// function fails fast. Without that, only the first module's go.sum would
+// be consulted and dependency bumps in sibling modules could leave
+// tools_hash unchanged. Supporting go.work properly requires combining
+// every used module's go.sum; until that is implemented the resolver
+// refuses to silently fingerprint a partial set.
 func readGoSumForMainModule(roots []*packages.Package) ([]byte, error) {
-	var goModPath string
-	packages.Visit(roots, func(pkg *packages.Package) bool {
-		if goModPath != "" {
-			return false
+	seen := map[string]struct{}{}
+	var goModPaths []string
+	packages.Visit(roots, nil, func(pkg *packages.Package) {
+		if pkg.Module == nil || !pkg.Module.Main || pkg.Module.GoMod == "" {
+			return
 		}
-		if pkg.Module != nil && pkg.Module.Main && pkg.Module.GoMod != "" {
-			goModPath = pkg.Module.GoMod
-			return false
+		if _, dup := seen[pkg.Module.GoMod]; dup {
+			return
 		}
-		return true
-	}, nil)
-	if goModPath == "" {
+		seen[pkg.Module.GoMod] = struct{}{}
+		goModPaths = append(goModPaths, pkg.Module.GoMod)
+	})
+
+	switch len(goModPaths) {
+	case 0:
 		return nil, nil
+	case 1:
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(goModPaths[0]), "go.sum"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return b, nil
+	default:
+		sort.Strings(goModPaths)
+		return nil, fmt.Errorf(
+			"go-local lister: multiple main modules detected (%s); go.work multi-module workspaces are not supported in this release",
+			strings.Join(goModPaths, ", "),
+		)
 	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(goModPath), "go.sum"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	return b, nil
 }
 
 func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listing, error) {
@@ -125,14 +143,16 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 		case pkg.Module == nil:
 			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral cache.
 		case pkg.Module.Main:
-			// GoFiles + EmbedFiles + IgnoredFiles together capture every source
-			// file that the package owns regardless of the host build context.
-			// IgnoredFiles is critical: without it, build-tagged sources like
-			// foo_linux.go / foo_darwin.go / files behind custom -tags would
-			// produce different hashes per OS and break the OS-neutral cache
-			// contract this resolver promises. Paths are converted to slash
-			// form so the digest is identical on Windows and Unix.
-			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles} {
+			// GoFiles + EmbedFiles + IgnoredFiles + OtherFiles together capture
+			// every source file the package owns regardless of host build
+			// context. IgnoredFiles makes build-tag / GOOS-conditional sources
+			// (foo_linux.go, custom -tags) contribute uniformly across hosts;
+			// OtherFiles covers non-Go inputs that `go build` rebuilds on
+			// (.s assembly, cgo .c/.cc, .syso) — without it edits to those
+			// files would not change tools_hash even though `go run` produces
+			// a different binary. Paths are converted to slash form so the
+			// digest is identical on Windows and Unix.
+			for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles, pkg.OtherFiles} {
 				for _, f := range group {
 					rel, err := filepath.Rel(l.repoRoot, f)
 					if err != nil {

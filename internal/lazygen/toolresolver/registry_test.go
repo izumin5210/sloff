@@ -111,22 +111,13 @@ func TestRegistry_UnknownDeclaredResolverErrors(t *testing.T) {
 	}
 }
 
-func TestRegistry_FallbackInvokesCallback(t *testing.T) {
+func TestRegistry_NoResolverMatchedErrors(t *testing.T) {
 	reg := toolresolver.NewRegistry()
 	reg.Register(&fakeResolver{name: "a", canResolve: false})
 
-	var fellBack bool
-	reg.SetFallback(func([]string) { fellBack = true })
-
-	got, err := reg.Resolve(context.Background(), ".", []string{"unknown"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Errorf("fallback should yield nil versions, got %v", got)
-	}
-	if !fellBack {
-		t.Error("fallback callback was not called")
+	_, err := reg.Resolve(context.Background(), ".", []string{"unknown"}, nil)
+	if err == nil {
+		t.Fatal("expected error when no resolver matches and no tools were declared")
 	}
 }
 

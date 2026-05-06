@@ -9,9 +9,8 @@ import (
 // presence of explicit `tools:` declarations in a spec, falling back to CanResolve in
 // registration order.
 type Registry struct {
-	byName     map[string]Resolver
-	inOrder    []Resolver
-	onFallback func(cmd []string)
+	byName  map[string]Resolver
+	inOrder []Resolver
 }
 
 // NewRegistry returns an empty Registry. Resolvers must be added via Register.
@@ -29,18 +28,11 @@ func (r *Registry) Register(resolver Resolver) {
 	r.byName[resolver.Name()] = resolver
 }
 
-// SetFallback installs a callback invoked when no resolver matches a cmd via auto-dispatch
-// and no `tools:` were declared. The runner uses this to log a warning; the resulting
-// tools_hash falls back to the cmd string only.
-func (r *Registry) SetFallback(fn func(cmd []string)) {
-	r.onFallback = fn
-}
-
 // Resolve returns the union of ToolVersions for cmd. If declared is non-empty each entry's
 // resolver is looked up by name and called with the full DeclaredTool; otherwise the
 // registered resolvers are tried in order and the first whose CanResolve returns true is
-// used. When neither path produces a match the fallback callback (if set) is invoked and
-// (nil, nil) is returned.
+// used. If neither path produces a match an error is returned: an unresolved tool would
+// hash to an empty version set and let stale cache hits survive a generator upgrade.
 func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, declared []DeclaredTool) ([]ToolVersion, error) {
 	if len(declared) > 0 {
 		var versions []ToolVersion
@@ -67,8 +59,5 @@ func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, de
 			return v, nil
 		}
 	}
-	if r.onFallback != nil {
-		r.onFallback(cmd)
-	}
-	return nil, nil
+	return nil, fmt.Errorf("no resolver matched cmd %v", cmd)
 }

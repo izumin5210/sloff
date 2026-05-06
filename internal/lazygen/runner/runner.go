@@ -65,8 +65,14 @@ type Runner struct {
 	logger   Logger
 	stdout   io.Writer
 	stderr   io.Writer
-	checkers []string                // resolver names of registered preflight checkers (run all in MVP)
-	byKey    map[string]taskInfo     // depgraph.Task key → taskInfo, filled by collectTasks
+	checkers []string            // resolver names of registered preflight checkers (run all in MVP)
+	byKey    map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
+
+	// producedBy maps each resolved output path to the task that produced it. Cross-task
+	// duplicate writes are spec conflicts that depgraph cannot catch on a clean checkout
+	// (pre-execution globs are empty), so the runner records writers as runs progress and
+	// fails the run if a later task lands on a path another task already produced.
+	producedBy map[string]string
 }
 
 // New constructs a Runner.
@@ -123,6 +129,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	r.producedBy = map[string]string{}
 	for _, t := range ordered {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -195,11 +202,16 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 
 	key := cache.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
 
+	taskLabel := taskLabel(t)
 	if rec, ok, err := r.opts.Storage.Load(ctx, key); err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	} else if ok {
-		current, err := hash.Files(r.opts.RepoRoot, rec.Output.Files.Paths())
+		paths := rec.Output.Files.Paths()
+		current, err := hash.Files(r.opts.RepoRoot, paths)
 		if err == nil && current == rec.Output.Hash {
+			if err := r.recordProducedPaths(taskLabel, paths); err != nil {
+				return err
+			}
 			r.logger.Infof("SKIP %s/%s (cache hit)", t.SpecRelpath, t.Name)
 			return nil
 		}
@@ -210,9 +222,12 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return fmt.Errorf("%s: %w", t.Name, err)
 	}
 
-	outputPaths, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, info.outputPatterns)
+	outputPaths, err := r.resolveOutputs(info)
 	if err != nil {
-		return fmt.Errorf("%s: re-expand outputs: %w", t.Name, err)
+		return fmt.Errorf("%s: %w", t.Name, err)
+	}
+	if err := r.recordProducedPaths(taskLabel, outputPaths); err != nil {
+		return err
 	}
 	outputHash, err := hash.Files(r.opts.RepoRoot, outputPaths)
 	if err != nil {
@@ -254,6 +269,43 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return fmt.Errorf("%s: save record: %w", t.Name, err)
 	}
 	return nil
+}
+
+// recordProducedPaths registers the resolved output paths of a task and fails when one
+// of those paths was already produced by a different task in this run. This catches spec
+// conflicts that depgraph cannot see at planning time on a clean checkout, where the
+// pre-run glob expansion of generated files comes back empty.
+func (r *Runner) recordProducedPaths(taskLabel string, paths []string) error {
+	for _, p := range paths {
+		if existing, exists := r.producedBy[p]; exists && existing != taskLabel {
+			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing, taskLabel)
+		}
+		r.producedBy[p] = taskLabel
+	}
+	return nil
+}
+
+func taskLabel(t depgraph.Task) string {
+	if t.SpecRelpath == "" {
+		return t.Name
+	}
+	return t.SpecRelpath + ":" + t.Name
+}
+
+// resolveOutputs re-expands every declared output pattern after execution and fails when
+// the union of matches is empty. A successful run that produced no declared outputs would
+// otherwise be persisted as a cache record with an empty file set, letting subsequent
+// cache hits permanently mask the broken generator. Individual patterns are allowed to
+// resolve to zero files (conditional artifacts), so long as some pattern produced output.
+func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
+	outputs, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, info.outputPatterns)
+	if err != nil {
+		return nil, fmt.Errorf("re-expand outputs: %w", err)
+	}
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("declared outputs %v produced no files", info.outputPatterns)
+	}
+	return outputs, nil
 }
 
 func (r *Runner) execCmd(ctx context.Context, info taskInfo) error {

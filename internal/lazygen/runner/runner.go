@@ -338,6 +338,7 @@ func declaredFromSpec(tools []spec.DeclaredTool) []toolresolver.DeclaredTool {
 			Resolver: t.Resolver,
 			Exec:     t.Exec,
 			Extract:  t.Extract,
+			Entry:    t.Entry,
 		}
 	}
 	return out

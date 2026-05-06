@@ -13,6 +13,8 @@ import (
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/golocal"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
@@ -64,11 +66,15 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 	return r.Run(ctx)
 }
 
-// buildResolvers wires up the resolver registry. PR1 ships only the script resolver,
-// which is universal (any prebuilt binary that has --version). Future PRs will register
-// pnpm-external / go-local / pnpm-local / buf alongside it.
+// buildResolvers wires up the resolver registry. The script resolver covers
+// any prebuilt binary that exposes --version; the go-local resolver auto-
+// dispatches `go run ./...` cmds and is also reachable via explicit
+// `tools: [{go-local: ./cmd/foo}]` declarations. The goPackagesLister is
+// memoised so repeated tasks against the same entry only pay packages.Load
+// once per run.
 func buildResolvers(root string) *toolresolver.Registry {
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(root))
+	reg.Register(golocal.New(root, lister.NewMemoized(lister.NewGoPackages(root))))
 	return reg
 }

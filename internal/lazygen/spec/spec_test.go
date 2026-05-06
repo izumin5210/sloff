@@ -175,6 +175,78 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "command with go-local tool",
+			yaml: `commands:
+  - name: gen
+    cmd: ["go", "run", "./cmd/protoc-gen-foo/..."]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.go"]
+    tools:
+      - go-local: ./cmd/protoc-gen-foo/...
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"go", "run", "./cmd/protoc-gen-foo/..."},
+					Inputs:  []string{"**/*.proto"},
+					Outputs: []string{"**/*.pb.go"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "go-local", Entry: "./cmd/protoc-gen-foo/..."},
+					},
+				}},
+			},
+		},
+		{
+			name: "command mixing script and go-local tools",
+			yaml: `commands:
+  - name: gen
+    cmd: ["go", "run", "./cmd/codegen"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.go"]
+    tools:
+      - exec: ["go", "version"]
+        extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
+      - go-local: ./cmd/codegen
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"go", "run", "./cmd/codegen"},
+					Inputs:  []string{"**/*.proto"},
+					Outputs: []string{"**/*.pb.go"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"go", "version"}, Extract: `go[0-9]+\.[0-9]+(?:\.[0-9]+)?`},
+						{Resolver: "go-local", Entry: "./cmd/codegen"},
+					},
+				}},
+			},
+		},
+		{
+			name: "tools entry with both exec and go-local fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - exec: ["foo", "--version"]
+        go-local: ./cmd/foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "go-local entry without leading dot-slash fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - go-local: cmd/foo
+`,
+			wantErr: true,
+		},
+		{
 			name: "empty commands fails",
 			yaml: `commands: []
 `,

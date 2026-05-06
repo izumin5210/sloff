@@ -1,0 +1,20 @@
+generated_at: 2026-05-05T12:00:00Z
+generator_version_snapshot:
+- name: ./cmd/copy
+  source: go-local:./cmd/copy
+  version: go-local:./cmd/copy@sha256:f56dfc278576cee5062ff4a3c81bb1e39dd5a20c4083d44ceee1da4cbebbd4c4
+input:
+  components:
+    cmd_hash: 3c15f70cffe53af130f09a4d35d7fc63cd74ce387f4e68331546986d83161869
+    files_hash: 72d58b4d1bec7dce35e9f112dbfba35b31645fcaa6b2ff57216635a91e490846
+    tools_hash: 9100594bc5bc88a8fc1d21c3a619933cdafeaab902a3c8601411fbe925cd2213
+  hash: 42e8024eb49e213dd8322466887fa04b632e31d397bd9d1f143727a50e83a9fa
+output:
+  files:
+    output.txt: a92f78a8c50a28c8a03604b528a94a52377fa475c5a07e2f38e75e6b22802308
+  hash: 261210f26aa4384677d24a26acab88a43eb4f35e522aa8e8220547f607fa6a70
+schema_version: 1
+spec:
+  cmd: go run ./cmd/copy
+  dir: .
+  task_id: copy

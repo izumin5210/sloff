@@ -6,12 +6,12 @@
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md) (= 自作)
 - [ADR-0002: キャッシュヒット判定モデル](../adr/0002-cache-hit-decision-model.md) (= output-comparison)
 - [ADR-0003: キャッシュレコードのストレージ方式](../adr/0003-record-storage-strategy.md) (= git per-task per-input ファイル)
+- [ADR-0006: lazygen は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( aqua 配布物 / go.mod tool / その他 `--version` を備えるバイナリ)
   - [Resolver: pnpm-external](./resolver-pnpm-external.md) — pnpm 外部公開パッケージ ( npm registry 等、 lockfile-based)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
   - [Resolver: pnpm-local](./resolver-pnpm-local.md) — pnpm workspace 内 内製パッケージ
-  - [Resolver: buf](./resolver-buf.md) — buf.gen.yaml 経由の複合 plugin 群
 
 ## Context
 
@@ -100,15 +100,17 @@ flowchart TD
 commands:
   - name: protoc-gen-go
     cmd: buf generate --template buf.gen.yaml
-    inputs: ["**/*.proto", "buf.gen.yaml"]
+    inputs: ["**/*.proto", "buf.gen.yaml", "buf.yaml", "buf.lock"]
     outputs: ["**/*.pb.go", "**/*.connect.go"]
     tools:
       # script resolver: prebuilt binary に --version 等を問い合わせる
       - exec: ["buf", "--version"]
       - exec: ["protoc-gen-go", "--version"]
         extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
-      # 他に使える resolver: pnpm-external (lockfile-based), go-local / pnpm-local (source-hash), buf (composite)
+      # 他に使える resolver: pnpm-external (lockfile-based), go-local / pnpm-local (source-hash)
     # 注: depends フィールドは持たない。 依存は inputs / outputs から完全自動導出される
+    # buf を使う場合は buf.gen.yaml / buf.yaml / buf.lock を inputs に含める ( ADR-0006)。
+    # buf 専用の resolver / preflight は持たず、 設定変更は files_hash 経路で invalidate される。
 ```
 
 文法ポイント:
@@ -308,19 +310,18 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 | Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存 ( 内部 / 外部分離戦略) | 不要 | [resolver-go-local.md](./resolver-go-local.md) |
 | pnpm 外部公開パッケージ | `pnpm-external` | `pnpm-lock.yaml` の resolved version | 必要 ( node_modules 整合) | [resolver-pnpm-external.md](./resolver-pnpm-external.md) |
 | pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | workspace package の src/ ソース hash ( esbuild API 経由) | build 必須なら dist 整合 | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
-| `buf generate` 経由 | `buf` | `buf` 本体 ( script resolver) + `buf.gen.yaml` の plugin 群 ( 各 plugin type 別解決) | composite ( 各 plugin の preflight に再帰) | [resolver-buf.md](./resolver-buf.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
+
+`buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
 
 ```mermaid
 flowchart LR
     SPEC["CmdSpec.tools[]<br/>(必須・declared のみ)"] --> DISP["Registry.byName lookup"]
     DISP -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go / ...)"]
-    DISP -->|"buf-generate: ..."| BUF["bufResolver<br/>(buf 本体は script に再帰)"]
     DISP -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister"]
     DISP -->|"pnpm-external: ..."| PNPMEXT["pnpmExternalResolver"]
     DISP -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister"]
     SCRIPT --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
-    BUF --> CONCAT
     GOLOC --> CONCAT
     PNPMEXT --> CONCAT
     PNPMLOC --> CONCAT
@@ -333,7 +334,7 @@ flowchart LR
 - spec の `tools: [...]` の各 entry に対応する resolver name を `Registry.byName` で引き、 該当 resolver の `Resolve` を呼ぶ
 - 一つの cmd に複数の resolver が必要な場合 ( 例: `cmd: ["go", "run", "./cmd/gen"]` を Go toolchain と go-local の両方で hash したい) は、 `tools:` に両方の entry を併記する
 - prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
-- `buf generate` のような複合 cmd を扱う resolver は、 declared 経由で起動された後に resolver 内部で `cmd` を解釈して plugin 一覧を抽出する
+- 複合 generator ( `buf generate` 等) を扱うときも専用 resolver は導入せず、 関連設定ファイルを spec.inputs に含める形で files_hash 経路に乗せる ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))
 
 declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) 参照。
 
@@ -370,10 +371,12 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 preflight が必要なのは、 `tools_hash` の取得元が lockfile であって runtime の実体と乖離する余地がある channel に限られる。 具体的には:
 
-- **必要**: `pnpm-external` ( pnpm-lock.yaml と node_modules の整合)、 `pnpm-local` ( workspace package の build 出力 dist が src より新しいかの整合)、 `buf` ( buf.yaml deps と buf.lock の整合 / `buf.gen.yaml` の remote plugin pinned tag 強制)
+- **必要**: `pnpm-external` ( pnpm-lock.yaml と node_modules の整合)、 `pnpm-local` ( workspace package の build 出力 dist が src より新しいかの整合)
 - **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため)
 
-各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-external](./resolver-pnpm-external.md#preflight-checker) / [pnpm-local](./resolver-pnpm-local.md#preflight-checker) / [buf](./resolver-buf.md#preflight-checker))。
+buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により lazygen は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。
+
+各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-external](./resolver-pnpm-external.md#preflight-checker) / [pnpm-local](./resolver-pnpm-local.md#preflight-checker))。
 
 不整合検出時の挙動 ( preflight が走った channel 共通):
 
@@ -395,7 +398,7 @@ package toolresolver
 
 import "context"
 
-// Resolver は単一の distribution channel ( script / pnpm-external / go-local / pnpm-local / buf 等) を担当する
+// Resolver は単一の distribution channel ( script / pnpm-external / go-local / pnpm-local 等) を担当する
 type Resolver interface {
     // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される
     Name() string
@@ -413,7 +416,7 @@ type ToolVersion struct {
 }
 ```
 
-組み込み実装: `scriptResolver` ( prebuilt binary 全般)、 `goLocalResolver` (内製 Go CLI), `pnpmExternalResolver`, `pnpmLocalResolver` (pnpm workspace 内 内製), `bufResolver` (`buf.gen.yaml` 解析の特殊形 / 内部で script に再帰)。 各 Resolver の実装詳細は対応する独立 doc を参照。
+組み込み実装: `scriptResolver` ( prebuilt binary 全般)、 `goLocalResolver` (内製 Go CLI), `pnpmExternalResolver`, `pnpmLocalResolver` (pnpm workspace 内 内製)。 各 Resolver の実装詳細は対応する独立 doc を参照。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により専用 resolver を持たない。
 
 Registry:
 
@@ -443,7 +446,7 @@ package preflight
 
 import "context"
 
-// Checker は単一の依存プロバイダ ( pnpm-external / pnpm-local / buf BSR 等 lockfile-based channel) の install 状態を検証する
+// Checker は単一の依存プロバイダ ( pnpm-external / pnpm-local 等 lockfile-based channel) の install 状態を検証する
 type Checker interface {
     Name() string                                     // resolver と同じ Name で対応付け
     Check(ctx context.Context, specDir string) (Result, error)
@@ -461,7 +464,7 @@ type Issue struct {
 }
 ```
 
-組み込み実装: `pnpmExternalChecker`, `pnpmLocalChecker`, `bufChecker`。 lockfile / build 状態を SSoT として持つ channel のみが Checker を持つ。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( 構造的に不要)。
+組み込み実装: `pnpmExternalChecker`, `pnpmLocalChecker`。 lockfile / build 状態を SSoT として持つ channel のみが Checker を持つ。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( 構造的に不要)。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により専用 Checker も持たない。
 
 Registry の動作:
 
@@ -622,14 +625,13 @@ internal/lazygen/
     registry.go                             # Registry (byName + dispatch order)
     script/                                 # ★ 各 Resolver は独立 Go package
       script.go                             # package script (prebuilt binary 全般、 詳細は resolver-script.md)
-    buf/
-      buf.go                                # package buf (詳細は resolver-buf.md)
     golocal/
       golocal.go                            # package golocal / internal: goPackagesLister (詳細は resolver-go-local.md)
     pnpmexternal/
       pnpmexternal.go                       # package pnpmexternal (詳細は resolver-pnpm-external.md)
     pnpmlocal/
       pnpmlocal.go                          # package pnpmlocal / internal: esbuildLister (詳細は resolver-pnpm-local.md)
+    # buf 専用 resolver は持たない ( ADR-0006)。 buf を使う task は script + spec.inputs で表現する
     lister/                                 # Resolver 内部 helper (トップレベル拡張点ではない、 1 package で十分)
       lister.go                             # SourceLister interface
       glob.go                               # globLister (標準実装、 ディレクトリ配下を glob 列挙)
@@ -642,13 +644,12 @@ internal/lazygen/
   preflight/                                # ★ Checker interface + Registry (lockfile/build 状態を SSoT とする channel のみ実装)
     preflight.go                            # Checker interface, Result/Issue 型
     registry.go
-    buf/
-      buf.go                                # package buf
     pnpmexternal/
       pnpmexternal.go                       # package pnpmexternal
     pnpmlocal/
       pnpmlocal.go                          # package pnpmlocal ( pnpm workspace 内 内製の build 状態検証)
-    # script resolver と go-local resolver には対応 Checker を置かない (構造的に不要、 [preflight 節](#lockfile-と-install-状態の整合性検証-preflight) 参照)
+    # script resolver / go-local resolver / buf には対応 Checker を置かない
+    # ( script / go-local は構造的に不要、 buf は ADR-0006 で利用者責務に倒した)
 
 # 利用者リポジトリ側に作成するファイル ( lazygen 利用時)
 <spec_dir>/lazygen.yml                      # task 定義

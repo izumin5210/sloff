@@ -132,6 +132,27 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "missing tools fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+`,
+			wantErr: true,
+		},
+		{
+			name: "empty tools fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: []
+`,
+			wantErr: true,
+		},
+		{
 			name: "tools entry without recognized fields fails",
 			yaml: `commands:
   - name: gen

@@ -15,9 +15,11 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
+	bufpreflight "github.com/izumin5210/lazygen/internal/lazygen/preflight/buf"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
+	bufresolver "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/buf"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/golocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
@@ -89,25 +91,38 @@ func setupHarness(t *testing.T, name string) *harness {
 func runStep() step {
 	return func(t *testing.T, h *harness) {
 		t.Helper()
-		specs, err := spec.Discover(h.workdir, "**/lazygen.yml")
-		if err != nil {
-			t.Fatalf("discover: %v", err)
-		}
-		resolverReg := toolresolver.NewRegistry()
-		resolverReg.Register(script.New(h.workdir))
-		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
-		r := runner.New(runner.Options{
-			RepoRoot:  h.workdir,
-			Specs:     specs,
-			Storage:   local.New(h.workdir),
-			Resolvers: resolverReg,
-			Preflight: preflight.NewRegistry(),
-			Clock:     func() time.Time { return fixedClock },
-		})
-		if err := r.Run(context.Background()); err != nil {
+		if err := runRunner(h.workdir); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 	}
+}
+
+// runRunner constructs the runner with the same resolver/preflight wiring as
+// cmd/lazygen and executes Run once. It is exported as a helper so tests that
+// need to assert on Run's error (e.g. preflight failures) can call it directly
+// instead of going through runStep, which fails the test on any error.
+func runRunner(workdir string) error {
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		return err
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	resolverReg.Register(bufresolver.New(workdir))
+
+	preflightReg := preflight.NewRegistry()
+	preflightReg.Register(bufpreflight.New(workdir, specs))
+
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflightReg,
+		Clock:     func() time.Time { return fixedClock },
+	})
+	return r.Run(context.Background())
 }
 
 func writeStep(relpath, contents string) step {
@@ -285,6 +300,90 @@ func TestRunner_GoLocal_FirstRunWritesRecord(t *testing.T) {
 	runE2E(t, "golocal-first-run-writes-record", runStep())
 }
 
+// TestRunner_Buf_FirstRunWritesRecord guards the canonical buf flow: a task
+// declares both `exec` (buf binary stand-in) and `buf:` tools, and the resulting
+// record must include a buf-remote logical version in tools_hash. Without this
+// fixture, regressions that drop the buf resolver from the wiring would only
+// surface as silent cache hits instead of a visible diff.
+func TestRunner_Buf_FirstRunWritesRecord(t *testing.T) {
+	runE2E(t, "buf-first-run-writes-record", runStep())
+}
+
+// TestRunner_Buf_SecondRunHits guards cache stability across runs when the buf
+// resolver is involved: re-running with no input changes must hit the cache,
+// proving the buf resolver's version output is deterministic across calls.
+func TestRunner_Buf_SecondRunHits(t *testing.T) {
+	runE2E(t, "buf-second-run-hits", runStep(), runStep())
+}
+
+// TestRunner_Buf_RemoteVersionBumpInvalidates guards the cache-key path: bumping
+// the remote plugin's pinned tag in buf.gen.yaml must invalidate the cache, since
+// the resolved version is the only signal that BSR will execute a different
+// plugin binary on the next run.
+func TestRunner_Buf_RemoteVersionBumpInvalidates(t *testing.T) {
+	runE2E(
+		t, "buf-remote-version-bump-invalidates",
+		runStep(),
+		writeStep("spec/buf.gen.yaml", `version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.35.3
+    out: gen
+`),
+		runStep(),
+	)
+}
+
+// TestRunner_Buf_PreflightFailsOnUnpinnedRemote guards that the preflight
+// checker blocks a run before any task executes when buf.gen.yaml has an
+// unpinned remote plugin. Letting the run proceed would be the whole problem
+// the pinned-tag rule exists to prevent: BSR's resolved version is otherwise
+// unobservable, so the cache would key on `:latest` and never invalidate.
+func TestRunner_Buf_PreflightFailsOnUnpinnedRemote(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "buf.gen.yaml"), []byte(`version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:latest
+    out: gen
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt"]
+    inputs: ["input.txt", "buf.gen.yaml"]
+    outputs: ["output.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+      - buf: buf.gen.yaml
+`
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runRunner(workdir)
+	if err == nil {
+		t.Fatal("expected preflight to reject :latest remote plugin")
+	}
+	if !strings.Contains(err.Error(), "preflight") {
+		t.Errorf("error should mention preflight, got: %v", err)
+	}
+
+	// Preflight must also keep the runner read-only on failure: no record may
+	// be written, otherwise a poisoned `:latest` entry would persist forever.
+	cacheDir := filepath.Join(workdir, ".lazygen", "cache")
+	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
+		t.Errorf("cache record must not be written when preflight fails: %v", entries)
+	}
+}
+
 func TestRunner_GoLocal_SecondRunHits(t *testing.T) {
 	runE2E(t, "golocal-second-run-hits", runStep(), runStep())
 }
@@ -342,22 +441,7 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	specs, err := spec.Discover(workdir, "**/lazygen.yml")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	resolverReg := toolresolver.NewRegistry()
-	resolverReg.Register(script.New(workdir))
-	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
-	r := runner.New(runner.Options{
-		RepoRoot:  workdir,
-		Specs:     specs,
-		Storage:   local.New(workdir),
-		Resolvers: resolverReg,
-		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
-	})
-	err = r.Run(context.Background())
+	err := runRunner(workdir)
 	if err == nil {
 		t.Fatal("expected error when output pattern matches no files")
 	}
@@ -406,22 +490,7 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	specs, err := spec.Discover(workdir, "**/lazygen.yml")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	resolverReg := toolresolver.NewRegistry()
-	resolverReg.Register(script.New(workdir))
-	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
-	r := runner.New(runner.Options{
-		RepoRoot:  workdir,
-		Specs:     specs,
-		Storage:   local.New(workdir),
-		Resolvers: resolverReg,
-		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
-	})
-	err = r.Run(context.Background())
+	err := runRunner(workdir)
 	if err == nil {
 		t.Fatal("expected error when two tasks produced the same output path")
 	}
@@ -458,22 +527,7 @@ func TestRunner_PartialOutputPatternsAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	specs, err := spec.Discover(workdir, "**/lazygen.yml")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	resolverReg := toolresolver.NewRegistry()
-	resolverReg.Register(script.New(workdir))
-	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
-	r := runner.New(runner.Options{
-		RepoRoot:  workdir,
-		Specs:     specs,
-		Storage:   local.New(workdir),
-		Resolvers: resolverReg,
-		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
-	})
-	if err := r.Run(context.Background()); err != nil {
+	if err := runRunner(workdir); err != nil {
 		t.Fatalf("expected success when at least one declared pattern produced files, got: %v", err)
 	}
 }

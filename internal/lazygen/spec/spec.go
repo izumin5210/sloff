@@ -48,8 +48,10 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 
 // DeclaredTool is one entry of a command's tools: list. The resolver is determined by
 // which fields are present in the YAML; for the script resolver an `exec` field is
-// required and `extract` is optional, and for the go-local resolver a `go-local` field
-// names the main package import path.
+// required and `extract` is optional, for the go-local resolver a `go-local` field
+// names the main package import path, and for the buf resolver a `buf` field names
+// the spec-dir-relative path to a buf.gen.yaml whose remote plugins should be
+// version-pinned (per ADR-0006).
 //
 // Example:
 //
@@ -58,6 +60,7 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 //	  - exec: ["go", "version"]
 //	    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
 //	  - go-local: ./cmd/protoc-gen-foo/...
+//	  - buf: buf.gen.yaml
 type DeclaredTool struct {
 	// Resolver is the resolver name inferred from the YAML shape, e.g. "script".
 	Resolver string
@@ -69,12 +72,17 @@ type DeclaredTool struct {
 	// Entry is the go-local resolver input: the main package import path
 	// (must begin with "./").
 	Entry string
+
+	// BufGenPath is the buf resolver input: a spec-dir-relative path to the
+	// buf.gen.yaml whose remote plugins should be parsed (per ADR-0006).
+	BufGenPath string
 }
 
 type rawDeclaredTool struct {
 	Exec    []string `yaml:"exec"`
 	Extract string   `yaml:"extract"`
 	GoLocal string   `yaml:"go-local"`
+	Buf     string   `yaml:"buf"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
@@ -83,18 +91,29 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	if err := yaml.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("tools entry: %w", err)
 	}
-	hasExec := len(raw.Exec) > 0
-	hasGoLocal := raw.GoLocal != ""
-	if hasExec && hasGoLocal {
-		return errors.New("tools entry: exec and go-local are mutually exclusive")
+	// Each tools entry binds to exactly one resolver. Counting set fields lets the
+	// error message stay accurate as more resolvers are added without rewriting the
+	// pairwise checks.
+	set := 0
+	if len(raw.Exec) > 0 {
+		set++
+	}
+	if raw.GoLocal != "" {
+		set++
+	}
+	if raw.Buf != "" {
+		set++
+	}
+	if set > 1 {
+		return errors.New("tools entry: exec, go-local, and buf are mutually exclusive")
 	}
 	switch {
-	case hasExec:
+	case len(raw.Exec) > 0:
 		d.Resolver = "script"
 		d.Exec = raw.Exec
 		d.Extract = raw.Extract
 		return nil
-	case hasGoLocal:
+	case raw.GoLocal != "":
 		// Spec-relative entries must start with `./` or `../` (or be a bare
 		// `.` / `..`): these forms disambiguate a relative repo path from a
 		// Go module import path and match what `go run` / `go/packages`
@@ -107,9 +126,35 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 		d.Resolver = "go-local"
 		d.Entry = raw.GoLocal
 		return nil
+	case raw.Buf != "":
+		// The buf resolver evaluates buf.gen.yaml relative to the spec dir, so the
+		// declared path must stay confined to that subtree. Absolute paths and
+		// parent-traversing paths are rejected up front to avoid accidentally
+		// reaching into a sibling spec or outside the repo.
+		if err := validateBufGenPath(raw.Buf); err != nil {
+			return fmt.Errorf("tools entry: %w", err)
+		}
+		d.Resolver = "buf"
+		d.BufGenPath = raw.Buf
+		return nil
 	default:
-		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local)")
+		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local, buf)")
 	}
+}
+
+// validateBufGenPath rejects shapes the buf resolver cannot honour without leaving
+// the spec dir. The resolver joins the path with <repoRoot>/<specDir> so absolute
+// paths bypass the spec scope and parent-relative traversal escapes it; both are
+// configuration mistakes worth catching at parse time rather than at resolve time.
+func validateBufGenPath(p string) error {
+	if path.IsAbs(p) {
+		return fmt.Errorf("buf path must be spec-dir-relative, got absolute %q", p)
+	}
+	cleaned := path.Clean(p)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return fmt.Errorf("buf path must stay within the spec dir, got %q", p)
+	}
+	return nil
 }
 
 // isRelativeEntry reports whether s is in the spec-relative entry form

@@ -235,6 +235,104 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "command with buf tool",
+			yaml: `commands:
+  - name: gen
+    cmd: buf generate
+    inputs: ["**/*.proto", "buf.gen.yaml"]
+    outputs: ["**/*.pb.go"]
+    tools:
+      - exec: ["buf", "--version"]
+      - buf: buf.gen.yaml
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"buf", "generate"},
+					Inputs:  []string{"**/*.proto", "buf.gen.yaml"},
+					Outputs: []string{"**/*.pb.go"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"buf", "--version"}},
+						{Resolver: "buf", BufGenPath: "buf.gen.yaml"},
+					},
+				}},
+			},
+		},
+		{
+			name: "buf path under nested directory is accepted",
+			yaml: `commands:
+  - name: gen
+    cmd: buf generate --template proto/buf.gen.yaml
+    inputs: ["proto/**/*.proto"]
+    outputs: ["proto/**/*.pb.go"]
+    tools:
+      - exec: ["buf", "--version"]
+      - buf: proto/buf.gen.yaml
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"buf", "generate", "--template", "proto/buf.gen.yaml"},
+					Inputs:  []string{"proto/**/*.proto"},
+					Outputs: []string{"proto/**/*.pb.go"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"buf", "--version"}},
+						{Resolver: "buf", BufGenPath: "proto/buf.gen.yaml"},
+					},
+				}},
+			},
+		},
+		{
+			name: "tools entry with both exec and buf fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - exec: ["foo", "--version"]
+        buf: buf.gen.yaml
+`,
+			wantErr: true,
+		},
+		{
+			name: "tools entry with both go-local and buf fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - go-local: ./cmd/gen
+        buf: buf.gen.yaml
+`,
+			wantErr: true,
+		},
+		{
+			name: "buf with absolute path fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - buf: /etc/buf.gen.yaml
+`,
+			wantErr: true,
+		},
+		{
+			name: "buf with parent-relative path fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - buf: ../buf.gen.yaml
+`,
+			wantErr: true,
+		},
+		{
 			name: "go-local entry without leading dot-slash fails",
 			yaml: `commands:
   - name: gen

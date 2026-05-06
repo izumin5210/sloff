@@ -33,7 +33,7 @@ type ToolVersion struct {
 // DeclaredTool mirrors one tools[] entry of a spec. The runner translates spec.DeclaredTool
 // into this type before calling Registry.Resolve. Field semantics are resolver-specific:
 // the script resolver consumes Exec and Extract; the go-local resolver consumes Entry;
-// future resolvers add their own fields.
+// the buf resolver consumes BufGenPath; future resolvers add their own fields.
 type DeclaredTool struct {
 	Resolver string
 
@@ -44,4 +44,8 @@ type DeclaredTool struct {
 	// Entry is the go-local resolver input: the main package import path
 	// (e.g. "./cmd/protoc-gen-foo/...").
 	Entry string
+
+	// BufGenPath is the buf resolver input: a spec-dir-relative path to the
+	// buf.gen.yaml whose remote plugins should be parsed (per ADR-0006).
+	BufGenPath string
 }

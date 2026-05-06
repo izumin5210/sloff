@@ -298,6 +298,66 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	}
 }
 
+// TestRunner_DuplicateProducerAtRuntimeErrors guards against silently overwriting an
+// output produced by another task. Static depgraph detection only fires when the file
+// already exists at planning time (e.g. the previous run committed it). For repos that
+// gitignore generated files, the conflict only becomes observable after a task actually
+// writes the path, so the runner cross-checks resolved outputs across tasks at runtime
+// and aborts the run with both task names so the user can fix the spec.
+func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `commands:
+  - name: first
+    cmd: ["sh", "-c", "cp input.txt shared.txt"]
+    inputs: ["input.txt"]
+    outputs: ["shared.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  - name: second
+    cmd: ["sh", "-c", "cp input.txt shared.txt"]
+    inputs: ["input.txt"]
+    outputs: ["shared.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+`
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when two tasks produced the same output path")
+	}
+	for _, want := range []string{"shared.txt", "first", "second"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
 // TestRunner_PartialOutputPatternsAllowed verifies that a generator that produces some
 // declared output patterns but leaves others empty (e.g. a conditional artifact) is
 // treated as a successful run. The union safeguard only fails when no declared pattern

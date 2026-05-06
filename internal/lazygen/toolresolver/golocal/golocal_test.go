@@ -117,6 +117,35 @@ func TestResolver_AcceptsDotEntry(t *testing.T) {
 	}
 }
 
+// TestResolver_AcceptsParentRelativeEntry guards `tools: [{go-local: ../cmd/gen}]`
+// for nested specs that invoke their generator from a parent directory. The
+// entry passes through to the lister verbatim; the lister anchors at the
+// spec dir so the parent-relative path resolves the same way `go run` would.
+func TestResolver_AcceptsParentRelativeEntry(t *testing.T) {
+	root := setupRepo(t, map[string]string{
+		"cmd/gen/main.go":    "package main\nfunc main() {}\n",
+		"specs/sub/dummy.go": "package sub\n", // ensure the spec dir exists
+	})
+	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/gen/main.go"}}}
+
+	versions, err := golocal.New(root, stub).Resolve(
+		context.Background(), filepath.Join("specs", "sub"), nil,
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "../../cmd/gen"},
+	)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if stub.gotSpecDir != filepath.Join("specs", "sub") {
+		t.Errorf("lister received specDir %q, want %q", stub.gotSpecDir, filepath.Join("specs", "sub"))
+	}
+	if stub.gotEntry != "../../cmd/gen" {
+		t.Errorf("lister received entry %q, want ../../cmd/gen (no rewriting)", stub.gotEntry)
+	}
+	if !strings.HasPrefix(versions[0].Version, "go-local:../../cmd/gen@sha256:") {
+		t.Errorf("Version = %q, want spec-relative parent-traversal label", versions[0].Version)
+	}
+}
+
 // TestResolver_PassesSpecDirToLister guards that the resolver propagates the
 // spec directory verbatim, so the lister can run packages.Load inside the
 // spec's working module (which is what makes nested-module monorepos work).

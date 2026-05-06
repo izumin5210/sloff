@@ -95,12 +95,14 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 		d.Extract = raw.Extract
 		return nil
 	case hasGoLocal:
-		// `./` prefix or a bare "." is required: this disambiguates a relative
-		// repo path from a Go module import path and matches the forms expected
-		// by `go run` / `go/packages` (e.g. `go run .` for a generator whose
-		// main package is the spec directory itself).
-		if raw.GoLocal != "." && !strings.HasPrefix(raw.GoLocal, "./") {
-			return fmt.Errorf("tools entry: go-local must be %q or start with %q, got %q", ".", "./", raw.GoLocal)
+		// Spec-relative entries must start with `./` or `../` (or be a bare
+		// `.` / `..`): these forms disambiguate a relative repo path from a
+		// Go module import path and match what `go run` / `go/packages`
+		// accept. Parent-relative paths matter for nested specs that share a
+		// generator with their parent directory (`go run ../cmd/gen`).
+		if !isRelativeEntry(raw.GoLocal) {
+			return fmt.Errorf("tools entry: go-local must start with %q or %q (or be %q / %q), got %q",
+				"./", "../", ".", "..", raw.GoLocal)
 		}
 		d.Resolver = "go-local"
 		d.Entry = raw.GoLocal
@@ -108,6 +110,14 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	default:
 		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local)")
 	}
+}
+
+// isRelativeEntry reports whether s is in the spec-relative entry form
+// accepted by `go run` / `go/packages`: bare "." / "..", or starting with
+// "./" / "../".
+func isRelativeEntry(s string) bool {
+	return s == "." || s == ".." ||
+		strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
 // Parse reads a lazygen.yml document and validates the required fields.

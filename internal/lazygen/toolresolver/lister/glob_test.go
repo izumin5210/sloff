@@ -89,10 +89,43 @@ func TestGlob_RejectsAbsoluteOrEscapingEntry(t *testing.T) {
 	root := t.TempDir()
 	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
 
+	// "cmd/foo" lacks a relative prefix; "/etc" is absolute; "../escape" from
+	// the repo root resolves outside the repo. All three must error.
 	for _, entry := range []string{"cmd/foo", "/etc", "../escape"} {
 		if _, err := l.List(context.Background(), "", entry); err == nil {
 			t.Errorf("List(%q) succeeded; want error", entry)
 		}
+	}
+}
+
+// TestGlob_AcceptsParentRelativeEntryWithinRepo covers nested specs that
+// share a generator with a parent directory. The entry traverses up out of
+// specDir but the final target still sits inside repoRoot, so the lister
+// must accept it and emit repo-relative keys for downstream hashing.
+func TestGlob_AcceptsParentRelativeEntryWithinRepo(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "cmd/gen/main.go", "package main\n")
+
+	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
+	got, err := l.List(context.Background(), filepath.Join("specs", "sub"), "../../cmd/gen")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{"cmd/gen/main.go"}
+	if diff := cmp.Diff(want, got.InternalFiles); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGlob_RejectsParentRelativeEntryThatEscapesRepo guards the repoRoot
+// boundary check: even with parent-relative support, a target that resolves
+// outside repoRoot would tie the listing to per-developer paths.
+func TestGlob_RejectsParentRelativeEntryThatEscapesRepo(t *testing.T) {
+	root := t.TempDir()
+	l := lister.NewGlob(root, []string{"**/*.go"}, nil)
+
+	if _, err := l.List(context.Background(), "specs", "../../../escape"); err == nil {
+		t.Error("expected error when parent-relative entry resolves outside repo root")
 	}
 }
 

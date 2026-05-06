@@ -35,7 +35,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 go-local resolver は spec の `tools: [{go-local: <import-path>}]` で明示宣言された場合にのみ起動する ([ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md))。
 
-- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は必ず `./` で始まる spec dir 相対の import path
+- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は spec dir 相対 ( `./` / `../` 始まり、 または bare `.` / `..`)。 nested spec が parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
 - `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の宣言を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
 - build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に declared を併記する
 - 同じ cmd で go-local 以外の resolver も使いたい場合 ( 例: Go toolchain 自体の bump も captureしたい) は `tools:` に複数 entry を書く: `tools: [{go-local: ./cmd/protoc-gen-foo}, {exec: ["go", "version"], extract: '...'}]`

@@ -35,8 +35,10 @@ type goPackagesLister struct {
 }
 
 func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Listing, error) {
-	if !strings.HasPrefix(entry, "./") && entry != "." {
-		return Listing{}, fmt.Errorf("entry must start with %q, got %q", "./", entry)
+	if entry != "." && entry != ".." &&
+		!strings.HasPrefix(entry, "./") && !strings.HasPrefix(entry, "../") {
+		return Listing{}, fmt.Errorf("entry must start with %q or %q (or be %q / %q), got %q",
+			"./", "../", ".", "..", entry)
 	}
 
 	cfg := &packages.Config{

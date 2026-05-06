@@ -39,6 +39,13 @@ func (l *globLister) List(_ context.Context, specDir, entry string) (Listing, er
 		return Listing{}, err
 	}
 	absBase := filepath.Join(l.repoRoot, specDir, base)
+	// Refuse entries that resolve outside repoRoot. Parent-relative entries
+	// (e.g. `../cmd/gen`) are valid as long as the final target stays inside
+	// the repo; absolute or deep `../../../...` traversals would tie the
+	// listing to per-developer paths and break OS-neutral cache sharing.
+	if rel, err := filepath.Rel(l.repoRoot, absBase); err != nil || strings.HasPrefix(rel, "..") {
+		return Listing{}, fmt.Errorf("entry %q resolves outside repo root", entry)
+	}
 	fsys := os.DirFS(absBase)
 
 	seen := map[string]struct{}{}
@@ -70,29 +77,31 @@ func (l *globLister) List(_ context.Context, specDir, entry string) (Listing, er
 }
 
 // normalizeEntry converts a `go run`-form import path ("./cmd/foo/...",
-// "./cmd/foo", "./cmd/foo/") into a slashless relative directory anchored at
-// the repo root. Entries that escape the repo (e.g. "../foo") are rejected so
-// the lister cannot produce paths outside the repoRoot.
+// "./cmd/foo", "../cmd/foo", "../...", ".", "..") into an OS-native relative
+// directory the lister can join onto specDir. Parent-relative forms are
+// preserved because nested specs that share a generator with a parent
+// directory rely on them; the caller separately verifies that the joined
+// (repoRoot, specDir, base) target stays inside the repo.
 func normalizeEntry(entry string) (string, error) {
-	if !strings.HasPrefix(entry, "./") && entry != "." {
-		return "", fmt.Errorf("entry must start with %q, got %q", "./", entry)
+	if entry != "." && entry != ".." &&
+		!strings.HasPrefix(entry, "./") && !strings.HasPrefix(entry, "../") {
+		return "", fmt.Errorf("entry must start with %q or %q (or be %q / %q), got %q",
+			"./", "../", ".", "..", entry)
 	}
-	e := strings.TrimPrefix(entry, "./")
-	e = strings.TrimSuffix(e, "/...")
+	e := strings.TrimSuffix(entry, "/...")
 	e = strings.TrimSuffix(e, "/")
-	if e == "" || e == "." {
+	if e == "" {
 		return ".", nil
 	}
-	if strings.Contains(e, "..") {
-		return "", fmt.Errorf("entry must not escape the repo root: %q", entry)
-	}
-	return filepath.FromSlash(e), nil
+	return filepath.Clean(filepath.FromSlash(e)), nil
 }
 
 // joinRel composes a repo-relative slash-form path from specDir, the normalized
-// entry base, and a glob match. Slashes (not OS-native separators) are required
-// so the same source tree hashes identically across Windows and Unix; downstream
-// callers that need to read the file convert with filepath.FromSlash.
+// entry base, and a glob match. path.Join collapses any `..` segments that
+// came in through a parent-relative entry so the resulting key is canonical.
+// Slashes (not OS-native separators) are required so the same source tree
+// hashes identically across Windows and Unix; downstream callers that need
+// to read the file convert with filepath.FromSlash.
 func joinRel(specDir, base, match string) string {
 	parts := match
 	if base != "." {

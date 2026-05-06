@@ -86,6 +86,15 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 	}}, nil
 }
 
+// isRelativeEntry reports whether s is in the spec-relative entry form the
+// resolver accepts: bare "." / "..", or starting with "./" / "../". Parent-
+// relative forms are valid for nested specs that share a generator with their
+// parent (e.g. `tools: [{go-local: ../cmd/gen}]`).
+func isRelativeEntry(s string) bool {
+	return s == "." || s == ".." ||
+		strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
+}
+
 func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, error) {
 	if declared == nil {
 		return "", errors.New("go-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
@@ -93,8 +102,9 @@ func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, er
 	if declared.Entry == "" {
 		return "", errors.New("go-local: declared entry is required")
 	}
-	if declared.Entry != "." && !strings.HasPrefix(declared.Entry, "./") {
-		return "", fmt.Errorf("go-local: declared entry must be %q or start with %q, got %q", ".", "./", declared.Entry)
+	if !isRelativeEntry(declared.Entry) {
+		return "", fmt.Errorf("go-local: declared entry must start with %q or %q (or be %q / %q), got %q",
+			"./", "../", ".", "..", declared.Entry)
 	}
 	return declared.Entry, nil
 }

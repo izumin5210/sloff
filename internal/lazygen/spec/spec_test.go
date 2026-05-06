@@ -269,6 +269,28 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "go-local parent-relative entry is accepted",
+			yaml: `commands:
+  - name: gen
+    cmd: go run ../cmd/gen
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - go-local: ../cmd/gen
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"go", "run", "../cmd/gen"},
+					Inputs:  []string{"a"},
+					Outputs: []string{"b"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "go-local", Entry: "../cmd/gen"},
+					},
+				}},
+			},
+		},
+		{
 			name: "empty commands fails",
 			yaml: `commands: []
 `,

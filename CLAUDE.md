@@ -42,4 +42,4 @@ When adding E2E tests, create a dedicated fixture directory per test case under 
     - `Why`: reason for the change.
     - `Summary`: short overview of what changed.
 - If `Why` is unknown, ask the user before finalizing the PR description.
-- Before writing a sentence (in PR descriptions, code comments, docs, etc.), ask "what does the reader lose if I delete this?" If nothing, delete it. The diff / code / source artifact is already there; prose should add what the artifact alone does not convey, not narrate it.
+- Prose (PR bodies, comments, docs) must add what the diff / code does not convey. If a sentence only narrates what the artifact already shows, delete it.

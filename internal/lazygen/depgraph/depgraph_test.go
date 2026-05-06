@@ -102,6 +102,24 @@ func TestBuild_CycleErrors(t *testing.T) {
 	}
 }
 
+func TestBuild_DuplicateOutputProducersErrors(t *testing.T) {
+	tasks := []depgraph.Task{
+		task("svcA", "first", []string{"a.in"}, []string{"shared.out", "a.out"}),
+		task("svcB", "second", []string{"b.in"}, []string{"shared.out"}),
+		task("svcC", "third", []string{"c.in"}, []string{"shared.out", "other.out"}),
+	}
+	_, err := depgraph.Build(tasks)
+	if err == nil {
+		t.Fatal("expected error for duplicate output producers")
+	}
+	msg := err.Error()
+	for _, want := range []string{"shared.out", "svcA:first", "svcB:second", "svcC:third"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
 func TestBuild_DependencyDetectedAcrossSpecDirs(t *testing.T) {
 	tasks := []depgraph.Task{
 		task("svcB", "consumer", []string{"shared/proto/x.pb.go"}, []string{"svcB/y.go"}),

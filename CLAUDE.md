@@ -42,3 +42,4 @@ When adding E2E tests, create a dedicated fixture directory per test case under 
     - `Why`: reason for the change.
     - `Summary`: short overview of what changed.
 - If `Why` is unknown, ask the user before finalizing the PR description.
+- Write only about the PR's actual content. Do not narrate meta-process such as "going forward we will do X" or restate rules that the PR adds to CLAUDE.md / other docs — those rules apply by virtue of being merged, so repeating them in the PR body is noise.

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -258,29 +257,19 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 }
 
 // resolveOutputs re-expands every declared output pattern after execution and fails when
-// any pattern resolved to zero files. A pattern that matches nothing means the generator
-// either exited without writing or wrote to the wrong path; persisting an empty output
-// set would let cache hits permanently mask the broken generator.
+// the union of matches is empty. A successful run that produced no declared outputs would
+// otherwise be persisted as a cache record with an empty file set, letting subsequent
+// cache hits permanently mask the broken generator. Individual patterns are allowed to
+// resolve to zero files (conditional artifacts), so long as some pattern produced output.
 func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
-	seen := make(map[string]struct{})
-	for _, pattern := range info.outputPatterns {
-		matches, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, []string{pattern})
-		if err != nil {
-			return nil, fmt.Errorf("re-expand outputs: %w", err)
-		}
-		if len(matches) == 0 {
-			return nil, fmt.Errorf("output pattern %q produced no files", pattern)
-		}
-		for _, m := range matches {
-			seen[m] = struct{}{}
-		}
+	outputs, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, info.outputPatterns)
+	if err != nil {
+		return nil, fmt.Errorf("re-expand outputs: %w", err)
 	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("declared outputs %v produced no files", info.outputPatterns)
 	}
-	sort.Strings(out)
-	return out, nil
+	return outputs, nil
 }
 
 func (r *Runner) execCmd(ctx context.Context, info taskInfo) error {

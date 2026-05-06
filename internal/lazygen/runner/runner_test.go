@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,4 +242,58 @@ func TestRunner_OutputDriftInvalidates(t *testing.T) {
 		writeStep("spec/output.txt", "tampered"),
 		runStep(),
 	)
+}
+
+// TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
+// whose declared output patterns matched zero files. A generator that exits 0 without
+// writing anything must fail loudly; otherwise the empty output set is persisted and
+// future runs hit the cache forever.
+func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `commands:
+  - name: writes-nothing
+    cmd: ["sh", "-c", "true"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+`
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when output pattern matches no files")
+	}
+	if !strings.Contains(err.Error(), "output.txt") {
+		t.Errorf("error should mention the failing output pattern, got: %v", err)
+	}
+
+	cacheDir := filepath.Join(workdir, ".lazygen", "cache")
+	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
+		t.Errorf("cache record must not be written for failed run: %v", entries)
+	}
 }

@@ -1,6 +1,9 @@
-// Package gitfile is the default Storage backend that persists records as YAML files
-// inside the working tree under .lazygen/cache/.
-package gitfile
+// Package local is the default Storage backend that persists records as YAML files on
+// the local filesystem under <repoRoot>/.lazygen/cache/. It performs no git operations;
+// committing the resulting files (or excluding them via .gitignore) is up to the user
+// of lazygen. This is the file-on-disk variant; remote backends (e.g. S3) live in
+// sibling packages.
+package local
 
 import (
 	"context"
@@ -14,7 +17,7 @@ import (
 	"github.com/izumin5210/lazygen/internal/lazygen/cache"
 )
 
-const backendName = "git-file"
+const backendName = "local"
 
 // Storage stores cache records under <repoRoot>/.lazygen/cache/.
 //

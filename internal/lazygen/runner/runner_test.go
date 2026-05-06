@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/izumin5210/lazygen/internal/lazygen/cache/gitfile"
+	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
@@ -95,7 +95,7 @@ func runStep() step {
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
-			Storage:   gitfile.New(h.workdir),
+			Storage:   local.New(h.workdir),
 			Resolvers: resolverReg,
 			Preflight: preflight.NewRegistry(),
 			Clock:     func() time.Time { return fixedClock },

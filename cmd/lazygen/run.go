@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/izumin5210/lazygen/internal/lazygen/cache/gitfile"
+	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
@@ -55,7 +55,7 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 	r := runner.New(runner.Options{
 		RepoRoot:  root,
 		Specs:     specs,
-		Storage:   gitfile.New(root),
+		Storage:   local.New(root),
 		Resolvers: buildResolvers(root),
 		Preflight: preflight.NewRegistry(), // no concrete checkers in this build
 		ReadOnly:  readOnly,

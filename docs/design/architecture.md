@@ -76,7 +76,7 @@
   - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
 - 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`、 ts なら esbuild。 Pants 流の dependency inference を取り込む)
 - preflight ( lockfile と install 状態の照合) は **lockfile を SSoT とする channel ( pnpm-external) のみ** で動かす。 script resolver / 内製ソース resolver では runtime バイナリやソース自体が SSoT のため、 preflight は構造的に不要
-- record の永続化レイヤ ( Storage) も interface を切り、 初版は `GitFileStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
+- record の永続化レイヤ ( Storage) も interface を切り、 初版は `LocalStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
 
 ```mermaid
 flowchart TD
@@ -213,9 +213,9 @@ package cache
 
 import "context"
 
-// Storage は record の永続化バックエンド ( git ファイル / S3 / Hybrid 等)
+// Storage は record の永続化バックエンド ( ローカルファイル / S3 / Hybrid 等)
 type Storage interface {
-    // Name は backend 識別子 (例: "git-file", "s3", "hybrid")
+    // Name は backend 識別子 (例: "local", "s3", "hybrid")
     Name() string
 
     // Load は key に対応する record を取得する。 見つからなければ (nil, false, nil)
@@ -246,7 +246,7 @@ type ListFilter struct {
 
 組み込み実装 ( 初版):
 
-- **`GitFileStorage`** ( ADR-0003 で採用): `.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` に YAML として書き出し、 git 管理する
+- **`LocalStorage`** ( ADR-0003 で採用): `.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
 
 将来追加候補 ( 必要が生じた段階で対応):
 
@@ -258,7 +258,7 @@ backend 選択は環境変数で切り替える想定:
 
 ```sh
 # 既定 ( 初版実装ではこれのみ)
-LAZYGEN_CACHE_BACKEND=git-file lazygen run --pattern '**/lazygen.yml'
+LAZYGEN_CACHE_BACKEND=local lazygen run --pattern '**/lazygen.yml'
 
 # 将来 S3 を導入した場合
 LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
@@ -270,11 +270,11 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 - **Storage** = 「どこに / どうやって保存するか」 ( ファイル / object / DB)
 - **output-comparison ロジック** ( cache lookup) は Storage backend に依存しない
 
-これにより、 backend 切替 ( 例: GitFileStorage → S3Storage) を行っても、 cache 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
+これにより、 backend 切替 ( 例: LocalStorage → S3Storage) を行っても、 cache 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
 
 ##### 初版スコープ
 
-初版は **`GitFileStorage` のみ実装** する ( ADR-0003 採用案)。 interface と Registry は最初から切るが、 他 backend は YAGNI 原則で実装しない。 将来 S3 / Hybrid が必要になった段階で interface に従って実装を追加する。
+初版は **`LocalStorage` のみ実装** する ( ADR-0003 採用案)。 interface と Registry は最初から切るが、 他 backend は YAGNI 原則で実装しない。 将来 S3 / Hybrid が必要になった段階で interface に従って実装を追加する。
 
 ### OS 横断 invalidate 戦略
 
@@ -606,8 +606,8 @@ internal/lazygen/
     record.go                               # Record 型 (YAML schema, deterministic marshal/unmarshal)
     storage.go                              # Storage interface, Key / ListFilter 型
     registry.go                             # Storage registry (LAZYGEN_CACHE_BACKEND による backend 選択)
-    gitfile/                                # ★ 各 backend は独立 Go package
-      gitfile.go                            # GitFileStorage (採用、 ADR-0003)
+    local/                                # ★ 各 backend は独立 Go package
+      local.go                            # LocalStorage (採用、 ADR-0003)
     # 将来追加候補 ( 初版では実装しない、 各々独立 package で実装):
     #   s3/s3.go             (S3Storage,     ADR-0003 Option C)
     #   hybrid/hybrid.go     (HybridStorage, ADR-0003 Option E)
@@ -653,7 +653,7 @@ internal/lazygen/
 
 #### Resolver / Preflight Checker / Storage backend の package 分割方針
 
-各実装 ( scriptResolver / pnpmExternalResolver / pnpmExternalChecker / GitFileStorage 等) は **それぞれ独立した Go package** として配置する ( ファイル単位ではなくディレクトリ単位)。 理由:
+各実装 ( scriptResolver / pnpmExternalResolver / pnpmExternalChecker / LocalStorage 等) は **それぞれ独立した Go package** として配置する ( ファイル単位ではなくディレクトリ単位)。 理由:
 
 - 各実装が独立した Go package となることで、 import 関係 ( 何を依存するか) が明示的に分離される
 - 単独 package のテストが書ける ( scriptResolver のテストが pnpmExternalResolver の実装に巻き込まれない)

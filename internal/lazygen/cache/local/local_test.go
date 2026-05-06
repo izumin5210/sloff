@@ -1,4 +1,4 @@
-package gitfile_test
+package local_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache"
-	"github.com/izumin5210/lazygen/internal/lazygen/cache/gitfile"
+	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 )
 
 func newRecord(taskID string) *cache.Record {
@@ -29,7 +29,7 @@ func newRecord(taskID string) *cache.Record {
 
 func TestSaveLoad_RoundTrip(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "deadbeef"}
@@ -52,7 +52,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 
 func TestLoad_MissReturnsFalse(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	got, ok, err := st.Load(ctx, cache.Key{SpecRelpath: "x", TaskID: "y", InputHash: "z"})
@@ -66,7 +66,7 @@ func TestLoad_MissReturnsFalse(t *testing.T) {
 
 func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "abc123"}
@@ -85,7 +85,7 @@ func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 
 func TestDelete_RemovesFile(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
@@ -106,7 +106,7 @@ func TestDelete_RemovesFile(t *testing.T) {
 
 func TestDelete_MissingKeyIsNoop(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 	if err := st.Delete(ctx, cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "h"}); err != nil {
 		t.Errorf("Delete on missing should be noop, got %v", err)
@@ -115,7 +115,7 @@ func TestDelete_MissingKeyIsNoop(t *testing.T) {
 
 func TestList_AllAndFiltered(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	keys := []cache.Key{
@@ -156,7 +156,7 @@ func TestList_AllAndFiltered(t *testing.T) {
 
 func TestList_OlderThan(t *testing.T) {
 	root := t.TempDir()
-	st := gitfile.New(root)
+	st := local.New(root)
 	ctx := context.Background()
 
 	old := cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "old"}
@@ -187,7 +187,7 @@ func TestList_OlderThan(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	if name := gitfile.New("/tmp").Name(); name != "git-file" {
-		t.Errorf("Name() = %q, want git-file", name)
+	if name := local.New("/tmp").Name(); name != "local" {
+		t.Errorf("Name() = %q, want local", name)
 	}
 }

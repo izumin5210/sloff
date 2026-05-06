@@ -11,7 +11,7 @@ import (
 // a record and need not concern themselves with hash semantics. Load/Save/Delete are
 // expected to be idempotent for missing keys.
 type Storage interface {
-	// Name returns the backend identifier (e.g. "git-file").
+	// Name returns the backend identifier (e.g. "local").
 	Name() string
 
 	// Load returns the record at key. (nil, false, nil) means "no record"; an error is

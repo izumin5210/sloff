@@ -52,6 +52,10 @@ type Options struct {
 	Stderr io.Writer
 
 	Logger Logger
+
+	// Clock supplies the timestamp written to record.GeneratedAt. Defaults to
+	// time.Now().UTC(); tests inject a fixed clock so cache YAML is byte-deterministic.
+	Clock func() time.Time
 }
 
 // Runner executes all discovered specs in topological order with cache lookup and
@@ -78,6 +82,9 @@ func New(opts Options) *Runner {
 	stderr := opts.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
+	}
+	if opts.Clock == nil {
+		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
 	r := &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
 
@@ -222,7 +229,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	}
 
 	rec := &cache.Record{
-		GeneratedAt:              time.Now().UTC(),
+		GeneratedAt:              r.opts.Clock(),
 		GeneratorVersionSnapshot: snapshotFromVersions(versions),
 		Input: cache.Input{
 			Hash: inputHash,

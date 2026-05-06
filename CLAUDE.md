@@ -19,7 +19,9 @@ go test ./internal/lazygen/runner/...  # run a single package
 go test ./internal/lazygen/runner/... -run TestE2E_FirstRun  # run a single test
 ```
 
-### E2E golden fixtures
+### E2E tests
+
+E2E tests are the primary safety net for this project. Every feature addition and bug fix MUST be accompanied by comprehensive E2E coverage — do not rely on unit tests alone to validate behavior changes.
 
 The E2E tests under `internal/lazygen/runner` compare against `testdata/e2e/runner/<case>/{initial,expected}/` as goldens. When intentionally changing behavior:
 
@@ -27,11 +29,14 @@ The E2E tests under `internal/lazygen/runner` compare against `testdata/e2e/runn
 go test ./internal/lazygen/runner/... -update   # rewrite expected/ from actual outputs
 ```
 
+When adding E2E tests, create a dedicated fixture directory per test case under `testdata/e2e/<package>/<case>/` and aim for comprehensive case coverage (happy path, edge cases, regression scenarios) rather than overloading a single case. For bug fixes, add a regression case that fails before the fix.
+
 ## Repository-specific conventions
 
 - Whenever you want to change something that constitutes a design decision (spec required fields, presence of a manual `depends`, resolver auto-dispatch policy, etc.), first review and update the corresponding ADR / design doc.
 
 ## Commit and Pull Request Rules
+- Write commit messages, PR titles, and PR descriptions in English.
 - Use Conventional Commits for titles: `<type>(<scope>): <description>`.
 - PR descriptions must include:
     - `Why`: reason for the change.

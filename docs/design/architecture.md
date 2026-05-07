@@ -314,7 +314,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 |---|---|---|---|---|
 | prebuilt binary ( aqua / `go tool` / `pnpm exec` / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
 | Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を tools_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | bin の transitive ファイル ( esbuild API 経由) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 不要 ( build は通常 task として宣言) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 不要 ( build / run は cmd 責務、 ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 `buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
@@ -325,7 +325,7 @@ flowchart LR
     REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Resolver.Resolve 1 回)"]
     PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go /<br/>pnpm exec ... 等)"]
     PRE -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
-    PRE -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister<br/>(ExtraInputs + pnpm-deps versions)"]
+    PRE -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: git ls-files<br/>(ExtraInputs + pnpm-deps versions)"]
     SCRIPT --> CACHE["resolved cache<br/>name → toolresolver.Result"]
     GOLOC --> CACHE
     PNPMLOC --> CACHE

@@ -2,63 +2,104 @@ package pnpmlocal
 
 import (
 	"fmt"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// CollectExternals walks the pnpm-lock.yaml dependency graph rooted at the
-// given workspace path and returns every transitively-reachable external
-// package as `<name>@<version>` strings, sorted ascending and deduplicated.
+// DepWalk is the output of a unified workspace-and-external dependency walk
+// from one importer entry. Workspaces lists every transitively-reachable
+// workspace package directory (OS-native repo-relative); Externals lists
+// every transitively-reachable external npm package as
+// "<name>@<version-with-peer-suffix>" strings, sorted ascending. Both
+// channels are populated by a single pass over the lockfile so we never
+// miss an external dep that's only reachable through a workspace link.
+type DepWalk struct {
+	Workspaces []string
+	Externals  []string
+}
+
+// WalkDeps walks pnpm-lock.yaml's dependency graph rooted at importerPath.
+// The walk has two interleaved fronts:
 //
-// "External" here means anything pnpm resolved to an npm registry tarball,
-// i.e. NOT a workspace link or local file dependency. Workspace links
-// (`link:...`) and local file specs (`file:...`) are skipped — those go through
-// the esbuild lister via extra inputs (the workspace package's own source
-// graph).
+//   - link: edges (workspace dependencies) are followed by joining the link
+//     target onto the holding importer's dir, recursing into that package's
+//     own importer entry. Each visited workspace dir is recorded.
+//   - external version edges (npm registry resolutions) seed an external
+//     queue that's then drained against snapshots[<pkg@version>] for
+//     transitive externals; peer-context suffixes like
+//     "lodash@4.17.21(peer@1.0.0)" round-trip verbatim so peer-version drift
+//     still flips tools_hash.
 //
-// The walk uses snapshots[<pkg@version>].dependencies (and optionalDependencies)
-// to follow transitive edges, mirroring Turborepo's per-package external dep
-// hashing. Peer-context suffixes like `lodash@4.17.21(peer@1.0.0)` are kept
-// verbatim so peer-version drift invalidates the hash.
-func CollectExternals(lf *Lockfile, importerPath string) ([]string, error) {
-	importer, ok := lf.Importers[importerPath]
-	if !ok {
-		return nil, fmt.Errorf("pnpm-local: importer %q not found in pnpm-lock.yaml", importerPath)
+// Walking both fronts in one pass matters: if @org/codegen depends on
+// @org/util (link:) and @org/util depends on lodash (npm), we must reach
+// lodash through util's importer entry — a workspace-blind external walk
+// would miss it.
+func WalkDeps(lf *Lockfile, importerPath string) (DepWalk, error) {
+	if _, ok := lf.Importers[importerPath]; !ok {
+		return DepWalk{}, fmt.Errorf("pnpm-local: importer %q not found in pnpm-lock.yaml", importerPath)
 	}
 
-	visited := map[string]struct{}{}
+	visitedWorkspaces := map[string]struct{}{}
+	visitedExternals := map[string]struct{}{}
+	wsQueue := []string{importerPath}
+	var extQueue []string
 
-	// Roots: the importer's own deps. We seed the queue from all three
-	// dependency buckets because codegen tools are commonly devDependencies
-	// (runtime not needed in production) and platform-specific peers can show
-	// up under optionalDependencies; missing either would silently drop deps
-	// from the hash.
-	queue := make([]string, 0)
-	for _, bucket := range []map[string]ImporterDep{
-		importer.Dependencies,
-		importer.DevDependencies,
-		importer.OptionalDependencies,
-	} {
-		for name, dep := range bucket {
-			if isExternalVersion(dep.Version) {
-				queue = append(queue, name+"@"+dep.Version)
+	for len(wsQueue) > 0 {
+		dir := wsQueue[0]
+		wsQueue = wsQueue[1:]
+		if _, dup := visitedWorkspaces[dir]; dup {
+			continue
+		}
+		visitedWorkspaces[dir] = struct{}{}
+
+		importer, ok := lf.Importers[dir]
+		if !ok {
+			// Linked target whose importer entry is missing from the lockfile
+			// (rare; could mean the workspace package was removed without
+			// regenerating the lockfile). Tolerate it — the dir itself stays
+			// in the workspace set so its files still get hashed.
+			continue
+		}
+		for _, bucket := range []map[string]ImporterDep{
+			importer.Dependencies,
+			importer.DevDependencies,
+			importer.OptionalDependencies,
+		} {
+			for name, dep := range bucket {
+				switch {
+				case strings.HasPrefix(dep.Version, "link:"):
+					target := strings.TrimPrefix(dep.Version, "link:")
+					// link target is relative to the holding importer's dir;
+					// path.Join + Clean collapses ".." segments deterministic-
+					// ally to the canonical workspace dir form.
+					resolved := path.Clean(path.Join(filepath.ToSlash(dir), target))
+					wsQueue = append(wsQueue, resolved)
+				case isExternalVersion(dep.Version):
+					extQueue = append(extQueue, name+"@"+dep.Version)
+				}
+				// `file:` and other non-link non-external entries are skipped:
+				// `file:` deps reference local tarballs the user committed,
+				// which would tie the cache to that file path; covering them
+				// would need a separate channel and is out of scope for now.
 			}
 		}
 	}
 
-	for len(queue) > 0 {
-		key := queue[0]
-		queue = queue[1:]
-		if _, dup := visited[key]; dup {
+	for len(extQueue) > 0 {
+		key := extQueue[0]
+		extQueue = extQueue[1:]
+		if _, dup := visitedExternals[key]; dup {
 			continue
 		}
-		visited[key] = struct{}{}
+		visitedExternals[key] = struct{}{}
 
 		snap, ok := lf.Snapshots[key]
 		if !ok {
-			// Missing snapshot is tolerable: pnpm sometimes records a dep that
-			// only appears in `packages` (no transitive children). The dep
-			// itself is still in our visited set, so it shows up in the result.
+			// Missing snapshot is tolerable: pnpm sometimes records a dep
+			// that only appears in `packages` (no transitive children). The
+			// dep is still visited so it surfaces in the result.
 			continue
 		}
 		for _, bucket := range []map[string]string{snap.Dependencies, snap.OptionalDependencies} {
@@ -66,17 +107,35 @@ func CollectExternals(lf *Lockfile, importerPath string) ([]string, error) {
 				if !isExternalVersion(version) {
 					continue
 				}
-				queue = append(queue, name+"@"+version)
+				extQueue = append(extQueue, name+"@"+version)
 			}
 		}
 	}
 
-	out := make([]string, 0, len(visited))
-	for k := range visited {
-		out = append(out, k)
+	walk := DepWalk{
+		Workspaces: make([]string, 0, len(visitedWorkspaces)),
+		Externals:  make([]string, 0, len(visitedExternals)),
 	}
-	sort.Strings(out)
-	return out, nil
+	for d := range visitedWorkspaces {
+		walk.Workspaces = append(walk.Workspaces, d)
+	}
+	for k := range visitedExternals {
+		walk.Externals = append(walk.Externals, k)
+	}
+	sort.Strings(walk.Workspaces)
+	sort.Strings(walk.Externals)
+	return walk, nil
+}
+
+// CollectExternals is a thin wrapper over WalkDeps that exposes only the
+// externals slice. Kept so existing callers and tests don't need to switch
+// to the multi-return shape when they only care about the npm side.
+func CollectExternals(lf *Lockfile, importerPath string) ([]string, error) {
+	walk, err := WalkDeps(lf, importerPath)
+	if err != nil {
+		return nil, err
+	}
+	return walk.Externals, nil
 }
 
 // isExternalVersion reports whether the lockfile-recorded version string

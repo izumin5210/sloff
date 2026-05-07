@@ -1,25 +1,32 @@
 # Resolver: pnpm-local
 
-`pnpmLocalResolver` は pnpm workspace 内に実装された **内製 js/ts ツール** ( `workspace:*` 参照) を扱う。 このツールは npm registry に公開されておらず、 SemVer による論理 version を持たない。 lazygen は cache 健全性を保つため、 そのソース変更も runtime で resolve される外部 npm 依存も両方 invalidation シグナルに乗せる必要がある。
+`pnpmLocalResolver` は pnpm workspace 内に実装された **内製 js/ts ツール** ( `workspace:*` 参照) を扱う。 SemVer を持たないため、 ソース変更も transitive 外部 npm dep の bump も両方 invalidation シグナルに乗せる必要がある。
 
 関連:
 - [Architecture](./architecture.md)
 - [ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一](../adr/0005-eliminate-resolver-auto-dispatch.md)
 - [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md)
-- [Resolver: go-local](./resolver-go-local.md) ( Go 側の対応物 = 内製 Go CLI)
+- [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) ( D7 で「 build / run は cmd 責務」 を規定)
+- [Resolver: go-local](./resolver-go-local.md) ( Go 側の対応物)
 
 ## Context
 
-pnpm workspace では複数パッケージを 1 リポジトリに同居させ、 `workspace:*` 指定で相互依存できる。 ここで配布される内製 codegen ツール (`@org/my-codegen` 等) は npm registry に公開されない。 lazygen での扱いを考えるとき、 同じ workspace 内ツールでも build 必須かどうかで状況が変わる:
+pnpm workspace では複数パッケージを 1 リポジトリに同居させ、 `workspace:*` 指定で相互依存できる。 ここで配布される内製 codegen ツール (`@org/my-codegen` 等) は npm registry に公開されない。
 
-- **ts-node / tsx で直接 src を実行**: `bin` が src/ を指す。 src 編集が即 runtime に反映
-- **build 必須 ( tsc / esbuild 等で dist/ を生成)**: `bin` が dist/ を指す。 src 編集後に build しないと runtime には反映されない
+設計上、 `pnpm-local` は go-local と **同じ責務分担** に揃えている ( ADR-0008 D7):
 
-この 2 つを統一的に扱うため、 lazygen の pnpm-local は **「実際に runtime が読み込むファイル ( = bin/main の transitive import 集合) を input として task に contribute する」 input contributor 設計** を取る。 build orchestration 自体は別の通常 task ( codegen-build 等) として lazygen に書き、 depgraph が output overlap で勝手に依存を解決する ( = Turborepo の `dependsOn` を file-overlap でやる版)。
+- **lazygen の役割**: workspace package のソース集合を hash 入力に取り、 transitive 外部 dep の resolved version を ToolVersion として contribute する。 これだけ
+- **利用者の役割**: build が必要なら task の cmd 内に build を含める ( go-local の `go run ./cmd/foo` が compile + run を 1 cmd に閉じるのと同じ責務分担)
 
-「内製ソース ( = `local`)」 という意味では [go-local](./resolver-go-local.md) の対応物で、 Result の shape も揃っている: 両 resolver とも内部ソースを **ExtraInputs** ( files_hash 経由) で contribute し、 transitive な外部依存を **`<channel>-deps:<pkg>@<version>` ToolVersion** ( tools_hash 経由) で contribute する。 違うのは「 内部ソース列挙の手段」 ( `go/packages` vs esbuild) と「 外部依存の取得元」 ( go.sum vs pnpm-lock.yaml の snapshots graph) だけ。
+つまり lazygen は build orchestration をしない。 spec から「 build task と consumer task の path overlap で連携」 のような暗黙概念は消えている。
 
-ソースファイル列挙には Resolver 内部 helper の `SourceLister` を使う。 標準実装は **esbuild の Go API を直接 import した `esbuildLister`** で、 entry point から transitive な import 解析を行う。
+「 内製ソース ( = `local`)」 という意味では [go-local](./resolver-go-local.md) と並立で、 Result の shape も揃う:
+
+| | go-local | pnpm-local |
+|---|---|---|
+| 内部ソース enumeration | `go/packages` で transitive 走査 → InternalFiles | git-tracked + transitive workspace dep の git-tracked walk → ExtraInputs |
+| 外部 dep version | go.sum + module path@version | pnpm-lock.yaml snapshots BFS |
+| build/run の責務 | `go run` が cmd 内で 1 発 | `pnpm build && exec` 等を cmd 内で 1 発 |
 
 ## Resolver の動作
 
@@ -27,53 +34,51 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 宣言された workspace package について 2 経路で contribution を出す:
 
-1. **`pnpm-lock.yaml` で当該 package が workspace member であるかを判定** ( `importers` のキーに該当 dir があり、 そこの `package.json` の `name` が一致するか)。 そうでなければエラー ( ADR-0007 により外部公開 npm パッケージは script resolver の領分)
-2. 該当 package の `package.json` から `bin` / `main` を読み、 entry point を確定
-3. **入力 ( ExtraInputs) 経路**: `SourceLister` ( デフォルト `esbuildLister`) で entry point の transitive import 集合を repo-relative path で取得 → runner が task の inputs に union ( files_hash 経路に乗る)
-4. **外部 dep version 経路**: `pnpm-lock.yaml` の graph を walk して当該 package の transitive 外部 npm dep を resolved version 付きで列挙 → ToolVersion として返す ( tools_hash 経路に乗る)
+1. **workspace member 判定**: 当該 `@org/foo` が `pnpm-lock.yaml` の `importers` キーに対応する workspace package で、 `package.json` の `name` も一致するか確認。 そうでなければ `ErrNotWorkspacePackage` を返す ( ADR-0007 により外部公開 npm パッケージは script resolver の領分)
+2. **入力 ( ExtraInputs) 経路**:
+   - 当該 workspace package の dir、 および `pnpm-lock.yaml` の `link:` 参照を辿った transitive な workspace dep の dir、 を集める ( workspace dep walk)
+   - 各 dir で **git-tracked + untracked-but-not-ignored ファイルを enumerate** ( `git ls-files --cached --others --exclude-standard`)
+   - 全 dir のファイル集合を union → ExtraInputs として返す
+3. **外部 dep version 経路**:
+   - workspace dep walk と並行して、 各 importer の direct external deps を seed に `snapshots` graph を BFS
+   - transitive な外部 npm dep を `<pkg>@<version-with-peer-suffix>` で列挙 → `pnpm-deps:` prefix を付けた ToolVersion として返す
 
-### 論理 version 文字列の形式
+`.gitignore` で除外されたファイル ( 典型的には `dist/`, `build/`, `node_modules/`) は ExtraInputs に含まれない ( 利用者がローカルで生成する build artefact が cache を汚さない)。
 
-外部 dep ごとに 1 ToolVersion を返し、 文字列形式は:
+### Result の形式
 
+```go
+toolresolver.Result{
+    ExtraInputs: []string{
+        "packages/codegen/package.json",
+        "packages/codegen/src/cli.ts",
+        "packages/codegen/src/lib.ts",
+        "packages/util/package.json",         // ← workspace transitive dep
+        "packages/util/src/index.ts",
+    },
+    Versions: []toolresolver.ToolVersion{
+        {Name: "lodash@4.17.21",      Source: "pnpm-local:@org/codegen", Version: "pnpm-deps:lodash@4.17.21"},
+        {Name: "some-helper@1.2.3",   Source: "pnpm-local:@org/codegen", Version: "pnpm-deps:some-helper@1.2.3"},
+    },
+}
 ```
-"pnpm-deps:<pkg>@<version-with-peer-suffix>"
-```
 
-例: `"pnpm-deps:lodash@4.17.21"`、 `"pnpm-deps:react-dom@18.0.0(react@18.0.0)"`
+### Dispatch ( declared-only + named-tool)
 
-peer-context suffix ( pnpm の `(peer@x)` 形式) はそのまま保持し、 peer 変動も invalidate に乗せる。
-
-ExtraInputs 側は ToolVersion ではないので version 文字列は持たない ( files_hash の構成要素として content hash 経路に流れる)。
-
-### Dispatch ( declared-only)
-
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により lazygen は declared-only + named-tool。 `tools:` map で `pnpm-local: <package-name>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する。 declared.PackageName が workspace に存在しなければ `ErrNotWorkspacePackage` を返す。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により lazygen は declared-only + named-tool。 `tools:` map で `pnpm-local: <package-name>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する。
 
 ### Resolver の利用例
 
 ```yaml
+# packages/codegen/lazygen.yml ( 共通配置だが、 root の lazygen.yml に集約しても良い)
 tools:
-  pnpm:
-    exec: ["pnpm", "--version"]
   codegen:
     pnpm-local: "@org/codegen"
 
+# proto/lazygen.yml ( 利用側 task)
 commands:
-  # workspace package の build を「ただのコード生成 task」として宣言
-  - name: codegen-build
-    cmd: ["pnpm", "--filter", "@org/codegen", "build"]
-    inputs:
-      - "packages/codegen/src/**"
-      - "packages/codegen/package.json"
-      - "packages/codegen/tsconfig.json"
-    outputs:
-      - "packages/codegen/dist/**"
-    tools: [pnpm]
-
-  # 利用側 task ( pnpm-local が dist/cli.js とその transitive を inputs に contribute)
   - name: gen
-    cmd: ["pnpm", "exec", "my-codegen"]
+    cmd: ["sh", "-c", "pnpm --filter @org/codegen build && pnpm exec my-codegen"]
     inputs: ["**/*.proto"]
     outputs: ["**/*.pb.ts"]
     tools: [codegen]
@@ -81,128 +86,105 @@ commands:
 
 ここで起きること:
 
-- `gen` の inputs が pnpm-local 経由で `packages/codegen/dist/cli.js` ( と transitive) を含む
-- depgraph: `codegen-build.outputs = packages/codegen/dist/**` と overlap → **`gen → codegen-build` の依存が自動で貼られる**
-- src 編集 → codegen-build の files_hash 変化 → codegen-build 再実行 → dist 更新 → gen の files_hash 変化 → gen 再実行
-- 外部 npm dep ( lodash 等) の resolved version 変化 → gen の tools_hash 変化 → gen 再実行 ( ts-node / 直接 src 実行のケースで build task を介さなくても流れる)
-- ts-node / tsx で `bin: src/cli.ts` の場合: ExtraInputs が src ファイルを直接拾うので、 build task は不要 ( src 編集が即 invalidate)
+- `gen` の inputs に pnpm-local 経由で `packages/codegen/**` の git-tracked ファイル ( + transitive workspace deps) が contribute される
+- src 編集 → ExtraInputs ( files_hash 経由) が変化 → gen の cache miss → cmd 再実行 → cmd 内の `pnpm build` が走り、 続いて `pnpm exec my-codegen`
+- 外部 npm dep ( lodash 等) の resolved version 変化 → tools_hash 変化 → gen 再実行
+- ts-node / tsx で `bin: src/cli.ts` ( build 不要) なら cmd は `["pnpm", "exec", "my-ts-codegen"]` でよい ( ts-node が src を直接読む)
 
-ts-node なら build task 不要、 build 必須なら codegen-build を併設、 と利用者が宣言する。 lazygen 側は `dist/` `src/` という慣習名を一切前提しない。
+build が必要かどうかは **cmd の中身次第** で、 lazygen は知らない。 dist/src のような慣習名前を一切前提しない。
 
 ### Resolver 実装イメージ
 
 ```go
 package pnpmlocal
 
-import (
-    "context"
-    "errors"
-
-    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
-    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
-)
-
 const Name = "pnpm-local"
+const DepsPrefix = "pnpm-deps:"
 
 type Resolver struct {
-    repoRoot string
-    lister   lister.SourceLister // DI: 標準は esbuildLister
+    repoRoot   string
+    enumerator FileEnumerator   // 標準は GitLsFiles
     // workspace は pnpm-lock.yaml + 各 importer の package.json を index 化したもの
     // ( 初回 Resolve で sync.Once 経由で lazy load)
 }
 
-func New(repoRoot string, l lister.SourceLister) (*Resolver, error) { /* ... */ }
+func New(repoRoot string, enumerator FileEnumerator) (*Resolver, error) { /* ... */ }
 
 func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
     pkg, ok := r.workspace.Lookup(declared.PackageName)
-    if !ok {
-        return toolresolver.Result{}, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, declared.PackageName)
+    if !ok { return Result{}, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, declared.PackageName) }
+
+    // workspace 集合と外部 deps を 1 pass で walk
+    walk, _ := WalkDeps(r.workspace.lockfile, filepath.ToSlash(pkg.Dir))
+
+    // 各 workspace dir で git-tracked ファイルを enumerate
+    extraInputs := r.collectFiles(ctx, walk.Workspaces)
+
+    // 外部 deps を ToolVersion 化
+    versions := []toolresolver.ToolVersion{}
+    for _, e := range walk.Externals {
+        versions = append(versions, toolresolver.ToolVersion{
+            Name:    e,
+            Source:  Name + ":" + pkg.Name,
+            Version: DepsPrefix + e,
+        })
     }
-
-    // ExtraInputs: bin/main から transitive で import されるファイル群
-    extraInputs := r.collectInputs(ctx, pkg)
-
-    // Versions: workspace package の transitive 外部 npm dep ( surgical lockfile walk)
-    versions := r.collectExternalVersions(pkg)
-
     return toolresolver.Result{Versions: versions, ExtraInputs: extraInputs}, nil
 }
 ```
 
-### 初期 build 前 ( fresh checkout) の振る舞い
+### `git ls-files` を enumerator に採用した理由
 
-dist/ が gitignore された典型的な構成では、 fresh clone 直後に `bin` ファイル ( e.g. `packages/codegen/dist/cli.js`) はまだ存在しない。 esbuild は missing entry でエラーになるので、 Resolver は **bin path 単独を ExtraInputs に含めて lister 呼び出しを skip** する fall-back を持つ:
-
-- depgraph は bin path と build task の `dist/**` outputs glob で overlap 検出 → 依存 edge を貼る
-- 1 回目の lazygen run: build → dist 生成 → gen 実行
-- 2 回目以降: bin が存在するので esbuild が transitive を walk、 通常通り
-
-1 回目は inputs 集合が「 bin path のみ」 なので transitive 部分の invalidation 精度が一時的に下がるが、 2 回目以降で完全な集合に切り替わるだけで cache 健全性は壊れない ( 「 false hit」 ではなく 「 1 回目だけ過剰 invalidate」 側に倒れる)。
-
-## SourceLister: `esbuildLister` ( esbuild を Go API で直接 import)
-
-`pnpmLocalResolver` の標準 SourceLister は esbuild の Go API `github.com/evanw/esbuild/pkg/api` を直接 import した `esbuildLister`。 `Bundle: true` + `Metafile: true` で entry の transitive import 集合を取り、 metafile の `inputs` から repo-relative path を抽出する。 `node_modules` 配下のパスは ADR-0007 に従って除外し、 ToolVersion 側 ( surgical lockfile walk) で扱う。
-
-```go
-import "github.com/evanw/esbuild/pkg/api"
-
-result := api.Build(api.BuildOptions{
-    EntryPoints: []string{absPath},
-    AbsWorkingDir: repoRoot,
-    Bundle:      true,
-    Platform:    api.PlatformNode,
-    Metafile:    true,
-    Write:       false, // 実際の build artifact は書き出さない
-    LogLevel:    api.LogLevelSilent,
-})
-// result.Metafile (JSON) を parse → inputs.keys のうち node_modules を除外 → 配列 sort
+```
+git ls-files --cached --others --exclude-standard -- <pkg-dir>
 ```
 
-利点 / 制約 / 代替検討は [ADR-0007](../adr/0007-no-external-dependency-resolver.md) に詳述。 要点:
+- `--cached`: 既に track 済みのファイル ( 利用者が commit した正規の集合)
+- `--others --exclude-standard`: untracked かつ `.gitignore` で除外されていないファイル ( commit 予定だがまだ `git add` してないファイル)
 
-- esbuild バイナリの別途 install 不要 ( go.mod で固定、 OS 横断キャッシュを破らない)
-- subprocess なし ( in-process)
-- esbuild が静的解析できないパターン ( eval / runtime `require` / 動的 `import()`) は非サポート → 該当 package のみ `lister.NewGlob` に切替えて「精度低下を受け入れて死角ゼロ」 運用に retreat 可能 ( DI 経由)
+この組合せで「 利用者が repo に置きたい / 置いている全ファイル ( ただし `.gitignore` で除外されたものは除く)」 を得る。 Turborepo の default も同じ哲学。
 
-### `globLister` への retreat
+代替検討:
+- **filepath.Walk + Go の gitignore library**: in-process だが `.gitignore` の semantics ( 否定 `!`、 nested rules、 `**` glob 等) を完全実装したライブラリの選定 / メンテコストがある
+- **filepath.Walk + 慣習的な exclude list ( `dist/`, `build/`, `node_modules/`)**: 慣習依存 ( ADR-0008 D7 の精神に反する)
+- **esbuild Go API で bin entry から transitive 解析** ( 旧設計): 精度高いが eval / 動的 require / 動的 import で死角、 esbuild バイナリサイズ増、 build 必要なツールでは bin が存在しない fresh checkout で fall-back 必要、 tool 概念と build task の path overlap link が必要 ( 暗黙性問題)
 
-```go
-import "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+`git ls-files` 採用は subprocess 1 回の overhead を許容する代わりに、 git の事実だけを SSoT に取る一番素直な選択。 lazygen の cache record も git 管理前提なので、 git 依存はすでに implicit。
 
-resolver, _ := pnpmlocal.New(repoRoot,
-    lister.NewGlob(repoRoot,
-        []string{"**/*.{ts,tsx,js,json}"},
-        []string{"**/*.test.ts", "**/*.spec.ts", "dist/**", "node_modules/**"}))
-```
+### 過剰 invalidate の許容
 
-影響範囲は Resolver 単位なので、 1 つの「 esbuild 解析不能 package」 のためにリポジトリ全体の精度を落とす必要はない。
+git-tracked enumeration は「 package dir 内の利用者が置いている全ファイル」 を input にするので、 bin から実際に transitive で import されてないファイル ( e.g., `README.md`、 別の bin の lib) も input に含まれる。 これらの編集で consumer task が rerun する **過剰 invalidate** が起きる:
+
+- false hit ( 古い結果で cache hit) は起きない ( 健全)
+- false miss ( 不要な rerun) が起きうる
+- Turborepo の default も同じ精度で、 monorepo 規模での実用上の精度は問題にならないことが知られている
+
+精度より「 死角ゼロ + シンプル」 を取った設計判断。 旧 esbuild walk 時代の Open Question ( 「 esbuild が解析できないパターンに対する fall-back」) は構造的に消えた。
 
 ## 外部 npm dep の surgical lockfile walk
 
-宣言された workspace package について、 `pnpm-lock.yaml` の `importers.<package-dir>.dependencies` / `devDependencies` / `optionalDependencies` を起点に `snapshots` graph を BFS で walk し、 transitive な外部 npm dep を `<pkg>@<version>` 文字列の sorted unique list で得る。 `link:...` / `file:...` ( workspace link) は skip。
+宣言された workspace package について、 `pnpm-lock.yaml` の `importers.<package-dir>.dependencies` / `devDependencies` / `optionalDependencies` を起点に、 link: edge を辿って到達する全 importer の direct external deps を seed として `snapshots` graph を BFS で walk し、 transitive な外部 npm dep を `<pkg>@<version>` 文字列の sorted unique list で得る。 `link:` / `file:` ( workspace link) は外部扱いせず skip ( workspace 側は ExtraInputs 経路で別途 enumerate される)。
 
 ```go
-externals := CollectExternals(lockfile, "packages/codegen")
-// → ["lodash@4.17.21", "react-dom@18.0.0(react@18.0.0)", "react@18.0.0", ...]
+walk := WalkDeps(lockfile, "packages/codegen")
+// walk.Workspaces = ["packages/codegen", "packages/util", ...]
+// walk.Externals  = ["lodash@4.17.21", "react-dom@18.0.0(react@18.0.0)", ...]
 ```
 
-これで「ある workspace package の transitive npm dep」 だけを surgical に hash 入力に取る。 別 workspace package の dep が動いても、 当該 package に関係なければ tools_hash は変わらない ( = Turborepo 同等の精度)。
+**workspace と external を 1 pass で walk するのが肝**: codegen が util ( link) を経由して lodash ( npm) に到達する場合、 codegen の importer entry 直下には lodash は無い。 link 経由で util の importer entry に降りて初めて lodash が seed に積まれる。 「 workspace-blind な external walk」 ではこのケースを取りこぼす。
 
-詳細は [ADR-0007](../adr/0007-no-external-dependency-resolver.md) の「esbuild Go API 採用」 節と「外部依存の surgical 取り扱い」 節を参照。
+詳細は [ADR-0007](../adr/0007-no-external-dependency-resolver.md) の「外部依存の surgical 取り扱い」 節も参照。
 
 ## Preflight Checker は持たない
 
-旧設計では「`bin` が `dist/` を指していれば build 必須、 `dist/` が存在 / src より新しいかで判定」 という preflight checker を持っていた。 **これは廃止された**:
+旧設計では「`bin` が `dist/` を指していれば build 必須、 `dist/` が存在 / src より新しいかで判定」 という preflight checker を持っていたが、 ADR-0008 D7 で「 build / run は cmd 責務」 と決めた時点で構造的に不要になった:
 
-- `dist/` `src/` は pnpm / npm 標準ではなくコミュニティ慣習にすぎず、 lazygen がそれを前提にすると別 layout のリポジトリで破綻する
-- 「rebuild 忘れ」 は build を **通常の lazygen task として宣言する** ことで構造的に消える ( depgraph が build → consumer の連鎖を勝手に貼り、 src 編集 → build 再実行 → consumer 再実行 が自動で流れる)
-- pnpm-local 自身は「実際に runtime が読み込むファイルを inputs に乗せる」 input contributor だけを担う
-
-つまり Preflight が必要だった問題を、 input contribution + depgraph の組み合わせで構造的に解消している。
+- `dist/` `src/` は pnpm / npm 標準ではなくコミュニティ慣習にすぎず、 lazygen が前提にすると別 layout の repo で破綻する
+- 「 rebuild 忘れ」 は cmd 内に `pnpm build && exec` を書いてもらうことで構造的に消える ( source 編集 → files_hash 変化 → cmd 再実行 → cmd 内 build → 最新 binary で実行)
+- pnpm-local 自身は「 利用者が repo に置いているファイルを inputs に乗せる」 input contributor だけを担う
 
 ## Open Questions
 
-- 複数 entry point ( `bin` が複数定義) を持つパッケージの hash 計算は現状「全 entry の union」 でよいか ( esbuild を entry 数だけ呼ぶコスト vs 漏れリスク)
-- esbuild の `tsconfig.json` パス解決 ( 親階層を遡る挙動) が大きな monorepo で正しく動くか
-- workspace transitive dep ( `@org/util` を `@org/codegen` から import) を esbuild は symlink 経由で real path に resolve するか実環境検証が必要 ( 設計上は `PreserveSymlinks: false` で resolve され、 metafile の `inputs` キーは real path となるはず)
-- 「 surgical lockfile walk」 の cache key (= `<pkg>@<version-with-peer>`) が pnpm-lock.yaml schema 変動 ( v6 → v9 等) で互換性を破る場合のための schema version pin / 検出 ( 現状 v9 専用)
+- pnpm-lock.yaml schema が v6 / v9 等で変動した場合の互換性 ( 現状 v9 専用、 v6 で動かすと importers / snapshots の shape が違って fail する。 schema version で fail-fast するか、 マルチ schema 対応するかは将来検討)
+- non-git repository 環境 ( CI で git history なしで checkout 等) では `git ls-files` が fail する。 現状は明示 error にしているが、 fall-back path ( filepath.Walk + 簡易 ignore) を提供する必要があるかは将来判断
+- workspace transitive dep walk で `link:` 以外の workspace 表現 ( pnpm の `workspace:^` `workspace:~` `workspace:*` で resolved 形式が変わる ) のカバレッジ確認 ( 現状は `link:` のみ判定)

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -77,11 +78,35 @@ func setupHarness(t *testing.T, name string) *harness {
 	if err := os.CopyFS(workdir, os.DirFS(initial)); err != nil {
 		t.Fatalf("copy initial: %v", err)
 	}
+	// pnpm-local enumerates source files via `git ls-files`; non-pnpm cases
+	// don't care, so we git-init every harness unconditionally rather than
+	// branch on fixture content. The init is also configured with a
+	// deterministic identity so any incidental `git add` (none today) would
+	// not need ambient user config.
+	gitInitWorkdir(t, workdir)
 	return &harness{
 		t:           t,
 		caseDir:     caseDir,
 		workdir:     workdir,
 		expectedDir: filepath.Join(caseDir, "expected"),
+	}
+}
+
+func gitInitWorkdir(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available, skipping git-backed E2E: %v", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "lazygen-test@example.com"},
+		{"config", "user.name", "lazygen-test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
 }
 
@@ -97,7 +122,7 @@ func runStep() step {
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
 		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
-		pnpmRes, err := pnpmlocal.New(h.workdir, lister.NewMemoized(lister.NewEsbuild(h.workdir)))
+		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles)
 		if err != nil {
 			t.Fatalf("pnpmlocal.New: %v", err)
 		}
@@ -159,7 +184,8 @@ func (h *harness) assertExpected(t *testing.T) {
 }
 
 // readTree returns a map[forward-slash relpath]string-content for every regular file under
-// root. Symlinks are not followed; directories are implied by their entries.
+// root. Symlinks are not followed; the .git directory is skipped because the harness git-
+// inits the workdir for git ls-files but the goldens shouldn't capture that bookkeeping.
 func readTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -167,6 +193,9 @@ func readTree(root string) (map[string]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(root, p)
@@ -187,8 +216,7 @@ func readTree(root string) (map[string]string, error) {
 }
 
 // mirrorTree copies all regular files (not symlinks) from src into dst, creating dst and
-// any necessary subdirectories. Existing dst contents are not deleted; callers should
-// remove dst beforehand if they want a clean snapshot.
+// any necessary subdirectories. The .git directory is skipped (see readTree).
 func mirrorTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -200,6 +228,9 @@ func mirrorTree(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return os.MkdirAll(target, 0o755)
 		}
 		b, err := os.ReadFile(p)
@@ -355,27 +386,6 @@ func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
 		t, "pnpmlocal-input-change-invalidates",
 		runStep(),
 		writeStep("input.txt", "world\n"),
-		runStep(),
-	)
-}
-
-// TestRunner_PnpmLocal_BuildChain exercises the design's headline workflow:
-// a workspace tool's build is declared as an ordinary lazygen task, and the
-// consumer task references the package via pnpm-local. The bin path the
-// resolver contributes overlaps the build task's outputs, so depgraph wires
-// build → gen automatically and editing src/ flows through:
-//
-//	src edit → build re-runs → dist updates → gen invalidates → gen re-runs
-//
-// The fixture deliberately starts WITHOUT a built dist/cli.js so the
-// fresh-checkout fall-back ( bin path included even when the lister can't
-// read it yet) gets exercised on the first run.
-func TestRunner_PnpmLocal_BuildChain(t *testing.T) {
-	runE2E(
-		t, "pnpmlocal-build-chain",
-		runStep(),
-		writeStep("packages/codegen/src/cli.ts",
-			"// v2: edited source flips the build hash and cascades to gen\nconsole.log('codegen v2');\n"),
 		runStep(),
 	)
 }

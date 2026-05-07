@@ -99,6 +99,49 @@ Runner は `Run` の冒頭で discover 済み spec から `ToolRegistry` を構�
 
 これで O1 の効率問題は構造的に消える ( N task が同じ tool を参照しても resolver 呼び出しは 1 回)。
 
+### D7. **internal-source tool の build / run は cmd 内責務**
+
+`pnpm-local` / `go-local` のような internal-source resolver が指す workspace package の **「 source 変更時の rebuild」 と「 実行」 は task の cmd 内に書く** 利用者責任とする。 lazygen 自身は build orchestration をしない:
+
+```yaml
+tools:
+  codegen:
+    pnpm-local: "@org/codegen"
+
+commands:
+  - name: gen
+    # cmd が build + run を 1 行で行う ( go run の `compile + execute` と同じ責務分担)
+    cmd: ["sh", "-c", "pnpm --filter @org/codegen build && pnpm exec my-codegen"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.ts"]
+    tools: [codegen]
+```
+
+cmd を組み立てる責務は利用者にある。 lazygen の関与は:
+
+- pnpm-local resolver が当該 workspace package の **git-tracked + transitive workspace dep の git-tracked ファイル** を ExtraInputs に contribute → files_hash 経路で source 変更を検知
+- 当該 workspace の **transitive 外部 npm dep の resolved version** を `pnpm-deps:<pkg>@<ver>` ToolVersion として contribute → tools_hash 経路で外部 dep bump を検知
+
+source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の build + run が走る → 新しい binary で task が走る。
+
+**理由**:
+
+- go-local は `go run ./cmd/foo` が compile + execute を内包しており lazygen は build を意識しない。 pnpm-local も同じ責務分担に揃えるのが consistent
+- spec から「 build task と consumer task の関連付け」 という暗黙概念が消え、 spec が単純化する
+- 利用者は通常、 cmd を `pnpm run gen` 等の package.json script に逃がせるので spec の verbose さは増えない
+
+#### 検討した代替案 ( 採用しなかった理由)
+
+| 案 | 内容 | 棄却理由 |
+|---|---|---|
+| **build を別 lazygen task として宣言、 path overlap で link** | `codegen-build` task の outputs ( dist/**) と pnpm-local の bin path が path overlap → depgraph が依存 edge を貼る | link が暗黙 ( 文字列一致による偶然) で読み手の認知負荷が高い。 path 不一致は silent fail |
+| **build task に `builds: [tool-name]` フィールドを宣言** | 「 この task が tool を build する」 を named cross-ref で明示化 | spec field 増。 overlap 機構との二重管理 |
+| **tool が `build:` block を内包 ( tool = build pipeline)** | tool 定義に cmd / inputs / outputs を持たせ、 task との境界を統合 | tool と task の概念境界が崩れる。 ADR-0008 の D1 ( tool は first-class entity) の意図と外れる |
+| **co-location 制約 ( pnpm-local は package dir の lazygen.yml に置く)** | 配置位置で「 同じ package について話している」 ことを明示 | 暗黙性は緩和されるが mechanism は path overlap のままで根本解決ではない |
+| **cmd 内 build ( 採用)** | go-local の go run と同じ責務分担、 lazygen は source hash だけ担当 | source 集合の精度を esbuild walk から git-tracked enumeration に下げる必要があるが、 過剰 invalidate にしか倒れず cache 健全性は壊れない |
+
+**精度トレードオフ**: 旧 esbuild walk は「 bin から transitive に import される実ファイルだけ」 を hash 入力にしていた。 git-tracked enumeration は「 package dir の全ファイル ( gitignore で除外されたものを除く)」 を入れる。 後者は **過剰 invalidate** ( 関係ない src/utils.ts 編集で gen が rerun) するが false hit にはならない。 Turborepo の default も同じアプローチで、 monorepo 規模での実用上の精度は問題にならないことが知られている。
+
 ## Rationale
 
 ### 案 A ( resolver-level memo cache のみ) を選ばなかった理由

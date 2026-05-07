@@ -56,17 +56,15 @@ tools:
 
 `go-local` / `pnpm-local` は SemVer を持たない repo 内ソースを「ソースファイル集合の hash」で表現するためのもの。 これは prebuilt binary の `--version` では代替できない ( binary が存在しない / build 必須 / 開発中で日々 source が動く)。 つまり内製ソース resolver は script で吸収できず、 独立 channel として残す必要がある。 本 ADR が削るのはあくまで「**外部公開パッケージ専用**」 resolver。
 
-### esbuild Go API 採用 ( pnpm-local 用 SourceLister) の代替検討
+### pnpm-local 用 source enumeration の検討経緯
 
-pnpm-local の標準 SourceLister は Go binary 単体で完結する必要がある ( architecture.md の `SourceLister` 共通挙動)。 評価した代替:
+pnpm-local が ExtraInputs を集める手段は複数検討した:
 
-- **esbuild Go API ( `github.com/evanw/esbuild/pkg/api`)** ( 採用): Go 製 bundler。 `import` で in-process 呼び出し、 subprocess 起動なし、 lazygen バイナリへの追加は数 MB。 `go.mod` で version pin できるため OS 横断キャッシュ共有を破らない
-- **TypeScript Compiler API (tsc)**: Node.js runtime 必須。 lazygen バイナリ単体完結が崩れ、 開発者環境ごとに Node version が違うと別問題が出る
-- **swc / oxc ( Rust 製)**: Go から呼ぶには別 binary 起動か wasm 経由が必要。 Subprocess 起動コスト + バイナリ配布の二重化
-- **tree-sitter ( Go binding あり)**: import 抽出はできるが TypeScript の path mapping / `tsconfig.json` / workspace `workspace:*` 解決は自前で書く必要があり、 esbuild が無料で提供する範囲を全部再実装することになる
-- **rollup / Babel / sucrase**: いずれも Node-only
+- **esbuild Go API** ( 初期実装、 後に廃止): Go 製 bundler を in-process で呼び `bin` から transitive な import ファイルを抽出。 精度は高いが (a) eval / 動的 require / 動的 import で死角、 (b) bin が build 必須なのか fresh checkout で存在しないのかで挙動が分岐、 (c) consumer task との link が path overlap という暗黙機構に依存、 (d) tool 概念と build task との対応が implicit、 という設計面の問題が顕在化
+- **TypeScript Compiler API (tsc) / swc / oxc / tree-sitter**: Node.js / Rust runtime 依存または subprocess 必要、 もしくは path resolution / workspace 解決を自前で書く必要があり、 lazygen バイナリ単体完結を崩す
+- **`git ls-files --cached --others --exclude-standard`** ( 採用): 当該 package dir の「 利用者が repo に置いているファイル ( ただし `.gitignore` で除外されたものは除く)」 を SSoT として取る。 subprocess 1 回の overhead はあるが、 `.gitignore` の semantics を Go で再実装する必要が無く、 git の事実だけが SSoT で済む。 build / run の orchestration は task の cmd 内責務 ( ADR-0008 D7) に倒したので「 fresh checkout で bin が無い」 のような edge case 自体が消える
 
-esbuild 以外は subprocess または impl コストが許容できない。 esbuild が解析できないパターン ( runtime `require` / 動的 `import()` 等) のための retreat path は別途 `globLister` ( 既存) を `SourceLister` の差し替え先として用意してあるため、 死角も塞げる ( resolver-pnpm-local.md 参照)。
+精度は esbuild に対して下がる ( bin から実際に import されてないファイルも input に含む = 過剰 invalidate) が、 false hit は起きない。 Turborepo の default も同じ精度で、 monorepo 規模での実用上の精度は問題にならない。 詳細は [resolver-pnpm-local.md](../design/resolver-pnpm-local.md) 参照。
 
 ## Decision
 

@@ -20,6 +20,7 @@ import (
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/golocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
@@ -96,6 +97,11 @@ func runStep() step {
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
 		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
+		pnpmRes, err := pnpmlocal.New(h.workdir, lister.NewMemoized(lister.NewEsbuild(h.workdir)))
+		if err != nil {
+			t.Fatalf("pnpmlocal.New: %v", err)
+		}
+		resolverReg.Register(pnpmRes)
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
@@ -314,6 +320,40 @@ func TestRunner_GoLocal_InputChangeInvalidates(t *testing.T) {
 // the rebase logic would only surface on user repos with nested specs.
 func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
 	runE2E(t, "golocal-nested-spec", runStep())
+}
+
+// pnpmLocalGeneratorV2 flips the source content the esbuild lister hashes.
+// It is dropped into packages/codegen/dist/lib.js so the tools_hash changes
+// even though input.txt and the cmd are unchanged.
+const pnpmLocalGeneratorV2 = "export const helper = 'v2';\n"
+
+func TestRunner_PnpmLocal_FirstRunWritesRecord(t *testing.T) {
+	runE2E(t, "pnpmlocal-first-run-writes-record", runStep())
+}
+
+func TestRunner_PnpmLocal_SecondRunHits(t *testing.T) {
+	runE2E(t, "pnpmlocal-second-run-hits", runStep(), runStep())
+}
+
+// TestRunner_PnpmLocal_SourceChangeInvalidates is the pnpm-local equivalent
+// of the go-local source-change test: editing a transitive source file in
+// the workspace package must flip tools_hash and trigger re-execution.
+func TestRunner_PnpmLocal_SourceChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "pnpmlocal-source-change-invalidates",
+		runStep(),
+		writeStep("packages/codegen/dist/lib.js", pnpmLocalGeneratorV2),
+		runStep(),
+	)
+}
+
+func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "pnpmlocal-input-change-invalidates",
+		runStep(),
+		writeStep("input.txt", "world\n"),
+		runStep(),
+	)
 }
 
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run

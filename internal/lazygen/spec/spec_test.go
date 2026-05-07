@@ -269,6 +269,80 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "command with pnpm-local tool",
+			yaml: `commands:
+  - name: gen
+    cmd: ["pnpm", "exec", "my-codegen"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.ts"]
+    tools:
+      - pnpm-local: "@org/my-codegen"
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"pnpm", "exec", "my-codegen"},
+					Inputs:  []string{"**/*.proto"},
+					Outputs: []string{"**/*.pb.ts"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "pnpm-local", PackageName: "@org/my-codegen"},
+					},
+				}},
+			},
+		},
+		{
+			name: "command mixing script, go-local, and pnpm-local tools",
+			yaml: `commands:
+  - name: gen
+    cmd: ["pnpm", "exec", "my-codegen"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.ts"]
+    tools:
+      - exec: ["pnpm", "--version"]
+      - go-local: ./cmd/codegen
+      - pnpm-local: "@org/my-codegen"
+`,
+			want: &spec.File{
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"pnpm", "exec", "my-codegen"},
+					Inputs:  []string{"**/*.proto"},
+					Outputs: []string{"**/*.pb.ts"},
+					Tools: []spec.DeclaredTool{
+						{Resolver: "script", Exec: []string{"pnpm", "--version"}},
+						{Resolver: "go-local", Entry: "./cmd/codegen"},
+						{Resolver: "pnpm-local", PackageName: "@org/my-codegen"},
+					},
+				}},
+			},
+		},
+		{
+			name: "tools entry mixing exec and pnpm-local fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - exec: ["foo", "--version"]
+        pnpm-local: "@org/foo"
+`,
+			wantErr: true,
+		},
+		{
+			name: "tools entry mixing go-local and pnpm-local fails",
+			yaml: `commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools:
+      - go-local: ./cmd/foo
+        pnpm-local: "@org/foo"
+`,
+			wantErr: true,
+		},
+		{
 			name: "go-local parent-relative entry is accepted",
 			yaml: `commands:
   - name: gen

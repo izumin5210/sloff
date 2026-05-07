@@ -1,0 +1,20 @@
+generated_at: 2026-05-05T12:00:00Z
+generator_version_snapshot:
+- name: "@org/codegen"
+  source: pnpm-local:@org/codegen
+  version: pnpm-local:@org/codegen@sha256:8323141b4c54a5e938657a348b578df0507bc5ce370309c91cb7b25260db295d
+input:
+  components:
+    cmd_hash: d50c9da992fa316ef7b5c3b00945323397a044df0c19523de3880ecd92a6121f
+    files_hash: cd819be2d47eed8255878036324c063eb118931f1f5fafcfa4c033f4356c1464
+    tools_hash: b1aa28cf387afa802baab27654a1c7fb63e2def700419805381b895857304360
+  hash: 0e3f2f6d2a605cc353003d2e111c5a373891012697c9787a4a1fdb87e4bcc134
+output:
+  files:
+    output.txt: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  hash: ef0fac10de73ede3bc209d4aa93c72236923f8b3406ad365e6c433c1529caaee
+schema_version: 1
+spec:
+  cmd: sh -c cp input.txt output.txt
+  dir: .
+  task_id: copy

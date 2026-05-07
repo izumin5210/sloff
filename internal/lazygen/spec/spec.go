@@ -48,8 +48,9 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 
 // DeclaredTool is one entry of a command's tools: list. The resolver is determined by
 // which fields are present in the YAML; for the script resolver an `exec` field is
-// required and `extract` is optional, and for the go-local resolver a `go-local` field
-// names the main package import path.
+// required and `extract` is optional, for the go-local resolver a `go-local` field
+// names the main package import path, and for the pnpm-local resolver a `pnpm-local`
+// field names a workspace package.
 //
 // Example:
 //
@@ -58,6 +59,7 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 //	  - exec: ["go", "version"]
 //	    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
 //	  - go-local: ./cmd/protoc-gen-foo/...
+//	  - pnpm-local: '@org/my-codegen'
 type DeclaredTool struct {
 	// Resolver is the resolver name inferred from the YAML shape, e.g. "script".
 	Resolver string
@@ -69,12 +71,17 @@ type DeclaredTool struct {
 	// Entry is the go-local resolver input: the main package import path
 	// (must begin with "./").
 	Entry string
+
+	// PackageName is the pnpm-local resolver input: a workspace package name
+	// (e.g. "@org/my-codegen") that pnpm-lock.yaml registers as an importer.
+	PackageName string
 }
 
 type rawDeclaredTool struct {
-	Exec    []string `yaml:"exec"`
-	Extract string   `yaml:"extract"`
-	GoLocal string   `yaml:"go-local"`
+	Exec      []string `yaml:"exec"`
+	Extract   string   `yaml:"extract"`
+	GoLocal   string   `yaml:"go-local"`
+	PnpmLocal string   `yaml:"pnpm-local"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
@@ -85,8 +92,9 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	}
 	hasExec := len(raw.Exec) > 0
 	hasGoLocal := raw.GoLocal != ""
-	if hasExec && hasGoLocal {
-		return errors.New("tools entry: exec and go-local are mutually exclusive")
+	hasPnpmLocal := raw.PnpmLocal != ""
+	if moreThanOneTrue(hasExec, hasGoLocal, hasPnpmLocal) {
+		return errors.New("tools entry: exec, go-local, and pnpm-local are mutually exclusive")
 	}
 	switch {
 	case hasExec:
@@ -107,9 +115,26 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 		d.Resolver = "go-local"
 		d.Entry = raw.GoLocal
 		return nil
+	case hasPnpmLocal:
+		d.Resolver = "pnpm-local"
+		d.PackageName = raw.PnpmLocal
+		return nil
 	default:
-		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local)")
+		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local, pnpm-local)")
 	}
+}
+
+func moreThanOneTrue(bs ...bool) bool {
+	count := 0
+	for _, b := range bs {
+		if b {
+			count++
+			if count > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isRelativeEntry reports whether s is in the spec-relative entry form

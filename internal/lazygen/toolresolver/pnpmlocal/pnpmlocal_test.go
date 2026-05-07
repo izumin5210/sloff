@@ -150,7 +150,7 @@ func TestResolver_FallsBackToBinPathWhenMissing(t *testing.T) {
 
 // TestResolver_EmitsTransitiveExternalsAsToolVersions is the happy path for
 // the tools_hash side: every external dep reachable from the workspace
-// package via the lockfile graph surfaces as a `pnpm-external:<pkg>@<ver>`
+// package via the lockfile graph surfaces as a `pnpm-deps:<pkg>@<ver>`
 // version string. Without this, runtime-resolved npm bumps would not flip
 // tools_hash and stale outputs could leak through the cache.
 func TestResolver_EmitsTransitiveExternalsAsToolVersions(t *testing.T) {
@@ -187,8 +187,8 @@ snapshots:
 	}
 	sort.Strings(versionStrs)
 	want := []string{
-		"pnpm-external:lodash@4.17.21",
-		"pnpm-external:some-helper@1.2.3",
+		"pnpm-deps:lodash@4.17.21",
+		"pnpm-deps:some-helper@1.2.3",
 	}
 	if diff := cmp.Diff(want, versionStrs); diff != "" {
 		t.Errorf("Versions (-want +got):\n%s", diff)

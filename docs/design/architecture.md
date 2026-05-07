@@ -306,8 +306,8 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 | Channel | Resolver Name | 取得元 | preflight | 詳細 doc |
 |---|---|---|---|---|
 | prebuilt binary ( aqua / `go tool` / `pnpm exec` / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
-| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存 ( 内部 / 外部分離戦略) | 不要 | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | bin の transitive ファイル ( esbuild API 経由) を inputs に contribute + 外部 npm dep の resolved version を tools_hash に注入 | 不要 ( build は通常 task として宣言) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を tools_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | bin の transitive ファイル ( esbuild API 経由) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 不要 ( build は通常 task として宣言) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 `buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
@@ -316,11 +316,13 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 flowchart LR
     SPEC["CmdSpec.tools[]<br/>(必須・declared のみ)"] --> DISP["Registry.byName lookup"]
     DISP -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go /<br/>pnpm exec ... 等)"]
-    DISP -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister"]
-    DISP -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister"]
+    DISP -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
+    DISP -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister<br/>(ExtraInputs + pnpm-deps versions)"]
     SCRIPT --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
     GOLOC --> CONCAT
+    GOLOC --> INPUTS["fold ExtraInputs into<br/>task.inputs → files_hash"]
     PNPMLOC --> CONCAT
+    PNPMLOC --> INPUTS
 ```
 
 #### Dispatch: declared-only

@@ -28,7 +28,7 @@ ADR の主題から少し外れるが、 `go-local` / `pnpm-local` のような�
 - 一方、 「 内製ツールが利用する外部 dep の version 変動が、 内製ツールの runtime 挙動を変える」 のは事実なので、 内製ソース resolver が surgical に walk して hash に取り込むのは **内製ソース resolver の責務として妥当**
 - これは Turborepo が package 単位の hash に「その package が transitively 依存する外部 dep の resolved version」 を組み込むのと同じ哲学 ( 該当 package のスコープに閉じた surgical hashing)
 
-具体的には [resolver-go-local.md](../design/resolver-go-local.md) は go.sum + module path@version を、 [resolver-pnpm-local.md](../design/resolver-pnpm-local.md) は pnpm-lock.yaml の `importers.<package-dir>` から `snapshots` を BFS で walk した transitive 集合を、 それぞれ自前で取り込む。 **本 ADR で排除されるのは「 spec から外部公開パッケージ単独を直接版付けする経路」 のみで、 内製ソース resolver 内部での外部 dep hash 取り込みは含まれない**。
+具体的には [resolver-go-local.md](../design/resolver-go-local.md) は go.sum + module path@version を、 [resolver-pnpm-local.md](../design/resolver-pnpm-local.md) は pnpm-lock.yaml の `importers.<package-dir>` から `snapshots` を BFS で walk した transitive 集合を、 それぞれ自前で取り込む。 内部 hash 上は両 resolver とも `<channel>-deps:<pkg>@<version>` ( go-deps / pnpm-deps) という統一された ToolVersion 形式で contribution する ( = ADR で排除した「外部依存専用 resolver」 とは別物の、 内製ソース resolver 内部での `<channel>-deps` 表記)。 **本 ADR で排除されるのは「 spec から外部公開パッケージ単独を直接版付けする経路」 のみで、 内製ソース resolver 内部での外部 dep hash 取り込みは含まれない**。
 
 **O1. Go の外部 module は go-local の external partition で既に hash 入力に入っている**
 

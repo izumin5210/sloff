@@ -3,9 +3,10 @@
 // packages (referenced via "workspace:*" in pnpm-lock.yaml). External npm
 // packages are intentionally NOT a separate channel: per ADR-0007 lazygen
 // absorbs them into the script resolver, except for the surgical version-graph
-// hashing this resolver performs against pnpm-lock.yaml so that runtime-
-// resolved external deps still flip the cache when the workspace tool's
-// transitive npm graph shifts (mirrors Turborepo's per-package hashing).
+// hashing this resolver performs against pnpm-lock.yaml — emitted as
+// "pnpm-deps:<pkg>@<version>" ToolVersions — so that runtime-resolved
+// external deps still flip the cache when the workspace tool's transitive
+// npm graph shifts (mirrors Turborepo's per-package hashing).
 //
 // Per ADR-0005 the resolver is declared-only: it runs when the spec wrote
 // `tools: [{pnpm-local: <package-name>}]` and the package name resolves to a
@@ -39,6 +40,12 @@ import (
 
 // Name is the resolver identifier referenced by spec tools[] entries.
 const Name = "pnpm-local"
+
+// DepsPrefix is the version-string prefix for transitive external npm
+// dependency entries. Mirrors go-deps used by the go-local resolver so both
+// channels expose a uniform "<channel>-deps:<pkg>@<version>" shape on the
+// Result.Versions side regardless of language.
+const DepsPrefix = "pnpm-deps:"
 
 // Resolver resolves pnpm workspace-local tool dependencies into a Result that
 // combines (a) workspace source paths (via the lister) as ExtraInputs and
@@ -163,7 +170,7 @@ func (r *Resolver) collectExternalVersions(ws *Workspace, pkg WorkspacePackage) 
 		out = append(out, toolresolver.ToolVersion{
 			Name:    e,
 			Source:  Name + ":" + pkg.Name,
-			Version: "pnpm-external:" + e,
+			Version: DepsPrefix + e,
 		})
 	}
 	return out, nil

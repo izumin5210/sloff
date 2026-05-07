@@ -17,7 +17,7 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 この 2 つを統一的に扱うため、 lazygen の pnpm-local は **「実際に runtime が読み込むファイル ( = bin/main の transitive import 集合) を input として task に contribute する」 input contributor 設計** を取る。 build orchestration 自体は別の通常 task ( codegen-build 等) として lazygen に書き、 depgraph が output overlap で勝手に依存を解決する ( = Turborepo の `dependsOn` を file-overlap でやる版)。
 
-「内製ソース ( = `local`)」 という意味では [go-local](./resolver-go-local.md) の対応物。 ただし pnpm-local は **input contributor** として動く点 ( ExtraInputs を runner に返す)、 および **transitive な外部 npm dep の resolved version を `tools_hash` に注入する** 点で go-local と挙動が異なる。
+「内製ソース ( = `local`)」 という意味では [go-local](./resolver-go-local.md) の対応物で、 Result の shape も揃っている: 両 resolver とも内部ソースを **ExtraInputs** ( files_hash 経由) で contribute し、 transitive な外部依存を **`<channel>-deps:<pkg>@<version>` ToolVersion** ( tools_hash 経由) で contribute する。 違うのは「 内部ソース列挙の手段」 ( `go/packages` vs esbuild) と「 外部依存の取得元」 ( go.sum vs pnpm-lock.yaml の snapshots graph) だけ。
 
 ソースファイル列挙には Resolver 内部 helper の `SourceLister` を使う。 標準実装は **esbuild の Go API を直接 import した `esbuildLister`** で、 entry point から transitive な import 解析を行う。
 
@@ -37,10 +37,10 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 外部 dep ごとに 1 ToolVersion を返し、 文字列形式は:
 
 ```
-"pnpm-external:<pkg>@<version-with-peer-suffix>"
+"pnpm-deps:<pkg>@<version-with-peer-suffix>"
 ```
 
-例: `"pnpm-external:lodash@4.17.21"`、 `"pnpm-external:react-dom@18.0.0(react@18.0.0)"`
+例: `"pnpm-deps:lodash@4.17.21"`、 `"pnpm-deps:react-dom@18.0.0(react@18.0.0)"`
 
 peer-context suffix ( pnpm の `(peer@x)` 形式) はそのまま保持し、 peer 変動も invalidate に乗せる。
 

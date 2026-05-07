@@ -43,10 +43,8 @@ importers:
 		t.Fatalf("Lookup(@org/codegen): not found")
 	}
 	want := pnpmlocal.WorkspacePackage{
-		Name:        "@org/codegen",
-		Dir:         filepath.Join("packages", "codegen"),
-		EntryPoints: []string{"dist/cli.js"},
-		Bin:         []string{"dist/cli.js"},
+		Name: "@org/codegen",
+		Dir:  filepath.Join("packages", "codegen"),
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Lookup(@org/codegen) mismatch (-want +got):\n%s", diff)

@@ -9,7 +9,10 @@ import (
 )
 
 // WorkspacePackage is a single pnpm workspace member resolved from
-// pnpm-lock.yaml + its package.json.
+// pnpm-lock.yaml + its package.json. The resolver only needs the name (for
+// registry lookup) and dir (for source enumeration); bin/main are
+// intentionally not surfaced because ADR-0008 D7 puts build/run inside the
+// consuming task's cmd, so the resolver no longer needs entry-point paths.
 type WorkspacePackage struct {
 	// Name is the package name from package.json (e.g. "@org/codegen"). Empty
 	// names are filtered out before the package becomes lookup-visible.
@@ -17,19 +20,6 @@ type WorkspacePackage struct {
 
 	// Dir is the OS-native repo-relative path of the package directory.
 	Dir string
-
-	// EntryPoints is the union of bin entries (preferred) or main when bin is
-	// empty, package-relative and sorted ascending. The lister consumes these
-	// as esbuild EntryPoints.
-	EntryPoints []string
-
-	// Bin mirrors package.json's bin field after normalisation. The preflight
-	// checker uses it to decide whether a package needs build (bin under dist/)
-	// vs. ts-node/tsx-style direct source execution.
-	Bin []string
-
-	// Main mirrors package.json's main field verbatim.
-	Main string
 }
 
 // Workspace bundles the pnpm-lock.yaml and per-package.json data needed to
@@ -79,11 +69,8 @@ func LoadWorkspace(repoRoot string) (*Workspace, error) {
 			return nil, fmt.Errorf("pnpm-local: duplicate workspace package name %q", pj.Name)
 		}
 		ws.byName[pj.Name] = WorkspacePackage{
-			Name:        pj.Name,
-			Dir:         filepath.FromSlash(importer),
-			EntryPoints: append([]string(nil), pj.EntryPoints...),
-			Bin:         append([]string(nil), pj.Bin...),
-			Main:        pj.Main,
+			Name: pj.Name,
+			Dir:  filepath.FromSlash(importer),
 		}
 	}
 	return ws, nil

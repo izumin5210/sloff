@@ -122,9 +122,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
-	// references resolve to a defined tool, then resolve each tool exactly
-	// once. Storing results by name lets collectTasks fan a tool out across N
-	// referencing tasks at zero additional resolver cost.
+	// references resolve to a defined tool, then resolve each *referenced*
+	// tool exactly once. Storing results by name lets collectTasks fan a
+	// tool out across N referencing tasks at zero additional resolver cost.
+	//
+	// We deliberately resolve only the subset of tools that some command
+	// actually references. The registry is repo-wide and may carry catalog-
+	// style definitions whose dependencies aren't installed on this machine
+	// (e.g. a pnpm-local entry for a workspace package missing from the
+	// current checkout); resolving them eagerly would block unrelated tasks
+	// that never use those tools.
 	registry, err := spec.BuildToolRegistry(r.opts.Specs)
 	if err != nil {
 		return err
@@ -132,7 +139,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
 		return err
 	}
-	resolved, err := r.resolveAllTools(ctx, registry)
+	resolved, err := r.resolveReferencedTools(ctx, registry, referencedTools(r.opts.Specs))
 	if err != nil {
 		return err
 	}
@@ -158,13 +165,23 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// resolveAllTools invokes the toolresolver registry once per registered tool
-// and returns a name → Result map. specDir for each invocation is the dir
-// where the tool was *defined* (ADR-0008 D3), not where it's referenced from,
-// so tool definitions stay self-contained relative to their host lazygen.yml.
-func (r *Runner) resolveAllTools(ctx context.Context, registry *spec.ToolRegistry) (map[string]toolresolver.Result, error) {
-	out := make(map[string]toolresolver.Result, len(registry.All()))
-	for _, entry := range registry.All() {
+// resolveReferencedTools invokes the toolresolver registry once per name in
+// referenced and returns a name → Result map. specDir for each invocation is
+// the dir where the tool was *defined* (ADR-0008 D3), not where it's
+// referenced from, so tool definitions stay self-contained relative to their
+// host lazygen.yml.
+//
+// Names not in the registry have already been rejected by
+// ValidateToolReferences, so this loop assumes every name resolves; a missing
+// entry would indicate a programmer error elsewhere and we surface it as
+// such rather than silently dropping the contribution.
+func (r *Runner) resolveReferencedTools(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string]toolresolver.Result, error) {
+	out := make(map[string]toolresolver.Result, len(referenced))
+	for _, name := range referenced {
+		entry, ok := registry.Lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
+		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 		res, err := r.opts.Resolvers.Resolve(ctx, entry.SpecDir, nil, declared)
 		if err != nil {
@@ -173,6 +190,27 @@ func (r *Runner) resolveAllTools(ctx context.Context, registry *spec.ToolRegistr
 		out[entry.Name] = res
 	}
 	return out, nil
+}
+
+// referencedTools collects the deduplicated, sorted set of tool names any
+// command in specs references. Tools defined in the registry but never
+// referenced are intentionally absent so the runner doesn't pay (or fail on)
+// their resolver cost.
+func referencedTools(specs []spec.Spec) []string {
+	seen := map[string]struct{}{}
+	for _, sp := range specs {
+		for _, c := range sp.File.Commands {
+			for _, name := range c.Tools {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // taskInfo carries the bits of spec.Command needed to execute it. Stored on the depgraph.Task

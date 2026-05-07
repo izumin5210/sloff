@@ -510,6 +510,60 @@ commands:
 	}
 }
 
+// TestRunner_UnreferencedBrokenToolDoesNotBlockOtherTasks guards that the
+// pre-resolve pass scopes itself to tools commands actually reference. A
+// catalog-style repo can declare tools whose dependencies are absent on the
+// current machine (a pnpm-local entry whose workspace package isn't in this
+// checkout, a script tool not installed locally); resolving them eagerly
+// would fail the run for unrelated tasks. The test installs a script tool
+// that exits non-zero — but no command references it — and expects the run
+// to succeed for the task that uses a different, healthy tool.
+func TestRunner_UnreferencedBrokenToolDoesNotBlockOtherTasks(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(`tools:
+  healthy:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  broken:
+    exec: ["sh", "-c", "exit 7"]
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [healthy]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run must succeed when broken tool is unreferenced, got: %v", err)
+	}
+}
+
 // TestRunner_DuplicateToolNameAcrossSpecsErrors guards the ADR-0008 D2
 // invariant: tool names live in a flat repo-wide namespace, so two
 // lazygen.yml files defining the same name must fail the run with both

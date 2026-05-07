@@ -72,6 +72,52 @@ importers:
 	}
 }
 
+// TestLoadWorkspace_SkipsImportersWithoutPackageJSON guards stale lockfile
+// drift: pnpm-lock.yaml routinely carries entries for renamed/removed
+// workspace members until the user reruns `pnpm install`. A missing manifest
+// for one such entry must not break resolution for unrelated packages whose
+// package.json is intact — pnpm-local is supposed to tolerate benign drift
+// the same way the downstream WalkDeps walker does.
+func TestLoadWorkspace_SkipsImportersWithoutPackageJSON(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+importers:
+  .: {}
+  packages/codegen: {}
+  packages/stale: {}
+`)
+	// Root importer + stale importer have no package.json on disk.
+	// Only @org/codegen is present.
+	mustWrite(t, filepath.Join(root, "packages", "codegen", "package.json"),
+		`{"name": "@org/codegen", "bin": "dist/cli.js"}`)
+
+	ws, err := pnpmlocal.LoadWorkspace(root)
+	if err != nil {
+		t.Fatalf("LoadWorkspace must tolerate missing package.json: %v", err)
+	}
+	if _, ok := ws.Lookup("@org/codegen"); !ok {
+		t.Errorf("@org/codegen lookup failed despite its manifest being intact")
+	}
+}
+
+// TestLoadWorkspace_StillFailsOnCorruptPackageJSON guards the boundary of
+// the fs.ErrNotExist tolerance: an existing-but-malformed package.json
+// should still fail loudly. Otherwise corrupt manifests would be silently
+// dropped from the index and the user would only notice when downstream
+// lookups returned ErrNotWorkspacePackage with no clue why.
+func TestLoadWorkspace_StillFailsOnCorruptPackageJSON(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+importers:
+  packages/broken: {}
+`)
+	mustWrite(t, filepath.Join(root, "packages", "broken", "package.json"), `{not valid json`)
+
+	if _, err := pnpmlocal.LoadWorkspace(root); err == nil {
+		t.Fatal("expected error for corrupt package.json, not silent skip")
+	}
+}
+
 // TestLoadWorkspace_RootImporterWithoutNameIsIgnored guards the common case
 // where the monorepo root package.json has no `name` (private workspace
 // container). The lockfile lists `.` as an importer, but it should not be

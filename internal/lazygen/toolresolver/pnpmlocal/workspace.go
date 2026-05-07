@@ -3,6 +3,7 @@ package pnpmlocal
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 )
@@ -44,6 +45,15 @@ type Workspace struct {
 // LoadWorkspace reads <repoRoot>/pnpm-lock.yaml and the package.json of every
 // importer, indexing packages by their declared name. Importers whose
 // package.json omits "name" (typical for the monorepo root) are skipped.
+//
+// Importers whose package.json is missing on disk are also skipped: pnpm-lock
+// commonly carries stale entries for renamed/removed workspace members until
+// the user reruns `pnpm install`, and a root importer entry is sometimes
+// listed without a corresponding manifest. Aborting the whole index on those
+// would block every pnpm-local resolution for benign drift; the dependency
+// walker (WalkDeps) already tolerates missing importer entries downstream,
+// so we match that posture here. Parse errors and other IO failures still
+// abort: those signal corrupt manifests, not just lockfile drift.
 func LoadWorkspace(repoRoot string) (*Workspace, error) {
 	lf, err := LoadLockfile(repoRoot)
 	if err != nil {
@@ -57,6 +67,9 @@ func LoadWorkspace(repoRoot string) (*Workspace, error) {
 	for _, importer := range lf.WorkspacePaths() {
 		pj, err := LoadPackageJSON(repoRoot, importer)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		if pj.Name == "" {

@@ -42,7 +42,8 @@ pnpm 経由で利用する npm 公開ツール ( 例: `pnpm exec my-codegen`) �
 
 ```yaml
 tools:
-  - exec: ["pnpm", "exec", "my-codegen", "--version"]
+  my-codegen:
+    exec: ["pnpm", "exec", "my-codegen", "--version"]
 ```
 
 このとき script resolver が SSoT とするのは「実 install されているバイナリの `--version` 出力」で、 `pnpm-lock.yaml` から resolved version を引いてくる場合と等価な強度の OS 中立 version 文字列が得られる。 lockfile drift ( lockfile が更新されたのに `pnpm install` を忘れた) の検出は本来 pnpm 自身の責務で、 利用者の CI / 開発フロー側で担保すべき ( ADR-0006 における buf の議論と同じ構造)。
@@ -76,16 +77,19 @@ esbuild 以外は subprocess または impl コストが許容できない。 es
 ### D2. 外部公開ツールは script resolver で個別に declare する
 
 ```yaml
-# Go OSS ツール (aqua / go install / go tool ディレクティブ等で配布)
+# Go OSS ツール (aqua / go install / go tool ディレクティブ等で配布) と
+# npm OSS ツール (pnpm install で取り込むもの) を named tool として登録 (ADR-0008)
 tools:
-  - exec: ["buf", "--version"]
-  - exec: ["protoc-gen-go", "--version"]
+  buf:
+    exec: ["buf", "--version"]
+  protoc-gen-go:
+    exec: ["protoc-gen-go", "--version"]
     extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
-
-# npm OSS ツール (pnpm install で取り込むもの)
-tools:
-  - exec: ["pnpm", "exec", "my-codegen", "--version"]
+  my-codegen:
+    exec: ["pnpm", "exec", "my-codegen", "--version"]
 ```
+
+各 task は `tools: [buf, protoc-gen-go]` のように **名前で参照** する。
 
 これにより:
 
@@ -129,7 +133,7 @@ ADR-0006 で buf を special-case しないと決めた延長線上にあり、 
 
 - `pnpm install` を忘れて lockfile drift した状態でも、 lazygen は runtime `--version` ベースで版を確定するため、 「stale な install の方が SSoT になる」現象は理論上起き得る。 ただし `pnpm exec` は install されていない bin を実行できないので、 実用上は最初の `pnpm exec ... --version` 起動時に失敗する ( = 早期 fail と等価)
 - 外部 OSS ツールが `--version` を持たない / `--version` 出力に build timestamp / OS-arch を含む edge case では script resolver の `extract` regex で正規化が必要。 これは resolver-script.md の既存スコープ
-- 「外部依存を 1 行で全部 hash したい」要件 ( 大量の依存の version 一覧を一括取得) は満たせない。 必要なら利用者側で `tools:` を機械生成する逃げ道が残る
+- 「外部依存を 1 行で全部 hash したい」要件 ( 大量の依存の version 一覧を一括取得) は満たせない。 必要なら利用者側で `tools:` map を機械生成する逃げ道が残る ( ADR-0008 で tool が named entity となったので、 codegen-of-spec 系の自動化と相性が良い)
 
 ### 将来再考の余地
 

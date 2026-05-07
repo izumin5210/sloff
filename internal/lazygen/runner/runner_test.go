@@ -234,14 +234,17 @@ func TestRunner_ToolVersionBumpInvalidates(t *testing.T) {
 	runE2E(
 		t, "tool-version-bump-invalidates",
 		runStep(),
-		writeStep("spec/lazygen.yml", `commands:
+		writeStep("spec/lazygen.yml", `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v2.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: copy
     cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
     inputs: ["input.txt"]
     outputs: ["output.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v2.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `),
 		runStep(),
 	)
@@ -390,14 +393,17 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: writes-nothing
     cmd: ["sh", "-c", "true"]
     inputs: ["input.txt"]
     outputs: ["output.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)
@@ -447,21 +453,22 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: first
     cmd: ["sh", "-c", "cp input.txt shared.txt"]
     inputs: ["input.txt"]
     outputs: ["shared.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
   - name: second
     cmd: ["sh", "-c", "cp input.txt shared.txt"]
     inputs: ["input.txt"]
     outputs: ["shared.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)
@@ -493,6 +500,123 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 	}
 }
 
+// TestRunner_DuplicateToolNameAcrossSpecsErrors guards the ADR-0008 D2
+// invariant: tool names live in a flat repo-wide namespace, so two
+// lazygen.yml files defining the same name must fail the run with both
+// definition sites named — silently picking one would diverge cache results
+// from what the user wrote.
+func TestRunner_DuplicateToolNameAcrossSpecsErrors(t *testing.T) {
+	workdir := t.TempDir()
+	for _, dir := range []string{"a", "b"} {
+		full := filepath.Join(workdir, dir)
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(full, "input.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "a", "lazygen.yml"), []byte(`tools:
+  shared:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+commands:
+  - name: a
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [shared]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "b", "lazygen.yml"), []byte(`tools:
+  shared:
+    exec: ["sh", "-c", "echo v2.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+commands:
+  - name: b
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [shared]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error on duplicate tool name across specs")
+	}
+	for _, want := range []string{"shared", "a/lazygen.yml", "b/lazygen.yml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestRunner_UndefinedToolReferenceErrors catches the case a task references
+// a tool name that no lazygen.yml declared. ADR-0008 requires this to fail
+// at validation time rather than silently produce empty contributions.
+func TestRunner_UndefinedToolReferenceErrors(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(`commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [missing-tool]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error on undefined tool reference")
+	}
+	for _, want := range []string{"missing-tool", "gen", "spec/lazygen.yml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
 // TestRunner_PartialOutputPatternsAllowed verifies that a generator that produces some
 // declared output patterns but leaves others empty (e.g. a conditional artifact) is
 // treated as a successful run. The union safeguard only fails when no declared pattern
@@ -506,14 +630,17 @@ func TestRunner_PartialOutputPatternsAllowed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: partial
     cmd: ["sh", "-c", "cp input.txt produced.txt"]
     inputs: ["input.txt"]
     outputs: ["produced.txt", "optional/*.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)

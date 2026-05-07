@@ -25,7 +25,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 ### 取得元
 
-1. spec の `tools: [{go-local: <import-path>}]` から entry を取得 ( spec dir 相対)
+1. spec の top-level `tools:` map で `go-local: <import-path>` 形式で named 定義された tool entry を取得 ( ADR-0008)。 entry は **その tool が定義された `lazygen.yml` の dir** に相対
 2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存を解析し `Listing{InternalFiles, ExternalModules}` を得る
 3. **InternalFiles → Result.ExtraInputs** に詰めて返す ( runner が task.inputs に union)
 4. **ExternalModules → 1 個ずつ Result.Versions の ToolVersion** に変換して返す
@@ -53,12 +53,27 @@ toolresolver.Result{
 
 ### Dispatch ( declared-only)
 
-go-local resolver は spec の `tools: [{go-local: <import-path>}]` で明示宣言された場合にのみ起動する ([ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md))。
+go-local resolver は `lazygen.yml` の top-level `tools:` で `go-local: <import-path>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する ( [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md))。
 
-- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は spec dir 相対 ( `./` / `../` 始まり、 または bare `.` / `..`)。 nested spec が parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
-- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の宣言を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
-- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に declared を併記する
-- 同じ cmd で go-local 以外の resolver も使いたい場合 ( 例: Go toolchain 自体の bump も captureしたい) は `tools:` に複数 entry を書く: `tools: [{go-local: ./cmd/protoc-gen-foo}, {exec: ["go", "version"], extract: '...'}]`
+```yaml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo   # この tool 定義を含む lazygen.yml の dir 相対
+  go:
+    exec: ["go", "version"]
+    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
+
+commands:
+  - name: gen
+    cmd: ["go", "run", "./cmd/protoc-gen-foo"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.go"]
+    tools: [protoc-gen-foo, go]   # Go toolchain bump も併せて取りたい場合は go も並べる
+```
+
+- entry は `./` / `../` 始まり、 または bare `.` / `..`。 nested 配置で parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
+- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の named 定義 + 参照を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
+- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に named 参照を併記する
 
 ### Resolver 実装イメージ
 
@@ -164,7 +179,7 @@ for each pkg in transitive(pkgs):
     if pkg.Module == nil {
         // stdlib: ファイル本体は hash しない ( $GOROOT 配下の絶対 path が
         // OS 横断キャッシュを破壊するため)。 Go toolchain bump は
-        // tools: [{exec: ["go", "version"], extract: ...}] を併記して捕捉する。
+        // tools: [go] ( go: { exec: ["go", "version"], extract: ... }) を併記して捕捉する。
     } else if pkg.Module.Main {
         // 内部コード: ファイル本体を hash。 GoFiles + EmbedFiles ( //go:embed 対象)
         // + IgnoredFiles ( 別 GOOS / build-tag のため現 build context で除外
@@ -198,7 +213,7 @@ for each pkg in transitive(pkgs):
 - go.sum で「version → 中身」が暗号学的に保証されているため、 「version + go.sum hash」が「中身全 hash」と等価な強度を持つ
 - 内部コードは細かい変更にも敏感 ( `_test.go` 除外以外は普通の hash 戦略)
 - 内部コードに `IgnoredFiles` を含めることで、 host の GOOS / GOARCH / build-tag 状態に依存せず同一 hash になる ( 別 OS の CI で計算しても同じ digest)
-- stdlib は hash から除外。 Go toolchain bump を捕捉したい場合は spec 側で `tools: [{exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'}]` のような script resolver 宣言を併記する
+- stdlib は hash から除外。 Go toolchain bump を捕捉したい場合は spec の `tools:` map に `go: { exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?' }` のような script tool を併設して、 task 側で `tools: [..., go]` と並べる
 
 ### `globLister` への retreat
 

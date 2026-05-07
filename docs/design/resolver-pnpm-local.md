@@ -48,11 +48,17 @@ ExtraInputs 側は ToolVersion ではないので version 文字列は持たな�
 
 ### Dispatch ( declared-only)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により lazygen は declared-only。 `tools: [{pnpm-local: <package-name>}]` で宣言された場合に起動し、 cmd 形状からの auto-dispatch は持たない。 declared.PackageName が workspace に存在しなければ `ErrNotWorkspacePackage` を返す。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により lazygen は declared-only + named-tool。 `tools:` map で `pnpm-local: <package-name>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する。 declared.PackageName が workspace に存在しなければ `ErrNotWorkspacePackage` を返す。
 
 ### Resolver の利用例
 
 ```yaml
+tools:
+  pnpm:
+    exec: ["pnpm", "--version"]
+  codegen:
+    pnpm-local: "@org/codegen"
+
 commands:
   # workspace package の build を「ただのコード生成 task」として宣言
   - name: codegen-build
@@ -63,16 +69,14 @@ commands:
       - "packages/codegen/tsconfig.json"
     outputs:
       - "packages/codegen/dist/**"
-    tools:
-      - exec: ["pnpm", "--version"]
+    tools: [pnpm]
 
   # 利用側 task ( pnpm-local が dist/cli.js とその transitive を inputs に contribute)
   - name: gen
     cmd: ["pnpm", "exec", "my-codegen"]
     inputs: ["**/*.proto"]
     outputs: ["**/*.pb.ts"]
-    tools:
-      - pnpm-local: "@org/codegen"
+    tools: [codegen]
 ```
 
 ここで起きること:

@@ -8,6 +8,7 @@
 - [ADR-0003: キャッシュレコードのストレージ方式](../adr/0003-record-storage-strategy.md) (= git per-task per-input ファイル)
 - [ADR-0006: lazygen は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
 - [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
+- [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( aqua 配布物 / go.mod tool / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
@@ -95,19 +96,23 @@ flowchart TD
 ### spec ファイル形式
 
 ```yaml
-# <spec_dir>/lazygen.yml
+# <spec_dir>/lazygen.yml — tools と commands は同居 / どちらか片方だけでも可 ( ADR-0008)
+tools:
+  # tool 名 ( slug-style: [a-z0-9_-]+) → 1 つの resolver shape
+  buf:
+    exec: ["buf", "--version"]
+  protoc-gen-go:
+    exec: ["protoc-gen-go", "--version"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  # 他に使える tool 形式: go-local / pnpm-local (source-hash)
+  # 外部公開パッケージは script で吸収する (ADR-0007)
+
 commands:
   - name: protoc-gen-go
     cmd: buf generate --template buf.gen.yaml
     inputs: ["**/*.proto", "buf.gen.yaml", "buf.yaml", "buf.lock"]
     outputs: ["**/*.pb.go", "**/*.connect.go"]
-    tools:
-      # script resolver: prebuilt binary に --version 等を問い合わせる
-      - exec: ["buf", "--version"]
-      - exec: ["protoc-gen-go", "--version"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
-      # 他に使える resolver: go-local / pnpm-local (source-hash)
-      # 外部公開パッケージは script で吸収する (ADR-0007)
+    tools: [buf, protoc-gen-go]    # tool 名のリストで参照
     # 注: depends フィールドは持たない。 依存は inputs / outputs から完全自動導出される
     # buf を使う場合は buf.gen.yaml / buf.yaml / buf.lock を inputs に含める ( ADR-0006)。
     # buf 専用の resolver / preflight は持たず、 設定変更は files_hash 経路で invalidate される。
@@ -116,7 +121,9 @@ commands:
 文法ポイント:
 
 - `inputs` / `outputs` の **明示分離が必須**
-- `tools` フィールドで明示的にツール宣言可能。 prebuilt binary は script resolver ( `exec` + 任意の `extract` regex)、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
+- `tools` ブロックは **任意**。 同じ `lazygen.yml` 内で `commands:` と共存可、 別 `lazygen.yml` で定義された tool を参照することも可 ( namespace は repo-wide で flat、 ADR-0008)
+- `commands[*].tools` は **tool 名の文字列リスト** ( inline 宣言は不可)。 prebuilt binary は script resolver、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
+- tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `lazygen.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
 - `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
 
 ### キャッシュレコード schema
@@ -314,27 +321,31 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 ```mermaid
 flowchart LR
-    SPEC["CmdSpec.tools[]<br/>(必須・declared のみ)"] --> DISP["Registry.byName lookup"]
-    DISP -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go /<br/>pnpm exec ... 等)"]
-    DISP -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
-    DISP -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister<br/>(ExtraInputs + pnpm-deps versions)"]
-    SCRIPT --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
-    GOLOC --> CONCAT
-    GOLOC --> INPUTS["fold ExtraInputs into<br/>task.inputs → files_hash"]
-    PNPMLOC --> CONCAT
-    PNPMLOC --> INPUTS
+    YAML["**/lazygen.yml<br/>(tools: + commands:)"] --> REG["spec.ToolRegistry<br/>name → DeclaredTool<br/>( repo-wide flat namespace,<br/>ADR-0008)"]
+    REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Resolver.Resolve 1 回)"]
+    PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go /<br/>pnpm exec ... 等)"]
+    PRE -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
+    PRE -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: esbuildLister<br/>(ExtraInputs + pnpm-deps versions)"]
+    SCRIPT --> CACHE["resolved cache<br/>name → toolresolver.Result"]
+    GOLOC --> CACHE
+    PNPMLOC --> CACHE
+    CACHE --> COMBINE["combine per task ( commands[*].tools の順)"]
+    COMBINE --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
+    COMBINE --> INPUTS["fold ExtraInputs into<br/>task.inputs → files_hash"]
 ```
 
-#### Dispatch: declared-only
+#### Dispatch: declared-only + named-tool registry
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により、 resolver の起動経路は **`tools:` の明示宣言のみ** に統一する。 cmd 形状 (`cmd[0] == "go run ..."` 等) から resolver が自動で名乗り出る auto-dispatch は持たない。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により resolver の起動経路は **declared のみ**、 さらに [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により declared は **`lazygen.yml` の top-level `tools:` map で名前付き定義された entity への参照** に統一されている。
 
-- spec の `tools: [...]` の各 entry に対応する resolver name を `Registry.byName` で引き、 該当 resolver の `Resolve` を呼ぶ
-- 一つの cmd に複数の resolver が必要な場合 ( 例: `cmd: ["go", "run", "./cmd/gen"]` を Go toolchain と go-local の両方で hash したい) は、 `tools:` に両方の entry を併記する
+- `commands[*].tools: [name1, name2]` は string list、 各 name は `spec.ToolRegistry` ( 全 lazygen.yml の tools[] を merge した repo-wide flat namespace) に対する lookup key
+- 同名 tool が 2 ファイル以上で定義されたら load 時 error。 未定義 name を参照した task も load 時 error
+- runner は `Run` 冒頭で全 tool を 1 回ずつ resolve し、 結果を name 別 cache に保持 ( N task が同じ tool を参照しても Resolver 呼び出しは 1 回、 ADR-0008 D6)
+- 一つの task で複数 resolver / tool を組み合わせたい場合 ( 例: `tools: [go-toolchain, my-codegen]`) は名前を並べる
 - prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
 - 複合 generator ( `buf generate` 等) を扱うときも専用 resolver は導入せず、 関連設定ファイルを spec.inputs に含める形で files_hash 経路に乗せる ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))
 
-declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) 参照。
+declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md)、 named-tool 化の理由 ( DRY / per-tool 1 回 resolve / 表現力) は [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) 参照。
 
 具体的な Resolver / Registry の interface 定義は [resolver / preflight の拡張性](#resolver--preflight-の拡張性-interface-設計) 節にまとめる。
 

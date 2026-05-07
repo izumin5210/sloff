@@ -1,7 +1,10 @@
+tools:
+  codegen:
+    pnpm-local: "@org/codegen"
+
 commands:
   - name: copy
     cmd: ["sh", "-c", "cp input.txt output.txt"]
     inputs: ["input.txt"]
     outputs: ["output.txt"]
-    tools:
-      - pnpm-local: "@org/codegen"
+    tools: [codegen]

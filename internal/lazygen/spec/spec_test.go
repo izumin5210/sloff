@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -19,64 +20,57 @@ func TestParse(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "single command with string cmd",
-			yaml: `commands:
-  - name: protoc-gen-go
-    cmd: buf generate --template buf.gen.yaml
-    inputs:
-      - "**/*.proto"
-      - buf.gen.yaml
-    outputs:
-      - "**/*.pb.go"
-      - "**/*.connect.go"
-    tools:
-      - exec: ["buf", "--version"]
-`,
-			want: &spec.File{
-				Commands: []spec.Command{{
-					Name:    "protoc-gen-go",
-					Cmd:     []string{"buf", "generate", "--template", "buf.gen.yaml"},
-					Inputs:  []string{"**/*.proto", "buf.gen.yaml"},
-					Outputs: []string{"**/*.pb.go", "**/*.connect.go"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "script", Exec: []string{"buf", "--version"}},
-					},
-				}},
-			},
-		},
-		{
-			name: "command with cmd as list",
-			yaml: `commands:
+			name: "tools and commands together",
+			yaml: `tools:
+  buf:
+    exec: ["buf", "--version"]
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo
+  codegen:
+    pnpm-local: '@org/codegen'
+
+commands:
   - name: gen
-    cmd: ["foo", "bar baz"]
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - exec: ["foo", "--version"]
+    cmd: buf generate
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.go"]
+    tools: [buf, protoc-gen-foo]
 `,
 			want: &spec.File{
+				Tools: map[string]spec.DeclaredTool{
+					"buf":            {Resolver: "script", Exec: []string{"buf", "--version"}},
+					"protoc-gen-foo": {Resolver: "go-local", Entry: "./cmd/protoc-gen-foo"},
+					"codegen":        {Resolver: "pnpm-local", PackageName: "@org/codegen"},
+				},
 				Commands: []spec.Command{{
 					Name:    "gen",
-					Cmd:     []string{"foo", "bar baz"},
-					Inputs:  []string{"a"},
-					Outputs: []string{"b"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "script", Exec: []string{"foo", "--version"}},
-					},
+					Cmd:     []string{"buf", "generate"},
+					Inputs:  []string{"**/*.proto"},
+					Outputs: []string{"**/*.pb.go"},
+					Tools:   []string{"buf", "protoc-gen-foo"},
 				}},
 			},
 		},
 		{
-			name: "command with script tools",
+			name: "tools-only file (catalog)",
+			yaml: `tools:
+  buf:
+    exec: ["buf", "--version"]
+`,
+			want: &spec.File{
+				Tools: map[string]spec.DeclaredTool{
+					"buf": {Resolver: "script", Exec: []string{"buf", "--version"}},
+				},
+			},
+		},
+		{
+			name: "commands-only file (references tools defined elsewhere)",
 			yaml: `commands:
   - name: gen
     cmd: foo
     inputs: ["a"]
     outputs: ["b"]
-    tools:
-      - exec: ["buf", "--version"]
-      - exec: ["go", "version"]
-        extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
+    tools: [external-tool]
 `,
 			want: &spec.File{
 				Commands: []spec.Command{{
@@ -84,24 +78,50 @@ func TestParse(t *testing.T) {
 					Cmd:     []string{"foo"},
 					Inputs:  []string{"a"},
 					Outputs: []string{"b"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "script", Exec: []string{"buf", "--version"}},
-						{Resolver: "script", Exec: []string{"go", "version"}, Extract: `go[0-9]+\.[0-9]+(?:\.[0-9]+)?`},
-					},
+					Tools:   []string{"external-tool"},
+				}},
+			},
+		},
+		{
+			name: "command with cmd as list",
+			yaml: `tools:
+  foo:
+    exec: ["foo", "--version"]
+commands:
+  - name: gen
+    cmd: ["foo", "bar baz"]
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			want: &spec.File{
+				Tools: map[string]spec.DeclaredTool{
+					"foo": {Resolver: "script", Exec: []string{"foo", "--version"}},
+				},
+				Commands: []spec.Command{{
+					Name:    "gen",
+					Cmd:     []string{"foo", "bar baz"},
+					Inputs:  []string{"a"},
+					Outputs: []string{"b"},
+					Tools:   []string{"foo"},
 				}},
 			},
 		},
 		{
 			name: "duplicate task name fails",
-			yaml: `commands:
+			yaml: `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
   - name: gen
     cmd: foo
     inputs: ["a"]
     outputs: ["b"]
+    tools: [foo]
   - name: gen
     cmd: bar
     inputs: ["c"]
     outputs: ["d"]
+    tools: [foo]
 `,
 			wantErr: true,
 		},
@@ -111,6 +131,7 @@ func TestParse(t *testing.T) {
   - cmd: foo
     inputs: ["a"]
     outputs: ["b"]
+    tools: [foo]
 `,
 			wantErr: true,
 		},
@@ -120,6 +141,7 @@ func TestParse(t *testing.T) {
   - name: gen
     inputs: ["a"]
     outputs: ["b"]
+    tools: [foo]
 `,
 			wantErr: true,
 		},
@@ -129,6 +151,7 @@ func TestParse(t *testing.T) {
   - name: gen
     cmd: foo
     outputs: ["b"]
+    tools: [foo]
 `,
 			wantErr: true,
 		},
@@ -138,6 +161,7 @@ func TestParse(t *testing.T) {
   - name: gen
     cmd: foo
     inputs: ["a"]
+    tools: [foo]
 `,
 			wantErr: true,
 		},
@@ -163,210 +187,130 @@ func TestParse(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "tools entry without recognized fields fails",
-			yaml: `commands:
-  - name: gen
-    cmd: foo
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - unknown: x
+			name: "empty file (no tools, no commands) fails",
+			yaml: `# nothing here
 `,
 			wantErr: true,
 		},
 		{
-			name: "command with go-local tool",
-			yaml: `commands:
-  - name: gen
-    cmd: ["go", "run", "./cmd/protoc-gen-foo/..."]
-    inputs: ["**/*.proto"]
-    outputs: ["**/*.pb.go"]
-    tools:
-      - go-local: ./cmd/protoc-gen-foo/...
+			name: "tool entry without recognized fields fails",
+			yaml: `tools:
+  bad:
+    unknown: x
 `,
-			want: &spec.File{
-				Commands: []spec.Command{{
-					Name:    "gen",
-					Cmd:     []string{"go", "run", "./cmd/protoc-gen-foo/..."},
-					Inputs:  []string{"**/*.proto"},
-					Outputs: []string{"**/*.pb.go"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "go-local", Entry: "./cmd/protoc-gen-foo/..."},
-					},
-				}},
-			},
+			wantErr: true,
 		},
 		{
-			name: "command mixing script and go-local tools",
-			yaml: `commands:
-  - name: gen
-    cmd: ["go", "run", "./cmd/codegen"]
-    inputs: ["**/*.proto"]
-    outputs: ["**/*.pb.go"]
-    tools:
-      - exec: ["go", "version"]
-        extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
-      - go-local: ./cmd/codegen
+			name: "tool entry combining exec and go-local fails",
+			yaml: `tools:
+  bad:
+    exec: ["foo", "--version"]
+    go-local: ./cmd/foo
 `,
-			want: &spec.File{
-				Commands: []spec.Command{{
-					Name:    "gen",
-					Cmd:     []string{"go", "run", "./cmd/codegen"},
-					Inputs:  []string{"**/*.proto"},
-					Outputs: []string{"**/*.pb.go"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "script", Exec: []string{"go", "version"}, Extract: `go[0-9]+\.[0-9]+(?:\.[0-9]+)?`},
-						{Resolver: "go-local", Entry: "./cmd/codegen"},
-					},
-				}},
-			},
+			wantErr: true,
 		},
 		{
-			name: "tools entry with both exec and go-local fails",
-			yaml: `commands:
-  - name: gen
-    cmd: foo
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - exec: ["foo", "--version"]
-        go-local: ./cmd/foo
+			name: "tool entry combining exec and pnpm-local fails",
+			yaml: `tools:
+  bad:
+    exec: ["foo", "--version"]
+    pnpm-local: '@org/foo'
+`,
+			wantErr: true,
+		},
+		{
+			name: "tool entry combining go-local and pnpm-local fails",
+			yaml: `tools:
+  bad:
+    go-local: ./cmd/foo
+    pnpm-local: '@org/foo'
+`,
+			wantErr: true,
+		},
+		{
+			name: "tool name with uppercase fails",
+			yaml: `tools:
+  Bad:
+    exec: ["foo", "--version"]
+`,
+			wantErr: true,
+		},
+		{
+			name: "tool name starting with hyphen fails",
+			yaml: `tools:
+  -bad:
+    exec: ["foo", "--version"]
 `,
 			wantErr: true,
 		},
 		{
 			name: "go-local entry without leading dot-slash fails",
-			yaml: `commands:
-  - name: gen
-    cmd: foo
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - go-local: cmd/foo
+			yaml: `tools:
+  bad:
+    go-local: cmd/foo
 `,
 			wantErr: true,
 		},
 		{
 			name: "go-local entry of bare . is accepted",
-			yaml: `commands:
+			yaml: `tools:
+  gen:
+    go-local: .
+commands:
   - name: gen
     cmd: go run .
     inputs: ["a"]
     outputs: ["b"]
-    tools:
-      - go-local: .
+    tools: [gen]
 `,
 			want: &spec.File{
+				Tools: map[string]spec.DeclaredTool{
+					"gen": {Resolver: "go-local", Entry: "."},
+				},
 				Commands: []spec.Command{{
 					Name:    "gen",
 					Cmd:     []string{"go", "run", "."},
 					Inputs:  []string{"a"},
 					Outputs: []string{"b"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "go-local", Entry: "."},
-					},
+					Tools:   []string{"gen"},
 				}},
 			},
-		},
-		{
-			name: "command with pnpm-local tool",
-			yaml: `commands:
-  - name: gen
-    cmd: ["pnpm", "exec", "my-codegen"]
-    inputs: ["**/*.proto"]
-    outputs: ["**/*.pb.ts"]
-    tools:
-      - pnpm-local: "@org/my-codegen"
-`,
-			want: &spec.File{
-				Commands: []spec.Command{{
-					Name:    "gen",
-					Cmd:     []string{"pnpm", "exec", "my-codegen"},
-					Inputs:  []string{"**/*.proto"},
-					Outputs: []string{"**/*.pb.ts"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "pnpm-local", PackageName: "@org/my-codegen"},
-					},
-				}},
-			},
-		},
-		{
-			name: "command mixing script, go-local, and pnpm-local tools",
-			yaml: `commands:
-  - name: gen
-    cmd: ["pnpm", "exec", "my-codegen"]
-    inputs: ["**/*.proto"]
-    outputs: ["**/*.pb.ts"]
-    tools:
-      - exec: ["pnpm", "--version"]
-      - go-local: ./cmd/codegen
-      - pnpm-local: "@org/my-codegen"
-`,
-			want: &spec.File{
-				Commands: []spec.Command{{
-					Name:    "gen",
-					Cmd:     []string{"pnpm", "exec", "my-codegen"},
-					Inputs:  []string{"**/*.proto"},
-					Outputs: []string{"**/*.pb.ts"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "script", Exec: []string{"pnpm", "--version"}},
-						{Resolver: "go-local", Entry: "./cmd/codegen"},
-						{Resolver: "pnpm-local", PackageName: "@org/my-codegen"},
-					},
-				}},
-			},
-		},
-		{
-			name: "tools entry mixing exec and pnpm-local fails",
-			yaml: `commands:
-  - name: gen
-    cmd: foo
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - exec: ["foo", "--version"]
-        pnpm-local: "@org/foo"
-`,
-			wantErr: true,
-		},
-		{
-			name: "tools entry mixing go-local and pnpm-local fails",
-			yaml: `commands:
-  - name: gen
-    cmd: foo
-    inputs: ["a"]
-    outputs: ["b"]
-    tools:
-      - go-local: ./cmd/foo
-        pnpm-local: "@org/foo"
-`,
-			wantErr: true,
 		},
 		{
 			name: "go-local parent-relative entry is accepted",
-			yaml: `commands:
+			yaml: `tools:
+  gen:
+    go-local: ../cmd/gen
+commands:
   - name: gen
     cmd: go run ../cmd/gen
     inputs: ["a"]
     outputs: ["b"]
-    tools:
-      - go-local: ../cmd/gen
+    tools: [gen]
 `,
 			want: &spec.File{
+				Tools: map[string]spec.DeclaredTool{
+					"gen": {Resolver: "go-local", Entry: "../cmd/gen"},
+				},
 				Commands: []spec.Command{{
 					Name:    "gen",
 					Cmd:     []string{"go", "run", "../cmd/gen"},
 					Inputs:  []string{"a"},
 					Outputs: []string{"b"},
-					Tools: []spec.DeclaredTool{
-						{Resolver: "go-local", Entry: "../cmd/gen"},
-					},
+					Tools:   []string{"gen"},
 				}},
 			},
 		},
 		{
-			name: "empty commands fails",
-			yaml: `commands: []
+			name: "empty tool name reference fails",
+			yaml: `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: ["", foo]
 `,
 			wantErr: true,
 		},
@@ -394,21 +338,25 @@ func TestParse(t *testing.T) {
 
 func TestDiscover(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "a", "lazygen.yml"), `commands:
+	mustWrite(t, filepath.Join(root, "a", "lazygen.yml"), `tools:
+  do-a:
+    exec: ["do-a", "--version"]
+commands:
   - name: alpha
     cmd: do-a
     inputs: ["**/*.in"]
     outputs: ["**/*.out"]
-    tools:
-      - exec: ["do-a", "--version"]
+    tools: [do-a]
 `)
-	mustWrite(t, filepath.Join(root, "nested", "b", "lazygen.yml"), `commands:
+	mustWrite(t, filepath.Join(root, "nested", "b", "lazygen.yml"), `tools:
+  do-b:
+    exec: ["do-b", "--version"]
+commands:
   - name: beta
     cmd: do-b
     inputs: ["**/*.in"]
     outputs: ["**/*.out"]
-    tools:
-      - exec: ["do-b", "--version"]
+    tools: [do-b]
 `)
 	mustWrite(t, filepath.Join(root, "ignored", "other.yml"), "irrelevant")
 
@@ -430,23 +378,28 @@ func TestDiscover(t *testing.T) {
 	}
 }
 
+// TestDiscover_DuplicateTaskAcrossSpecsAllowed guards that the same task name
+// can appear in different spec dirs (they're disambiguated by spec dir in the
+// cache record path), even though duplicates within one file are rejected.
 func TestDiscover_DuplicateTaskAcrossSpecsAllowed(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "a", "lazygen.yml"), `commands:
+	mustWrite(t, filepath.Join(root, "a", "lazygen.yml"), `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
   - name: gen
     cmd: foo
     inputs: ["a.in"]
     outputs: ["a.out"]
-    tools:
-      - exec: ["foo", "--version"]
+    tools: [foo]
 `)
-	mustWrite(t, filepath.Join(root, "b", "lazygen.yml"), `commands:
+	mustWrite(t, filepath.Join(root, "b", "lazygen.yml"), `tools:
+  bar: {exec: ["bar", "--version"]}
+commands:
   - name: gen
     cmd: bar
     inputs: ["b.in"]
     outputs: ["b.out"]
-    tools:
-      - exec: ["bar", "--version"]
+    tools: [bar]
 `)
 	got, err := spec.Discover(root, "**/lazygen.yml")
 	if err != nil {
@@ -454,6 +407,88 @@ func TestDiscover_DuplicateTaskAcrossSpecsAllowed(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("len(got)=%d, want 2", len(got))
+	}
+}
+
+// TestBuildToolRegistry_MergesAcrossFiles guards the ADR-0008 D2 invariant:
+// tool names live in a flat repo-wide namespace built by walking every
+// discovered lazygen.yml. Lookup is by short name regardless of where the
+// tool was defined.
+func TestBuildToolRegistry_MergesAcrossFiles(t *testing.T) {
+	specs := []spec.Spec{
+		{Dir: "proto", File: &spec.File{Tools: map[string]spec.DeclaredTool{
+			"buf":            {Resolver: "script", Exec: []string{"buf", "--version"}},
+			"protoc-gen-foo": {Resolver: "go-local", Entry: "./cmd/protoc-gen-foo"},
+		}}},
+		{Dir: "api", File: &spec.File{Tools: map[string]spec.DeclaredTool{
+			"codegen": {Resolver: "pnpm-local", PackageName: "@org/codegen"},
+		}}},
+	}
+	reg, err := spec.BuildToolRegistry(specs)
+	if err != nil {
+		t.Fatalf("BuildToolRegistry: %v", err)
+	}
+	got, ok := reg.Lookup("protoc-gen-foo")
+	if !ok {
+		t.Fatal("protoc-gen-foo not in registry")
+	}
+	if got.SpecDir != "proto" {
+		t.Errorf("SpecDir = %q, want proto (definition-site dir)", got.SpecDir)
+	}
+}
+
+// TestBuildToolRegistry_DuplicateNameFails surfaces the cross-spec collision
+// case loudly. Without an explicit error, the registry would silently keep
+// whichever tool happened to be visited last and silently drift away from
+// what the user wrote in the conflicting file.
+func TestBuildToolRegistry_DuplicateNameFails(t *testing.T) {
+	specs := []spec.Spec{
+		{Dir: "proto", File: &spec.File{Tools: map[string]spec.DeclaredTool{
+			"codegen": {Resolver: "pnpm-local", PackageName: "@org/codegen-proto"},
+		}}},
+		{Dir: "api", File: &spec.File{Tools: map[string]spec.DeclaredTool{
+			"codegen": {Resolver: "pnpm-local", PackageName: "@org/codegen-api"},
+		}}},
+	}
+	_, err := spec.BuildToolRegistry(specs)
+	if err == nil {
+		t.Fatal("expected error on duplicate tool name across files")
+	}
+	for _, want := range []string{"codegen", "proto", "api"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestValidateToolReferences_RejectsUndefinedRef catches the case a task
+// references a tool that was never declared. Without it, the runner would
+// either crash later or silently emit empty contributions.
+func TestValidateToolReferences_RejectsUndefinedRef(t *testing.T) {
+	specs := []spec.Spec{
+		{Dir: "proto", File: &spec.File{
+			Tools: map[string]spec.DeclaredTool{
+				"buf": {Resolver: "script", Exec: []string{"buf", "--version"}},
+			},
+			Commands: []spec.Command{{
+				Name: "gen", Cmd: []string{"x"},
+				Inputs: []string{"a"}, Outputs: []string{"b"},
+				Tools: []string{"buf", "missing-tool"},
+			}},
+		}},
+	}
+	reg, err := spec.BuildToolRegistry(specs)
+	if err != nil {
+		t.Fatalf("BuildToolRegistry: %v", err)
+	}
+	err = spec.ValidateToolReferences(specs, reg)
+	if err == nil {
+		t.Fatal("expected error on undefined tool reference")
+	}
+	for _, want := range []string{"missing-tool", "gen", "proto"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
 	}
 }
 

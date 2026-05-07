@@ -121,7 +121,23 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	tasks, err := r.collectTasks(ctx)
+	// ADR-0008: build the repo-wide tool registry once, validate every task's
+	// references resolve to a defined tool, then resolve each tool exactly
+	// once. Storing results by name lets collectTasks fan a tool out across N
+	// referencing tasks at zero additional resolver cost.
+	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	if err != nil {
+		return err
+	}
+	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return err
+	}
+	resolved, err := r.resolveAllTools(ctx, registry)
+	if err != nil {
+		return err
+	}
+
+	tasks, err := r.collectTasks(resolved)
 	if err != nil {
 		return err
 	}
@@ -142,6 +158,23 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// resolveAllTools invokes the toolresolver registry once per registered tool
+// and returns a name → Result map. specDir for each invocation is the dir
+// where the tool was *defined* (ADR-0008 D3), not where it's referenced from,
+// so tool definitions stay self-contained relative to their host lazygen.yml.
+func (r *Runner) resolveAllTools(ctx context.Context, registry *spec.ToolRegistry) (map[string]toolresolver.Result, error) {
+	out := make(map[string]toolresolver.Result, len(registry.All()))
+	for _, entry := range registry.All() {
+		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+		res, err := r.opts.Resolvers.Resolve(ctx, entry.SpecDir, nil, declared)
+		if err != nil {
+			return nil, fmt.Errorf("resolve tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+		}
+		out[entry.Name] = res
+	}
+	return out, nil
+}
+
 // taskInfo carries the bits of spec.Command needed to execute it. Stored on the depgraph.Task
 // via the SpecRelpath/Name key — we look it back up by key when executing.
 type taskInfo struct {
@@ -155,12 +188,12 @@ type taskInfo struct {
 	resolverResult toolresolver.Result
 }
 
-// collectTasks expands inputs/outputs for every spec command, runs each task's
-// resolvers up-front, and returns the depgraph.Task slice with resolver-
-// contributed inputs already folded in. Folding extras in here is what lets
-// depgraph wire up workspace-tool build tasks to their consumers via the usual
-// output-overlap rule, instead of needing a parallel dependency channel.
-func (r *Runner) collectTasks(ctx context.Context) ([]depgraph.Task, error) {
+// collectTasks expands inputs/outputs for every spec command and folds each
+// task's referenced tools' contributions (from the pre-resolved per-tool
+// cache) into the task's input set. Folding extras in here is what lets
+// depgraph wire up workspace-tool build tasks to their consumers via the
+// usual output-overlap rule, instead of needing a parallel dependency channel.
+func (r *Runner) collectTasks(resolved map[string]toolresolver.Result) ([]depgraph.Task, error) {
 	r.byKey = map[string]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
@@ -174,11 +207,8 @@ func (r *Runner) collectTasks(ctx context.Context) ([]depgraph.Task, error) {
 				return nil, fmt.Errorf("%s/%s: expand outputs: %w", sp.Dir, c.Name, err)
 			}
 
-			result, err := r.opts.Resolvers.Resolve(ctx, sp.Dir, c.Cmd, declaredFromSpec(c.Tools))
-			if err != nil {
-				return nil, fmt.Errorf("%s/%s: resolve tools: %w", sp.Dir, c.Name, err)
-			}
-			mergedInputs := mergeInputs(inputs, result.ExtraInputs)
+			combined := combineToolResults(c.Tools, resolved)
+			mergedInputs := mergeInputs(inputs, combined.ExtraInputs)
 
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
@@ -192,11 +222,29 @@ func (r *Runner) collectTasks(ctx context.Context) ([]depgraph.Task, error) {
 				command:        c,
 				inputPaths:     mergedInputs,
 				outputPatterns: c.Outputs,
-				resolverResult: result,
+				resolverResult: combined,
 			}
 		}
 	}
 	return tasks, nil
+}
+
+// combineToolResults concatenates Versions and ExtraInputs in the order tools
+// appear in the spec's tools[] list, mirroring the previous inline behaviour
+// where dispatch order followed declaration order. ValidateToolReferences has
+// already guaranteed every name resolves, so a missing entry here is a
+// programmer error and we panic to surface it loudly during tests.
+func combineToolResults(names []string, resolved map[string]toolresolver.Result) toolresolver.Result {
+	var combined toolresolver.Result
+	for _, name := range names {
+		r, ok := resolved[name]
+		if !ok {
+			panic(fmt.Sprintf("runner: tool %q missing from resolved registry; ValidateToolReferences should have caught this", name))
+		}
+		combined.Versions = append(combined.Versions, r.Versions...)
+		combined.ExtraInputs = append(combined.ExtraInputs, r.ExtraInputs...)
+	}
+	return combined
 }
 
 // mergeInputs returns the deduplicated, sorted union of declared and extra
@@ -370,21 +418,18 @@ func (r *Runner) reportPreflightIssues(issues []preflight.Issue) {
 
 // Helpers ------------------------------------------------------------------
 
-func declaredFromSpec(tools []spec.DeclaredTool) []toolresolver.DeclaredTool {
-	if len(tools) == 0 {
-		return nil
+// toolresolverDeclared bridges spec.DeclaredTool (the YAML-parsed shape) to
+// toolresolver.DeclaredTool (the resolver dispatch shape). The two types stay
+// separate so the spec package doesn't depend on toolresolver, but the field
+// set is structurally identical.
+func toolresolverDeclared(t spec.DeclaredTool) toolresolver.DeclaredTool {
+	return toolresolver.DeclaredTool{
+		Resolver:    t.Resolver,
+		Exec:        t.Exec,
+		Extract:     t.Extract,
+		Entry:       t.Entry,
+		PackageName: t.PackageName,
 	}
-	out := make([]toolresolver.DeclaredTool, len(tools))
-	for i, t := range tools {
-		out[i] = toolresolver.DeclaredTool{
-			Resolver:    t.Resolver,
-			Exec:        t.Exec,
-			Extract:     t.Extract,
-			Entry:       t.Entry,
-			PackageName: t.PackageName,
-		}
-	}
-	return out
 }
 
 func versionStrings(versions []toolresolver.ToolVersion) []string {

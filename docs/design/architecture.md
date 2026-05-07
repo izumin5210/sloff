@@ -307,7 +307,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 |---|---|---|---|---|
 | prebuilt binary ( aqua / `go tool` / `pnpm exec` / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
 | Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存 ( 内部 / 外部分離戦略) | 不要 | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | workspace package の src/ ソース hash ( esbuild API 経由) | build 必須なら dist 整合 | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | bin の transitive ファイル ( esbuild API 経由) を inputs に contribute + 外部 npm dep の resolved version を tools_hash に注入 | 不要 ( build は通常 task として宣言) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 `buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
@@ -367,8 +367,7 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 preflight が必要なのは、 `tools_hash` の取得元 ( ソース) が runtime の実体 ( build 出力など) と乖離する余地がある channel に限られる。 具体的には:
 
-- **必要**: `pnpm-local` ( workspace package の build 出力 dist が src より新しいかの整合)
-- **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため)
+- **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため)、 `pnpm-local` ( workspace tool の rebuild 忘れは利用者が build を「通常の lazygen task」 として宣言することで depgraph + 通常の cache 無効化で構造的に解消するため、 専用 preflight は不要 — [resolver-pnpm-local.md](./resolver-pnpm-local.md))
 
 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により lazygen は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。 外部公開 npm / Go OSS パッケージについても [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で吸収するため preflight は不要。
 
@@ -399,10 +398,18 @@ type Resolver interface {
     // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される
     Name() string
 
-    // Resolve は declared tool 宣言と cmd から OS 非依存な ToolVersion を返す。
+    // Resolve は declared tool 宣言と cmd から Result を返す。 Result.Versions が
+    // tools_hash に乗る OS 非依存版数、 Result.ExtraInputs は task の inputs に
+    // union される repo-relative path 集合 ( pnpm-local が workspace tool の
+    // transitive ソースを contribute する用途)。
     // declared は spec の `tools:` entry そのままで、 必ず非 nil ( ADR-0005 で
     // declared-only に統一)。
-    Resolve(ctx context.Context, specDir string, cmd []string, declared *DeclaredTool) ([]ToolVersion, error)
+    Resolve(ctx context.Context, specDir string, cmd []string, declared *DeclaredTool) (Result, error)
+}
+
+type Result struct {
+    Versions    []ToolVersion // tools_hash に投入される
+    ExtraInputs []string      // task の inputs glob 展開済み集合に union される
 }
 
 type ToolVersion struct {
@@ -411,6 +418,8 @@ type ToolVersion struct {
     Source  string // 取得元 (例: "aqua.yaml", "go.mod", "pnpm-local:@org/my-codegen")
 }
 ```
+
+`Result.ExtraInputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた ExtraInputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する `dist/cli.js` 等) が consumer task の inputs に乗り、 それを output に持つ build task との依存が **既存の output-overlap depgraph 規則だけで自動成立** する ( Turborepo の `dependsOn` を file overlap でやる版)。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
 
 組み込み実装: `scriptResolver` ( prebuilt binary 全般、 外部公開 npm / Go OSS パッケージも吸収)、 `goLocalResolver` (内製 Go CLI), `pnpmLocalResolver` (pnpm workspace 内 内製)。 各 Resolver の実装詳細は対応する独立 doc を参照。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージ全般については [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により専用 resolver を持たない。
 
@@ -636,13 +645,14 @@ internal/lazygen/
       #   tsc.go             (TypeScript Compiler API ベースの代替)
       #   cargo_metadata.go  (Rust 用)
       #   python_ast.go      (Python ast module ベース)
-  preflight/                                # ★ Checker interface + Registry (build 状態を SSoT とする channel のみ実装)
+  preflight/                                # ★ Checker interface + Registry ( 現状 built-in Checker 無し)
     preflight.go                            # Checker interface, Result/Issue 型
     registry.go
-    pnpmlocal/
-      pnpmlocal.go                          # package pnpmlocal ( pnpm workspace 内 内製の build 状態検証)
-    # script resolver / go-local resolver / buf / 外部公開パッケージには対応 Checker を置かない
-    # ( script / go-local は構造的に不要、 buf は ADR-0006、 外部公開は ADR-0007 で利用者責務に倒した)
+    # 現在 builtin Checker は登録されていない:
+    # - script resolver / go-local: 構造的に不要 ( runtime / source 自体が SSoT)
+    # - pnpm-local: 「 build 忘れ」 は通常 lazygen task として build を宣言する
+    #   ことで depgraph 経由で構造的に解消するため、 専用 Checker を持たない
+    # - buf: ADR-0006、 外部公開: ADR-0007 で利用者責務に倒した
 
 # 利用者リポジトリ側に作成するファイル ( lazygen 利用時)
 <spec_dir>/lazygen.yml                      # task 定義

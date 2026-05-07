@@ -12,18 +12,46 @@ import (
 // LockfileName is the canonical name pnpm uses for its lockfile.
 const LockfileName = "pnpm-lock.yaml"
 
-// Lockfile is a minimal view over pnpm-lock.yaml. We only need the importer
-// keys ( = workspace package paths) to map declared package names back to
-// directories on disk. Dependency graph details are intentionally ignored:
-// pnpm-local hashes source files directly, so the lockfile only acts as the
-// authoritative list of workspace members.
+// Lockfile is a partial view over pnpm-lock.yaml v9. We parse:
+//   - Importers: workspace path → its declared deps (used to resolve the
+//     entry set of external dep walks per workspace package)
+//   - Snapshots: <pkg@version> → its transitive deps (used to walk the
+//     external dep graph rooted at a workspace package, Turborepo-style)
+//
+// Other top-level keys (settings, packages, time, etc.) are ignored.
 type Lockfile struct {
-	Importers map[string]importerStub `yaml:"importers"`
+	LockfileVersion string              `yaml:"lockfileVersion"`
+	Importers       map[string]Importer `yaml:"importers"`
+	Snapshots       map[string]Snapshot `yaml:"snapshots"`
 }
 
-// importerStub is intentionally empty — yaml decoding still walks past unknown
-// keys, and we don't consume any of importers[*]'s fields.
-type importerStub struct{}
+// Importer mirrors pnpm-lock.yaml's importers[<path>] entry. We collect the
+// three dependency buckets so the externals walk doesn't accidentally miss
+// devDependencies (codegen tools commonly live there) or optionalDependencies
+// (platform-specific peers).
+type Importer struct {
+	Dependencies         map[string]ImporterDep `yaml:"dependencies"`
+	DevDependencies      map[string]ImporterDep `yaml:"devDependencies"`
+	OptionalDependencies map[string]ImporterDep `yaml:"optionalDependencies"`
+}
+
+// ImporterDep is one dep entry under importers[<path>].dependencies. Specifier
+// is what the user wrote in package.json (e.g. "^4.17.0"); Version is what
+// pnpm resolved it to in the lockfile (e.g. "4.17.21" or "4.17.21(peer@1)" or
+// "link:../util" for workspace links).
+type ImporterDep struct {
+	Specifier string `yaml:"specifier"`
+	Version   string `yaml:"version"`
+}
+
+// Snapshot is one entry under snapshots[<pkg@version>] — the resolved
+// dependency tree of that package at that exact context. Values in
+// Dependencies are version strings (with optional peer-context suffixes)
+// that compose with the dep name into another snapshot key.
+type Snapshot struct {
+	Dependencies         map[string]string `yaml:"dependencies"`
+	OptionalDependencies map[string]string `yaml:"optionalDependencies"`
+}
 
 // LoadLockfile reads <repoRoot>/pnpm-lock.yaml.
 func LoadLockfile(repoRoot string) (*Lockfile, error) {

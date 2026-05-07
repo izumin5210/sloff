@@ -13,16 +13,17 @@ import (
 type fakeResolver struct {
 	name         string
 	versions     []toolresolver.ToolVersion
+	extraInputs  []string
 	err          error
 	calls        int
 	lastDeclared *toolresolver.DeclaredTool
 }
 
 func (f *fakeResolver) Name() string { return f.name }
-func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
 	f.calls++
 	f.lastDeclared = declared
-	return f.versions, f.err
+	return toolresolver.Result{Versions: f.versions, ExtraInputs: f.extraInputs}, f.err
 }
 
 func TestRegistry_DeclaredCallsNamedResolver(t *testing.T) {
@@ -39,7 +40,7 @@ func TestRegistry_DeclaredCallsNamedResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}
-	if diff := cmp.Diff(want, got); diff != "" {
+	if diff := cmp.Diff(want, got.Versions); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 	if a.calls != 0 {
@@ -71,8 +72,31 @@ func TestRegistry_MultipleDeclaredConcatenateVersionsInOrder(t *testing.T) {
 		{Name: "b", Version: "vB"},
 		{Name: "a", Version: "vA"},
 	}
-	if diff := cmp.Diff(want, got); diff != "" {
+	if diff := cmp.Diff(want, got.Versions); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRegistry_AggregatesExtraInputs guards that input contributions from
+// multiple resolvers concatenate in declared order. The runner relies on this
+// so depgraph sees every workspace-tool input regardless of which channels a
+// task pulls from.
+func TestRegistry_AggregatesExtraInputs(t *testing.T) {
+	a := &fakeResolver{name: "a", extraInputs: []string{"alpha/file.ts"}}
+	b := &fakeResolver{name: "b", extraInputs: []string{"bravo/file.ts", "bravo/lib.ts"}}
+
+	reg := toolresolver.NewRegistry()
+	reg.Register(a)
+	reg.Register(b)
+
+	got, err := reg.Resolve(context.Background(), ".", []string{"x"},
+		[]toolresolver.DeclaredTool{{Resolver: "a"}, {Resolver: "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"alpha/file.ts", "bravo/file.ts", "bravo/lib.ts"}
+	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
+		t.Errorf("ExtraInputs mismatch (-want +got):\n%s", diff)
 	}
 }
 

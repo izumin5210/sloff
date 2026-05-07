@@ -356,6 +356,27 @@ func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
 	)
 }
 
+// TestRunner_PnpmLocal_BuildChain exercises the design's headline workflow:
+// a workspace tool's build is declared as an ordinary lazygen task, and the
+// consumer task references the package via pnpm-local. The bin path the
+// resolver contributes overlaps the build task's outputs, so depgraph wires
+// build → gen automatically and editing src/ flows through:
+//
+//	src edit → build re-runs → dist updates → gen invalidates → gen re-runs
+//
+// The fixture deliberately starts WITHOUT a built dist/cli.js so the
+// fresh-checkout fall-back ( bin path included even when the lister can't
+// read it yet) gets exercised on the first run.
+func TestRunner_PnpmLocal_BuildChain(t *testing.T) {
+	runE2E(
+		t, "pnpmlocal-build-chain",
+		runStep(),
+		writeStep("packages/codegen/src/cli.ts",
+			"// v2: edited source flips the build hash and cascades to gen\nconsole.log('codegen v2');\n"),
+		runStep(),
+	)
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and

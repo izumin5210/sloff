@@ -5,20 +5,23 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/pnpmlocal"
 )
 
-// fakeLister is a stub SourceLister that records the list calls and returns a
-// pre-baked listing per (specDir, entry) key. Pnpm-local tests use it to keep
-// the resolver decoupled from esbuild during unit testing.
+// fakeLister returns a fixed Listing per "<specDir>\x00<entry>" key. Pnpm-
+// local tests use it to keep the resolver decoupled from esbuild during unit
+// testing.
 type fakeLister struct {
 	calls    []fakeListerCall
-	listings map[string]lister.Listing // key = "<specDir>\x00<entry>"
+	listings map[string]lister.Listing
 	err      error
 }
 
@@ -39,7 +42,7 @@ func (f *fakeLister) List(_ context.Context, specDir, entry string) (lister.List
 }
 
 func TestResolver_Name(t *testing.T) {
-	root := setupWorkspace(t, nil, nil)
+	root := setupWorkspace(t, nil, nil, "")
 	r := mustNewResolver(t, root, &fakeLister{})
 	if r.Name() != "pnpm-local" {
 		t.Errorf("Name() = %q, want pnpm-local", r.Name())
@@ -47,7 +50,7 @@ func TestResolver_Name(t *testing.T) {
 }
 
 func TestResolver_RejectsNilDeclaration(t *testing.T) {
-	root := setupWorkspace(t, nil, nil)
+	root := setupWorkspace(t, nil, nil, "")
 	r := mustNewResolver(t, root, &fakeLister{})
 	if _, err := r.Resolve(context.Background(), ".", nil, nil); err == nil {
 		t.Fatal("expected error when declared is nil (ADR-0005)")
@@ -55,7 +58,7 @@ func TestResolver_RejectsNilDeclaration(t *testing.T) {
 }
 
 func TestResolver_RejectsEmptyPackageName(t *testing.T) {
-	root := setupWorkspace(t, nil, nil)
+	root := setupWorkspace(t, nil, nil, "")
 	r := mustNewResolver(t, root, &fakeLister{})
 	_, err := r.Resolve(context.Background(), ".", nil,
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local"})
@@ -69,9 +72,12 @@ func TestResolver_RejectsEmptyPackageName(t *testing.T) {
 // as a workspace member) must fail clearly so the user knows to switch to the
 // script resolver instead of getting a silent wrong-version cache.
 func TestResolver_RejectsNonWorkspacePackage(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{
-		{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`},
-	}, nil)
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`}},
+		nil,
+		"",
+	)
 	r := mustNewResolver(t, root, &fakeLister{})
 
 	_, err := r.Resolve(context.Background(), ".", nil,
@@ -84,17 +90,17 @@ func TestResolver_RejectsNonWorkspacePackage(t *testing.T) {
 	}
 }
 
-// TestResolver_HashesEntryPointTransitiveSources is the happy path: the
-// declared workspace package's bin entry is forwarded to the lister, the
-// returned files are hashed, and the resulting Version is the OS-neutral
-// "pnpm-local:<name>@sha256:<hex>" form.
-func TestResolver_HashesEntryPointTransitiveSources(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{
-		{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`},
-	}, map[string]string{
-		"packages/codegen/dist/cli.js": "console.log('a');\n",
-		"packages/codegen/dist/lib.js": "console.log('b');\n",
-	})
+// TestResolver_ContributesWorkspaceFilesAsExtraInputs is the happy path for
+// the input-contributor side of the resolver: the lister's InternalFiles
+// surface verbatim in Result.ExtraInputs so the runner can fold them into
+// the task's input set and depgraph picks up the upstream build task.
+func TestResolver_ContributesWorkspaceFilesAsExtraInputs(t *testing.T) {
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`}},
+		map[string]string{"packages/codegen/dist/cli.js": "console.log('x');\n"},
+		"",
+	)
 
 	stub := &fakeLister{listings: map[string]lister.Listing{
 		"\x00./packages/codegen/dist/cli.js": {
@@ -103,89 +109,139 @@ func TestResolver_HashesEntryPointTransitiveSources(t *testing.T) {
 	}}
 	r := mustNewResolver(t, root, stub)
 
-	versions, err := r.Resolve(context.Background(), ".", nil,
+	got, err := r.Resolve(context.Background(), ".", nil,
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if len(versions) != 1 {
-		t.Fatalf("len(versions) = %d, want 1", len(versions))
-	}
-	got := versions[0]
-	if got.Name != "@org/codegen" {
-		t.Errorf("Name = %q, want @org/codegen", got.Name)
-	}
-	if !strings.HasPrefix(got.Version, "pnpm-local:@org/codegen@sha256:") {
-		t.Errorf("Version = %q", got.Version)
-	}
-	if got.Source != "pnpm-local:@org/codegen" {
-		t.Errorf("Source = %q, want pnpm-local:@org/codegen", got.Source)
+	want := []string{"packages/codegen/dist/cli.js", "packages/codegen/dist/lib.js"}
+	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
+		t.Errorf("ExtraInputs mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestResolver_HashChangesOnSourceEdit(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{
-		{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`},
-	}, map[string]string{
-		"packages/codegen/dist/cli.js": "console.log('v1');\n",
-	})
+// TestResolver_FallsBackToBinPathWhenMissing exercises the fresh-checkout
+// branch: when the bin file doesn't yet exist on disk (typical when an
+// upstream build task hasn't run), the resolver still surfaces the bin path
+// as an ExtraInput so depgraph can wire the build task by output overlap.
+// Skipping this would leave depgraph blind to the dependency on first run.
+func TestResolver_FallsBackToBinPathWhenMissing(t *testing.T) {
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`}},
+		nil, // dist/cli.js intentionally absent
+		"",
+	)
+	stub := &fakeLister{}
+	r := mustNewResolver(t, root, stub)
+
+	got, err := r.Resolve(context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if diff := cmp.Diff([]string{"packages/codegen/dist/cli.js"}, got.ExtraInputs); diff != "" {
+		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("lister should be skipped when bin is missing, got %d calls", len(stub.calls))
+	}
+}
+
+// TestResolver_EmitsTransitiveExternalsAsToolVersions is the happy path for
+// the tools_hash side: every external dep reachable from the workspace
+// package via the lockfile graph surfaces as a `pnpm-external:<pkg>@<ver>`
+// version string. Without this, runtime-resolved npm bumps would not flip
+// tools_hash and stale outputs could leak through the cache.
+func TestResolver_EmitsTransitiveExternalsAsToolVersions(t *testing.T) {
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`}},
+		nil,
+		`lockfileVersion: '9.0'
+importers:
+  packages/codegen:
+    dependencies:
+      lodash:
+        specifier: ^4.17.0
+        version: 4.17.21
+snapshots:
+  lodash@4.17.21:
+    dependencies:
+      some-helper: 1.2.3
+  some-helper@1.2.3: {}
+`,
+	)
 	stub := &fakeLister{listings: map[string]lister.Listing{
-		"\x00./packages/codegen/dist/cli.js": {
-			InternalFiles: []string{"packages/codegen/dist/cli.js"},
-		},
+		"\x00./packages/codegen/dist/cli.js": {InternalFiles: []string{"packages/codegen/dist/cli.js"}},
 	}}
 
-	v1 := mustResolveVersion(t, root, stub, "@org/codegen")
-
-	if err := os.WriteFile(filepath.Join(root, "packages", "codegen", "dist", "cli.js"),
-		[]byte("console.log('v2');\n"), 0o644); err != nil {
-		t.Fatal(err)
+	got, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	v2 := mustResolveVersion(t, root, stub, "@org/codegen")
-
-	if v1 == v2 {
-		t.Errorf("source edit must change Version, got %q twice", v1)
+	versionStrs := make([]string, len(got.Versions))
+	for i, v := range got.Versions {
+		versionStrs[i] = v.Version
+	}
+	sort.Strings(versionStrs)
+	want := []string{
+		"pnpm-external:lodash@4.17.21",
+		"pnpm-external:some-helper@1.2.3",
+	}
+	if diff := cmp.Diff(want, versionStrs); diff != "" {
+		t.Errorf("Versions (-want +got):\n%s", diff)
 	}
 }
 
 // TestResolver_MultipleBinEntriesUnioned guards the multi-entry case: when
-// package.json declares two bins, both contribute files to the hash. Without
-// this, edits to one bin's transitive deps would not invalidate the cache.
+// package.json declares two bins, both contribute files as ExtraInputs.
+// Without this, edits to one bin's transitive deps would not invalidate the
+// cache via the inputs path.
 func TestResolver_MultipleBinEntriesUnioned(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{{
-		path:    "packages/codegen",
-		pkgJSON: `{"name": "@org/codegen", "bin": {"a": "dist/a.js", "b": "dist/b.js"}}`,
-	}}, map[string]string{
-		"packages/codegen/dist/a.js": "console.log('a');\n",
-		"packages/codegen/dist/b.js": "console.log('b');\n",
-	})
-
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{
+			path:    "packages/codegen",
+			pkgJSON: `{"name": "@org/codegen", "bin": {"a": "dist/a.js", "b": "dist/b.js"}}`,
+		}},
+		map[string]string{
+			"packages/codegen/dist/a.js": "1\n",
+			"packages/codegen/dist/b.js": "1\n",
+		},
+		"",
+	)
 	stub := &fakeLister{listings: map[string]lister.Listing{
 		"\x00./packages/codegen/dist/a.js": {InternalFiles: []string{"packages/codegen/dist/a.js"}},
 		"\x00./packages/codegen/dist/b.js": {InternalFiles: []string{"packages/codegen/dist/b.js"}},
 	}}
 
-	versions, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+	got, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if len(versions) != 1 {
-		t.Fatalf("len(versions) = %d, want 1", len(versions))
-	}
-
 	if len(stub.calls) != 2 {
 		t.Errorf("expected 2 lister calls (one per bin), got %d: %+v", len(stub.calls), stub.calls)
+	}
+	want := []string{"packages/codegen/dist/a.js", "packages/codegen/dist/b.js"}
+	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
+		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
 	}
 }
 
 // TestResolver_FailsOnPackageWithoutEntryPoints catches misconfigured workspace
 // packages that declare neither bin nor main. Without the fail, the resolver
-// would hash an empty file set and every cache lookup would falsely hit.
+// would silently emit an empty contribution and downstream invalidation
+// signals would be lost.
 func TestResolver_FailsOnPackageWithoutEntryPoints(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{
-		{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen"}`},
-	}, nil)
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen"}`}},
+		nil,
+		"",
+	)
 	r := mustNewResolver(t, root, &fakeLister{})
 
 	_, err := r.Resolve(context.Background(), ".", nil,
@@ -195,28 +251,21 @@ func TestResolver_FailsOnPackageWithoutEntryPoints(t *testing.T) {
 	}
 }
 
-// TestResolver_DeterministicAcrossRuns guards that the same workspace state
-// produces byte-identical Version strings across runs — the cornerstone of
-// shared cache integrity.
-func TestResolver_DeterministicAcrossRuns(t *testing.T) {
-	root := setupWorkspace(t, []importerSpec{{
-		path:    "packages/codegen",
-		pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`,
-	}}, map[string]string{
-		"packages/codegen/dist/cli.js": "console.log('hi');\n",
-		"packages/codegen/dist/lib.js": "module.exports = 1;\n",
-	})
+// TestResolver_PassesThroughListerError surfaces lister failures rather than
+// silently producing an empty hash that could mask a broken esbuild call.
+func TestResolver_PassesThroughListerError(t *testing.T) {
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen", "bin": "dist/cli.js"}`}},
+		map[string]string{"packages/codegen/dist/cli.js": "x"},
+		"",
+	)
+	stub := &fakeLister{err: errors.New("esbuild boom")}
 
-	stub := &fakeLister{listings: map[string]lister.Listing{
-		"\x00./packages/codegen/dist/cli.js": {
-			InternalFiles: []string{"packages/codegen/dist/cli.js", "packages/codegen/dist/lib.js"},
-		},
-	}}
-
-	v1 := mustResolveVersion(t, root, stub, "@org/codegen")
-	v2 := mustResolveVersion(t, root, stub, "@org/codegen")
-	if v1 != v2 {
-		t.Errorf("non-deterministic Version: %q vs %q", v1, v2)
+	_, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
+	if err == nil || !strings.Contains(err.Error(), "esbuild boom") {
+		t.Errorf("err = %v, want wrap of lister error", err)
 	}
 }
 
@@ -227,24 +276,27 @@ type importerSpec struct {
 	pkgJSON string
 }
 
-// setupWorkspace materialises a temp repo with a pnpm-lock.yaml that lists
-// every importer and the corresponding package.json files plus extra source
-// files.
-func setupWorkspace(t *testing.T, importers []importerSpec, extra map[string]string) string {
+// setupWorkspace materialises a temp repo with a pnpm-lock.yaml and the
+// corresponding package.json files. lockYaml, when non-empty, replaces the
+// auto-generated importer-only lockfile (used by tests that need snapshots).
+func setupWorkspace(t *testing.T, importers []importerSpec, extra map[string]string, lockYaml string) string {
 	t.Helper()
 	root := t.TempDir()
 
-	var b strings.Builder
-	b.WriteString("lockfileVersion: '9.0'\nimporters:\n")
-	for _, imp := range importers {
-		b.WriteString("  ")
-		b.WriteString(imp.path)
-		b.WriteString(": {}\n")
+	if lockYaml == "" {
+		var b strings.Builder
+		b.WriteString("lockfileVersion: '9.0'\nimporters:\n")
+		for _, imp := range importers {
+			b.WriteString("  ")
+			b.WriteString(imp.path)
+			b.WriteString(": {}\n")
+		}
+		if len(importers) == 0 {
+			b.WriteString("  .: {}\n")
+		}
+		lockYaml = b.String()
 	}
-	if len(importers) == 0 {
-		b.WriteString("  .: {}\n")
-	}
-	mustWriteFile(t, filepath.Join(root, "pnpm-lock.yaml"), b.String())
+	mustWriteFile(t, filepath.Join(root, "pnpm-lock.yaml"), lockYaml)
 
 	for _, imp := range importers {
 		mustWriteFile(t, filepath.Join(root, filepath.FromSlash(imp.path), "package.json"), imp.pkgJSON)
@@ -272,18 +324,4 @@ func mustNewResolver(t *testing.T, root string, l lister.SourceLister) *pnpmloca
 		t.Fatalf("pnpmlocal.New: %v", err)
 	}
 	return r
-}
-
-func mustResolveVersion(t *testing.T, root string, l lister.SourceLister, pkg string) string {
-	t.Helper()
-	r := mustNewResolver(t, root, l)
-	versions, err := r.Resolve(context.Background(), ".", nil,
-		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: pkg})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if len(versions) != 1 {
-		t.Fatalf("len(versions) = %d, want 1", len(versions))
-	}
-	return versions[0].Version
 }

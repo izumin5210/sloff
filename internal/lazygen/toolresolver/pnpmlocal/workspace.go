@@ -32,9 +32,12 @@ type WorkspacePackage struct {
 }
 
 // Workspace bundles the pnpm-lock.yaml and per-package.json data needed to
-// resolve a pnpm-local declaration to a workspace member.
+// resolve a pnpm-local declaration to a workspace member. The lockfile is
+// kept alive on the struct because the externals walk needs the snapshots
+// graph at version-resolution time.
 type Workspace struct {
 	repoRoot string
+	lockfile *Lockfile
 	byName   map[string]WorkspacePackage
 }
 
@@ -48,6 +51,7 @@ func LoadWorkspace(repoRoot string) (*Workspace, error) {
 	}
 	ws := &Workspace{
 		repoRoot: repoRoot,
+		lockfile: lf,
 		byName:   make(map[string]WorkspacePackage, len(lf.Importers)),
 	}
 	for _, importer := range lf.WorkspacePaths() {

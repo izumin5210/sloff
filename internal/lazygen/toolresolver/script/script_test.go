@@ -24,7 +24,7 @@ func TestResolver_StdoutTrimmedAsVersion(t *testing.T) {
 	root := t.TempDir()
 	r := script.New(root)
 
-	versions, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
+	result, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
 		Resolver: "script",
 		Exec:     []string{"sh", "-c", "echo v1.0.0"},
 	})
@@ -36,7 +36,7 @@ func TestResolver_StdoutTrimmedAsVersion(t *testing.T) {
 		Source:  "script:sh",
 		Version: "script:sh@v1.0.0",
 	}}
-	if diff := cmp.Diff(want, versions); diff != "" {
+	if diff := cmp.Diff(want, result.Versions); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -45,7 +45,7 @@ func TestResolver_ExtractRegexCapturesGroup1(t *testing.T) {
 	root := t.TempDir()
 	r := script.New(root)
 
-	versions, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
+	result, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
 		Resolver: "script",
 		Exec:     []string{"sh", "-c", "echo 'go version go1.26.2 darwin/arm64'"},
 		Extract:  `(go[0-9]+\.[0-9]+(?:\.[0-9]+)?)`,
@@ -53,7 +53,7 @@ func TestResolver_ExtractRegexCapturesGroup1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got := versions[0].Version; got != "script:sh@go1.26.2" {
+	if got := result.Versions[0].Version; got != "script:sh@go1.26.2" {
 		t.Errorf("Version = %q, want script:sh@go1.26.2", got)
 	}
 }
@@ -62,7 +62,7 @@ func TestResolver_ExtractRegexWithoutGroupUsesFullMatch(t *testing.T) {
 	root := t.TempDir()
 	r := script.New(root)
 
-	versions, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
+	result, err := r.Resolve(context.Background(), ".", nil, &toolresolver.DeclaredTool{
 		Resolver: "script",
 		Exec:     []string{"sh", "-c", "echo 'fake-tool v1.0.0 build abcdef'"},
 		Extract:  `v[0-9.]+`,
@@ -70,7 +70,7 @@ func TestResolver_ExtractRegexWithoutGroupUsesFullMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got := versions[0].Version; got != "script:sh@v1.0.0" {
+	if got := result.Versions[0].Version; got != "script:sh@v1.0.0" {
 		t.Errorf("Version = %q, want script:sh@v1.0.0", got)
 	}
 }
@@ -156,14 +156,14 @@ func TestResolver_RunsRelativeToSpecDir(t *testing.T) {
 	}
 
 	r := script.New(root)
-	versions, err := r.Resolve(context.Background(), specDir, nil, &toolresolver.DeclaredTool{
+	result, err := r.Resolve(context.Background(), specDir, nil, &toolresolver.DeclaredTool{
 		Resolver: "script",
 		Exec:     []string{"sh", "-c", "cat marker.txt"},
 	})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got := versions[0].Version; got != "script:sh@v9.9.9" {
+	if got := result.Versions[0].Version; got != "script:sh@v9.9.9" {
 		t.Errorf("Version = %q, want script:sh@v9.9.9", got)
 	}
 }

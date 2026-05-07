@@ -1,0 +1,20 @@
+generated_at: 2026-05-05T12:00:00Z
+generator_version_snapshot:
+- name: sh
+  source: script:sh
+  version: script:sh@v1.0.0
+input:
+  components:
+    cmd_hash: 19b14c048b640c20da8c97c6028b7a87a6cad0439de5ba7ac9c5c2373934c33f
+    files_hash: b5a9329091656c0b83b27fd4da556bb1e1c5335031ac754d5f34a90b861b886e
+    tools_hash: de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac
+  hash: e669d88f47d0c9bcdda4f0cd1272e4e11fc932dafa9979c98766eff01c4772c4
+output:
+  files:
+    packages/codegen/dist/cli.js: d523e5499cc81e14ad1f3810ceefaf958c1e036a5df06f54211e9c6a23866801
+  hash: bd2fe808f758e6230066d2078ebe9cdbcbe0c28f0e3ded9d767297dc7fd16c40
+schema_version: 1
+spec:
+  cmd: sh -c cp packages/codegen/src/cli.ts packages/codegen/dist/cli.js
+  dir: .
+  task_id: codegen-build

@@ -48,13 +48,14 @@ func TestResolver_DeclaredEntryDrivesResolution(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/bar/main.go"}}}
 
 	// Per ADR-0005 the resolver is declared-only; the cmd shape is irrelevant.
-	versions, err := golocal.New(root, stub).Resolve(
+	result, err := golocal.New(root, stub).Resolve(
 		context.Background(), ".", []string{"bin/protoc-gen-bar"},
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/bar"},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	versions := result.Versions
 	if stub.gotEntry != "./cmd/bar" {
 		t.Errorf("lister received entry %q, want ./cmd/bar", stub.gotEntry)
 	}
@@ -102,13 +103,14 @@ func TestResolver_AcceptsDotEntry(t *testing.T) {
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"main.go"}}}
 
-	versions, err := golocal.New(root, stub).Resolve(
+	result, err := golocal.New(root, stub).Resolve(
 		context.Background(), ".", nil,
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "."},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	versions := result.Versions
 	if stub.gotEntry != "." {
 		t.Errorf("lister received entry %q, want %q", stub.gotEntry, ".")
 	}
@@ -128,13 +130,14 @@ func TestResolver_AcceptsParentRelativeEntry(t *testing.T) {
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/gen/main.go"}}}
 
-	versions, err := golocal.New(root, stub).Resolve(
+	result, err := golocal.New(root, stub).Resolve(
 		context.Background(), filepath.Join("specs", "sub"), nil,
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "../../cmd/gen"},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	versions := result.Versions
 	if stub.gotSpecDir != filepath.Join("specs", "sub") {
 		t.Errorf("lister received specDir %q, want %q", stub.gotSpecDir, filepath.Join("specs", "sub"))
 	}
@@ -155,13 +158,14 @@ func TestResolver_PassesSpecDirToLister(t *testing.T) {
 	})
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"spec/cmd/tool/main.go"}}}
 
-	versions, err := golocal.New(root, stub).Resolve(
+	result, err := golocal.New(root, stub).Resolve(
 		context.Background(), "spec", nil,
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool"},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	versions := result.Versions
 	if stub.gotSpecDir != "spec" {
 		t.Errorf("lister received specDir %q, want spec", stub.gotSpecDir)
 	}
@@ -304,13 +308,14 @@ func setupRepo(t *testing.T, files map[string]string) string {
 
 func mustResolveVersion(t *testing.T, root string, l lister.SourceLister, entry string) string {
 	t.Helper()
-	versions, err := golocal.New(root, l).Resolve(
+	result, err := golocal.New(root, l).Resolve(
 		context.Background(), ".", nil,
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: entry},
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	versions := result.Versions
 	if len(versions) != 1 {
 		t.Fatalf("len(versions) = %d, want 1", len(versions))
 	}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,7 +121,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	tasks, err := r.collectTasks()
+	tasks, err := r.collectTasks(ctx)
 	if err != nil {
 		return err
 	}
@@ -148,10 +149,18 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
+	// resolverResult is computed once per task during collectTasks so depgraph
+	// sees resolver-contributed extra inputs (e.g. pnpm-local pulls workspace
+	// tool sources) and runTask can hash without re-running the resolver.
+	resolverResult toolresolver.Result
 }
 
-// collectTasks expands inputs/outputs for every spec command and returns the depgraph.Task slice.
-func (r *Runner) collectTasks() ([]depgraph.Task, error) {
+// collectTasks expands inputs/outputs for every spec command, runs each task's
+// resolvers up-front, and returns the depgraph.Task slice with resolver-
+// contributed inputs already folded in. Folding extras in here is what lets
+// depgraph wire up workspace-tool build tasks to their consumers via the usual
+// output-overlap rule, instead of needing a parallel dependency channel.
+func (r *Runner) collectTasks(ctx context.Context) ([]depgraph.Task, error) {
 	r.byKey = map[string]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
@@ -164,33 +173,66 @@ func (r *Runner) collectTasks() ([]depgraph.Task, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s/%s: expand outputs: %w", sp.Dir, c.Name, err)
 			}
+
+			result, err := r.opts.Resolvers.Resolve(ctx, sp.Dir, c.Cmd, declaredFromSpec(c.Tools))
+			if err != nil {
+				return nil, fmt.Errorf("%s/%s: resolve tools: %w", sp.Dir, c.Name, err)
+			}
+			mergedInputs := mergeInputs(inputs, result.ExtraInputs)
+
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
 				Name:        c.Name,
-				Inputs:      inputs,
+				Inputs:      mergedInputs,
 				Outputs:     outputs,
 			}
 			tasks = append(tasks, t)
 			r.byKey[depgraphKey(t)] = taskInfo{
 				specRelpath:    sp.Dir,
 				command:        c,
-				inputPaths:     inputs,
+				inputPaths:     mergedInputs,
 				outputPatterns: c.Outputs,
+				resolverResult: result,
 			}
 		}
 	}
 	return tasks, nil
 }
 
+// mergeInputs returns the deduplicated, sorted union of declared and extra
+// input paths. Extras are normalised to OS-native form so they compare equal
+// to glob.Expand output, which uses the OS separator.
+func mergeInputs(declared, extra []string) []string {
+	if len(extra) == 0 {
+		return declared
+	}
+	seen := make(map[string]struct{}, len(declared)+len(extra))
+	out := make([]string, 0, len(declared)+len(extra))
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, p := range declared {
+		add(p)
+	}
+	for _, p := range extra {
+		add(filepath.FromSlash(p))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Name }
 
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	info := r.byKey[depgraphKey(t)]
-
-	versions, err := r.opts.Resolvers.Resolve(ctx, info.specRelpath, info.command.Cmd, declaredFromSpec(info.command.Tools))
-	if err != nil {
-		return fmt.Errorf("%s: resolve tools: %w", t.Name, err)
-	}
+	versions := info.resolverResult.Versions
 
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {

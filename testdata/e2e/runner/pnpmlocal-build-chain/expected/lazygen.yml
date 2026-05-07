@@ -1,0 +1,15 @@
+commands:
+  - name: codegen-build
+    cmd: ["sh", "-c", "cp packages/codegen/src/cli.ts packages/codegen/dist/cli.js"]
+    inputs: ["packages/codegen/src/**"]
+    outputs: ["packages/codegen/dist/**"]
+    tools:
+      - exec: ["sh", "-c", "echo v1.0.0"]
+        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools:
+      - pnpm-local: "@org/codegen"

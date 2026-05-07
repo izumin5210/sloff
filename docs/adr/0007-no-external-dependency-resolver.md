@@ -20,6 +20,16 @@ lazygen の OS 横断 invalidate 戦略 ( architecture.md の対応節) では�
 
 ### 観察
 
+**O0. ただし内製ソース resolver は「自身が depend する transitive 外部 dep」 を hash 入力に取る必要がある**
+
+ADR の主題から少し外れるが、 `go-local` / `pnpm-local` のような内製ソース resolver は **自身の hash 入力に「 そのツールが transitive に依存する外部公開パッケージの resolved version 集合」 を含める**。 これは「外部公開パッケージの専用 resolver を作らない」 という本 ADR の決定とは矛盾しない:
+
+- 本 ADR が排除するのは「 spec で外部パッケージを直接 declare してその version を tools_hash に取り込むための専用 resolver ( go-external / pnpm-external)」
+- 一方、 「 内製ツールが利用する外部 dep の version 変動が、 内製ツールの runtime 挙動を変える」 のは事実なので、 内製ソース resolver が surgical に walk して hash に取り込むのは **内製ソース resolver の責務として妥当**
+- これは Turborepo が package 単位の hash に「その package が transitively 依存する外部 dep の resolved version」 を組み込むのと同じ哲学 ( 該当 package のスコープに閉じた surgical hashing)
+
+具体的には [resolver-go-local.md](../design/resolver-go-local.md) は go.sum + module path@version を、 [resolver-pnpm-local.md](../design/resolver-pnpm-local.md) は pnpm-lock.yaml の `importers.<package-dir>` から `snapshots` を BFS で walk した transitive 集合を、 それぞれ自前で取り込む。 **本 ADR で排除されるのは「 spec から外部公開パッケージ単独を直接版付けする経路」 のみで、 内製ソース resolver 内部での外部 dep hash 取り込みは含まれない**。
+
 **O1. Go の外部 module は go-local の external partition で既に hash 入力に入っている**
 
 `go-local` resolver は `go/packages` で transitive 依存を解析し、 main module 内のソースは内容 hash、 外部 module は `path@version` + go.sum 行の hash 入力としている ( resolver-go-local.md 参照)。 したがって 内製 Go ツール **経由で利用される** 外部 module の version 変動は go-local の `tools_hash` 経路で既に invalidate される。 「外部 module 単体を独立に hash したい」要件は実用上発生しない ( 内製ツール経由で使うのが一般的)。

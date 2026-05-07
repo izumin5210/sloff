@@ -10,7 +10,6 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
-	preflightpnpm "github.com/izumin5210/lazygen/internal/lazygen/preflight/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
@@ -66,7 +65,7 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 		Specs:     specs,
 		Storage:   local.New(root),
 		Resolvers: resolvers,
-		Preflight: buildPreflight(root),
+		Preflight: preflight.NewRegistry(), // no concrete checkers (pnpm-local rebuild detection now flows through depgraph)
 		ReadOnly:  readOnly,
 	})
 
@@ -89,15 +88,4 @@ func buildResolvers(root string) (*toolresolver.Registry, error) {
 	}
 	reg.Register(pnpmRes)
 	return reg, nil
-}
-
-// buildPreflight wires up the preflight checkers. Only channels that can
-// drift between SSoT and runtime register a Checker (ADR-0007). Currently
-// pnpm-local is the sole such channel — its dist/ may be stale after src/
-// edits and the runner cmd would otherwise fail with confusing module-not-
-// found errors.
-func buildPreflight(root string) *preflight.Registry {
-	reg := preflight.NewRegistry()
-	reg.Register(preflightpnpm.New(root))
-	return reg
 }

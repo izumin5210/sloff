@@ -58,10 +58,10 @@ func (r *Resolver) Name() string { return Name }
 // auto-dispatch path: the resolver only runs when the spec wrote
 // `tools: [{go-local: ./...}]` for this task. The returned Version is
 // OS-neutral: `go-local:<entry>@sha256:<hex>`.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
 	entry, err := r.resolveEntry(declared)
 	if err != nil {
-		return nil, err
+		return toolresolver.Result{}, err
 	}
 
 	// The lister evaluates entry inside the spec's working directory, matching
@@ -70,19 +70,19 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 	// resolve against submodule's go.mod, not the repo-root module.
 	listing, err := r.lister.List(ctx, specDir, entry)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
+		return toolresolver.Result{}, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
 	}
 	digest, err := hashListing(r.repoRoot, listing)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: hash sources for %q (spec %q): %w", entry, specDir, err)
+		return toolresolver.Result{}, fmt.Errorf("go-local: hash sources for %q (spec %q): %w", entry, specDir, err)
 	}
 
 	source := Name + ":" + entry
-	return []toolresolver.ToolVersion{{
+	return toolresolver.Result{Versions: []toolresolver.ToolVersion{{
 		Name:    entry,
 		Source:  source,
 		Version: source + "@sha256:" + hex.EncodeToString(digest),
-	}}, nil
+	}}}, nil
 }
 
 // isRelativeEntry reports whether s is in the spec-relative entry form the

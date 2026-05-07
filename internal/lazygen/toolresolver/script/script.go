@@ -40,12 +40,12 @@ func New(repoRoot string) *Resolver {
 func (r *Resolver) Name() string { return Name }
 
 // Resolve implements toolresolver.Resolver. declared must be non-nil and must specify Exec.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
 	if declared == nil {
-		return nil, errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
+		return toolresolver.Result{}, errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
 	}
 	if len(declared.Exec) == 0 {
-		return nil, errors.New("script: exec is required")
+		return toolresolver.Result{}, errors.New("script: exec is required")
 	}
 
 	cacheKey := strings.Join(declared.Exec, "\x00") + "\x01" + declared.Extract
@@ -53,24 +53,24 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 	r.mu.Lock()
 	if cached, ok := r.cache[cacheKey]; ok {
 		r.mu.Unlock()
-		return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}, nil
+		return toolresolver.Result{Versions: []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}}, nil
 	}
 	r.mu.Unlock()
 
 	stdout, err := r.runVersion(ctx, specDir, declared.Exec)
 	if err != nil {
-		return nil, err
+		return toolresolver.Result{}, err
 	}
 	captured, err := applyExtract(stdout, declared.Extract)
 	if err != nil {
-		return nil, err
+		return toolresolver.Result{}, err
 	}
 
 	r.mu.Lock()
 	r.cache[cacheKey] = captured
 	r.mu.Unlock()
 
-	return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}, nil
+	return toolresolver.Result{Versions: []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}}, nil
 }
 
 func (r *Resolver) runVersion(ctx context.Context, specDir string, argv []string) (string, error) {

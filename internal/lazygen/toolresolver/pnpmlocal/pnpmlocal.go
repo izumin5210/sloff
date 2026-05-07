@@ -1,29 +1,32 @@
 // Package pnpmlocal implements toolresolver.Resolver for pnpm workspace-local
 // tools. It applies to internal js/ts generators distributed as workspace
 // packages (referenced via "workspace:*" in pnpm-lock.yaml). External npm
-// packages are intentionally out of scope: per ADR-0007 lazygen absorbs them
-// into the script resolver.
+// packages are intentionally NOT a separate channel: per ADR-0007 lazygen
+// absorbs them into the script resolver, except for the surgical version-graph
+// hashing this resolver performs against pnpm-lock.yaml so that runtime-
+// resolved external deps still flip the cache when the workspace tool's
+// transitive npm graph shifts (mirrors Turborepo's per-package hashing).
 //
 // Per ADR-0005 the resolver is declared-only: it runs when the spec wrote
 // `tools: [{pnpm-local: <package-name>}]` and the package name resolves to a
 // workspace member.
 //
-// Hashing strategy follows resolver-pnpm-local.md:
-//   - the workspace package's package.json bin (or main, when bin is absent)
-//     determines the entry point set
-//   - each entry is forwarded to an injectable lister.SourceLister; the
-//     standard implementation is lister.NewEsbuild, which traverses transitive
-//     imports in-process via esbuild's Go API
-//   - the union of returned files is hashed in path-ascending order
+// Hashing strategy:
+//   - The workspace package's bin / main entry feeds an injectable
+//     lister.SourceLister; the resulting workspace file paths are returned
+//     as ExtraInputs so the runner folds them into the task's input glob.
+//     This integrates with depgraph: a separately-declared build task whose
+//     outputs cover those files becomes an upstream dependency automatically.
+//   - The package's transitive external deps (walked from pnpm-lock.yaml's
+//     snapshots graph) are returned as ToolVersion entries so external
+//     bumps flip tools_hash without re-running the lister.
 package pnpmlocal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,8 +40,10 @@ import (
 // Name is the resolver identifier referenced by spec tools[] entries.
 const Name = "pnpm-local"
 
-// Resolver resolves the logical version of a pnpm workspace-local tool to
-// "pnpm-local:<package-name>@sha256:<hex>".
+// Resolver resolves pnpm workspace-local tool dependencies into a Result that
+// combines (a) workspace source paths (via the lister) as ExtraInputs and
+// (b) transitive external dep versions (via lockfile graph walk) as
+// ToolVersions.
 type Resolver struct {
 	repoRoot string
 	lister   lister.SourceLister
@@ -49,7 +54,7 @@ type Resolver struct {
 }
 
 // New constructs a Resolver. The pnpm-lock.yaml is loaded lazily on the first
-// Resolve call so that lazygen runs without a pnpm workspace (Go-only repos)
+// Resolve call so lazygen runs without a pnpm workspace (Go-only repos)
 // don't pay the cost or fail at startup.
 func New(repoRoot string, l lister.SourceLister) (*Resolver, error) {
 	if l == nil {
@@ -61,45 +66,41 @@ func New(repoRoot string, l lister.SourceLister) (*Resolver, error) {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// Resolve returns one ToolVersion. declared.PackageName names a workspace
-// member registered in pnpm-lock.yaml's importers; non-workspace names are
-// rejected with ErrNotWorkspacePackage so the user can switch to the script
-// resolver per ADR-0007.
-func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+// Resolve returns the workspace+externals contribution. declared.PackageName
+// must name a workspace member registered in pnpm-lock.yaml's importers;
+// non-workspace names are rejected with ErrNotWorkspacePackage so the user
+// switches to the script resolver per ADR-0007.
+func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
 	if declared == nil {
-		return nil, errors.New("pnpm-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
+		return toolresolver.Result{}, errors.New("pnpm-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
 	}
 	if declared.PackageName == "" {
-		return nil, errors.New("pnpm-local: declared package name is required")
+		return toolresolver.Result{}, errors.New("pnpm-local: declared package name is required")
 	}
 
 	ws, err := r.loadWorkspace()
 	if err != nil {
-		return nil, fmt.Errorf("pnpm-local: load workspace: %w", err)
+		return toolresolver.Result{}, fmt.Errorf("pnpm-local: load workspace: %w", err)
 	}
 	pkg, ok := ws.Lookup(declared.PackageName)
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, declared.PackageName)
+		return toolresolver.Result{}, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, declared.PackageName)
 	}
 	if len(pkg.EntryPoints) == 0 {
-		return nil, fmt.Errorf("pnpm-local: %s has no bin/main entry in package.json", pkg.Name)
+		return toolresolver.Result{}, fmt.Errorf("pnpm-local: %s has no bin/main entry in package.json", pkg.Name)
 	}
 
-	files, err := r.collectFiles(ctx, pkg)
+	extraInputs, err := r.collectInputs(ctx, pkg)
 	if err != nil {
-		return nil, fmt.Errorf("pnpm-local: list sources for %q: %w", pkg.Name, err)
-	}
-	digest, err := hashFiles(r.repoRoot, files)
-	if err != nil {
-		return nil, fmt.Errorf("pnpm-local: hash sources for %q: %w", pkg.Name, err)
+		return toolresolver.Result{}, fmt.Errorf("pnpm-local: list sources for %q: %w", pkg.Name, err)
 	}
 
-	source := Name + ":" + pkg.Name
-	return []toolresolver.ToolVersion{{
-		Name:    pkg.Name,
-		Source:  source,
-		Version: source + "@sha256:" + hex.EncodeToString(digest),
-	}}, nil
+	versions, err := r.collectExternalVersions(ws, pkg)
+	if err != nil {
+		return toolresolver.Result{}, fmt.Errorf("pnpm-local: collect externals for %q: %w", pkg.Name, err)
+	}
+
+	return toolresolver.Result{Versions: versions, ExtraInputs: extraInputs}, nil
 }
 
 // loadWorkspace caches the (Workspace, error) pair so a single lazygen run
@@ -112,14 +113,27 @@ func (r *Resolver) loadWorkspace() (*Workspace, error) {
 	return r.workspace, r.workspaceErr
 }
 
-// collectFiles asks the lister for each entry's transitive set and returns the
-// sorted union. specDir is empty because the entry path is composed
-// repo-relative (workspace package directory + package-relative entry).
-func (r *Resolver) collectFiles(ctx context.Context, pkg WorkspacePackage) ([]string, error) {
+// collectInputs asks the lister for each entry's transitive set and returns
+// the sorted union as repo-relative slash-form paths.
+//
+// The bin path itself is always included even when the lister can't read it
+// (typical fresh-checkout case where dist/ is gitignored and an upstream
+// build task hasn't run yet). Without this fall-back depgraph would have
+// nothing to overlap against the build task's `dist/**` outputs and the
+// dependency edge would be missed; with it, the build runs first and the
+// transitive set becomes accurate from the next run onward.
+func (r *Resolver) collectInputs(ctx context.Context, pkg WorkspacePackage) ([]string, error) {
 	seen := map[string]struct{}{}
 	for _, ep := range pkg.EntryPoints {
-		entry := "./" + path.Join(filepath.ToSlash(pkg.Dir), filepath.ToSlash(ep))
-		listing, err := r.lister.List(ctx, "", entry)
+		rel := path.Join(filepath.ToSlash(pkg.Dir), filepath.ToSlash(ep))
+		seen[rel] = struct{}{}
+
+		abs := filepath.Join(r.repoRoot, filepath.FromSlash(rel))
+		if _, err := os.Stat(abs); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+
+		listing, err := r.lister.List(ctx, "", "./"+rel)
 		if err != nil {
 			return nil, err
 		}
@@ -135,34 +149,22 @@ func (r *Resolver) collectFiles(ctx context.Context, pkg WorkspacePackage) ([]st
 	return out, nil
 }
 
-// hashFiles folds the file set into a deterministic SHA256: each file's
-// repo-relative slash-form path and its content digest are written in path
-// order, NUL-separated. Path is included alongside content so renames change
-// the digest even when content is identical.
-func hashFiles(repoRoot string, files []string) ([]byte, error) {
-	h := sha256.New()
-	for _, f := range files {
-		digest, err := fileSHA256(filepath.Join(repoRoot, filepath.FromSlash(f)))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", f, err)
-		}
-		h.Write([]byte(f))
-		h.Write([]byte{0})
-		h.Write(digest)
-		h.Write([]byte{0})
-	}
-	return h.Sum(nil), nil
-}
-
-func fileSHA256(p string) ([]byte, error) {
-	f, err := os.Open(p)
+// collectExternalVersions returns one ToolVersion per transitively-reachable
+// external npm package. Each version is the surgical lockfile slice for this
+// workspace package (Turborepo-style), so unrelated lockfile churn does not
+// invalidate the cache.
+func (r *Resolver) collectExternalVersions(ws *Workspace, pkg WorkspacePackage) ([]toolresolver.ToolVersion, error) {
+	externals, err := CollectExternals(ws.lockfile, filepath.ToSlash(pkg.Dir))
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
+	out := make([]toolresolver.ToolVersion, 0, len(externals))
+	for _, e := range externals {
+		out = append(out, toolresolver.ToolVersion{
+			Name:    e,
+			Source:  Name + ":" + pkg.Name,
+			Version: "pnpm-external:" + e,
+		})
 	}
-	return h.Sum(nil), nil
+	return out, nil
 }

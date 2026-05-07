@@ -5,7 +5,7 @@
 関連:
 - [Architecture](./architecture.md)
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md)
-- [Resolver: pnpm-external](./resolver-pnpm-external.md) — npm ecosystem は別経路 ( lockfile-based)
+- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) — npm / Go OSS パッケージも script で吸収
 
 ## Context
 
@@ -257,7 +257,7 @@ tools:
 
 このケースは script resolver では扱えない。 利用者は次のいずれかを選ぶ:
 
-- 該当 generator を [pnpm-external](./resolver-pnpm-external.md) ( npm 配布なら) や [go-local](./resolver-go-local.md) ( ソースが repo 内にあるなら) など 別 channel に振る
+- 該当 generator が repo 内ソースから build される場合は [go-local](./resolver-go-local.md) / [pnpm-local](./resolver-pnpm-local.md) ( workspace package なら) に振る ( 外部公開パッケージ専用 resolver は持たない、 [ADR-0007](../adr/0007-no-external-dependency-resolver.md))
 - shim を書く (`tools: [{exec: ["bash", "-c", "cat .my-tool-version"]}]` のような lockfile 風文字列を返すスクリプト)。 ただし shim ファイル自体の更新が反映されるかを利用者が責任を持つ
 
 shim を許容するかは Open Question ( 後述)。

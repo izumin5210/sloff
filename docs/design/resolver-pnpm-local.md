@@ -4,7 +4,7 @@
 
 関連:
 - [Architecture](./architecture.md)
-- [Resolver: pnpm-external](./resolver-pnpm-external.md) ( 外部公開パッケージ側の対応物)
+- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) ( 外部公開 npm パッケージは script resolver で吸収)
 - [Resolver: go-local](./resolver-go-local.md) ( Go 側の対応物 = 内製 Go CLI)
 
 ## Context
@@ -34,7 +34,7 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 ### Dispatch (declared-only)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により lazygen は declared-only。 spec 側で例えば `tools: [{pnpm-local: <package-name>}]` のように宣言された場合に起動し、 cmd 形状からの auto-dispatch は持たない。 declared で指定された workspace package を `pnpm-lock.yaml` で lookup し、 `workspace:*` 参照ではない場合はエラーにする ( 外部公開 npm パッケージは [pnpmExternalResolver](./resolver-pnpm-external.md) の領域)。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により lazygen は declared-only。 spec 側で例えば `tools: [{pnpm-local: <package-name>}]` のように宣言された場合に起動し、 cmd 形状からの auto-dispatch は持たない。 declared で指定された workspace package を `pnpm-lock.yaml` で lookup し、 workspace package として登録されていない ( 外部公開 npm パッケージ ) 場合はエラーにする ( 外部公開 npm パッケージは [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で扱う)。
 
 ### Resolver 実装イメージ
 

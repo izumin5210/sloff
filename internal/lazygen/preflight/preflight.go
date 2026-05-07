@@ -1,12 +1,16 @@
-// Package preflight verifies that lockfiles and installed dependencies are mutually
-// consistent before the runner trusts the cache. Each distribution channel registers a
-// Checker; the Registry runs the subset that applies to a given run.
+// Package preflight verifies that build artefacts and source state are mutually
+// consistent before the runner trusts the cache. Each distribution channel that
+// can drift between SSoT and runtime ( e.g. pnpm-local's dist/ vs src/ for build-
+// required tools) registers a Checker; the Registry runs the subset that applies
+// to a given run. External-package channels are intentionally outside this scope:
+// per ADR-0007 lazygen absorbs them into the script resolver, where the runtime
+// binary itself is the SSoT and lockfile drift cannot occur.
 package preflight
 
 import "context"
 
-// Checker validates the install state of one distribution channel (aqua / go-external /
-// pnpm-external / ...). Implementations must be read-only.
+// Checker validates the install/build state of one distribution channel
+// (e.g. pnpm-local). Implementations must be read-only.
 type Checker interface {
 	// Name is the checker identifier (matches the corresponding resolver name).
 	Name() string

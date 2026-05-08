@@ -231,9 +231,35 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
 
 [Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / lazygen バイナリ単体完結等の共通機能。
 
-## Preflight Checker は持たない
+## Preflight Checker は持たない ( Go の install model に由来する構造的理由)
 
-`packages.Load` を Resolve の中で呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっている。 transitive 依存が download されていなければ Resolve 段階でエラーになり、 そのまま lazygen 全体が止まる。 別途 preflight Checker を立てる意味は無いので持たない。 これは [pnpm-local の preflight 不要性](./resolver-pnpm-local.md#preflight-checker-は持たない) と同じ姿勢。
+go-local には install drift / build artefact freshness いずれの Checker も置いていない。 これは「 必要なのに省略している」 のではなく、 **Go の install model が drift を構造的に作らない** ため。
+
+### Go は別途 install ステップを持たない ( on-demand download)
+
+`go run ./cmd/foo` / `go build` / `go test` は default の `-mod=mod` で「 必要な module を実行時に `$GOMODCACHE` へ on-demand download」 する。 「 利用者が `git pull` で新 `go.mod` / `go.sum` を取り込んだだけで、 `go install deps` を別途走らせていない」 という pnpm 的な状態が **構造上発生しない**:
+
+- 利用者の cmd ( `go run ./cmd/foo`) が実行されると、 必要 module は download or 既存 cache から read される
+- lazygen の `packages.Load` ( `go/packages` 経由) も同じ auto-download 経路を共有
+- → cmd 実行時と lazygen の hash 計算時で必ず同じ install state を見る
+
+つまり pnpm-local が抱える「 lockfile を SSoT に取った hash」 vs 「 古い install で動く cmd」 という乖離が **Go では起こりえない**。
+
+### エッジケース ( vendor / readonly / proxy off) も silent stale にはならない
+
+- `GOFLAGS=-mod=readonly`: download 禁止モード。 必要 module 不在なら `go run` が **早期 fail**
+- `GOFLAGS=-mod=vendor` / `vendor/` ディレクトリあり: `vendor/` を SSoT に。 ただし `go mod vendor` で `go.mod` と sync する運用を破ると `go build` が「 vendor の状態が go.mod と合わない」 で **早期 fail**
+- `GOPROXY=off`: cache miss なら **早期 fail**
+
+いずれも「 fail-loudly か正しく動く」 のいずれかで、 silent stale に倒れない。 この性質は ADR-0007 で script resolver について書いた「 runtime バイナリの `--version` を取れば lockfile vs install drift が SSoT を runtime に置いた時点で構造的に発生しない」 と同じ構造で、 Go の場合は cmd ( `go run` 等) 自体が runtime SSoT として振る舞っている。
+
+### 副次的: `packages.Load` 自体が install 検証を兼ねる
+
+`packages.Load` を Resolve の中で呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっている。 transitive 依存が download されていなければ Resolve 段階でエラー → lazygen 全体が止まる。 別途 preflight Checker を立てる意味は無い。
+
+### pnpm-local との対比
+
+pnpm は対照的に **`pnpm install` を別途明示実行** する model なので、 lockfile を SSoT に取りつつ install state がそれと乖離する余地がある。 そのため pnpm-local は preflight に install drift Checker を持つ ( [resolver-pnpm-local.md の Install drift check 節](./resolver-pnpm-local.md#install-drift-check-pnpm-install-忘れ検出--preflight-経由))。 「 preflight Checker の有無」 は資質の差ではなく、 **language ecosystem の install model の差** に由来する。
 
 ## Open Questions
 

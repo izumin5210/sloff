@@ -19,6 +19,8 @@ jobs:
             run: go tool gofumpt -l -w -- .
           - name: lint
             run: go vet -v ./...
+          - name: tidy
+            run: go mod tidy
           - name: test
             run: go test -v ./...
       fail-fast: false

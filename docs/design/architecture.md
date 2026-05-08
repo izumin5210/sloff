@@ -376,16 +376,27 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 検証結果次第で、 内製ツールのソース hash 抽出を **愚直 glob に retreat する** 選択肢もありうる ( Resolver の構造はそのまま、 内部の `SourceLister` を `goPackagesLister` / `esbuildLister` から `globLister` に差し替えるだけで対応可能)。 性能評価は Open Question として記録する ( 後述)。
 
-#### Lockfile と install 状態の整合性検証 (preflight)
+#### Preflight ( cmd 実行前の state 検証)
 
-preflight が必要なのは、 `tools_hash` の取得元 ( SSoT) が runtime の実体と乖離する余地がある channel に限られる。 具体的には:
+preflight は **「 cmd を実行する前に validate しておきたい invariant」 を channel ごとに表現する general subsystem**。 何を validate するかに「 build 専用」 「 install 専用」 のような暗黙の分類は持たず、 channel 側が必要に応じて Checker を登録する。 想定する責務の例:
 
-- **必要**: `pnpm-local` ( pnpm-lock.yaml を SSoT として外部 dep を hash する立場のため、 install drift = lockfile updated + `pnpm install` 忘れ を検出する Checker を持つ。 build / rebuild 忘れは ADR-0008 D7 で cmd 責務に倒したため別問題 — [resolver-pnpm-local.md](./resolver-pnpm-local.md))
+| 例 | 説明 | lazygen での扱い |
+|---|---|---|
+| **install drift check** | lockfile を SSoT に取る resolver で、 lockfile が install と乖離していないかを確認 | `pnpm-local` が builtin Checker を持つ ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致) |
+| **build artefact freshness check** | source / 設定の更新後に build artefact が再生成されていることを確認 | **Checker を持たない**。 内製ソースの rebuild は cmd 責務 ( ADR-0008 D7) に倒した。 利用者は cmd 内に `pnpm build && exec` / `go run ...` 等を書くか、 自前の Make / pre-commit hook で担保する |
+| **lockfile pinning lint** | unpinned tag (`:latest` 等) や pinned tag からの drift を弾く | **Checker を持たない**。 buf に対しては ADR-0006、 npm / Go OSS に対しては ADR-0007 で「 利用者 / 依存管理ツール側の規律」 と決めた |
+| **toolchain availability check** | 必要なバイナリが PATH に居ることを確認 | **Checker を持たない**。 script resolver は `<bin> --version` の実行で構造的に検出する ( binary 不在なら早期 fail) |
+
+つまり「 何を validate しないか」 は channel 別の意図的な判断で、 「 lazygen の preflight subsystem は一切 build / install / lint をしない」 でも「 全部やる」 でもない、 という整理。
+
+具体的に builtin で持っているのは:
+
+- **必要**: `pnpm-local` ( pnpm-lock.yaml を SSoT として外部 dep を hash する立場のため、 install drift = lockfile updated + `pnpm install` 忘れ を検出する Checker を持つ。 build / rebuild 忘れは上記表の通り cmd 責務 — [resolver-pnpm-local.md](./resolver-pnpm-local.md))
 - **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため、 lockfile drift の概念が存在しない)
 
 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により lazygen は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。 外部公開 npm / Go OSS パッケージについても [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で吸収するため preflight は不要。
 
-各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-local](./resolver-pnpm-local.md#preflight-checker))。
+各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-local の install drift](./resolver-pnpm-local.md#install-drift-check-pnpm-install-忘れ検出--preflight-経由))。
 
 不整合検出時の挙動 ( preflight が走った channel 共通):
 

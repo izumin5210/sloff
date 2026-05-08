@@ -12,7 +12,7 @@ jobs:
       matrix:
         command:
           - name: build
-            run: go build -v ./cmd/lazygen
+            run: go build -v ./cmd/sloff
           - name: fix
             run: go fix -v ./...
           - name: format

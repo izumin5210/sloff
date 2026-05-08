@@ -22,14 +22,14 @@ commands:
 ### O2. inline 宣言は DRY を破る
 
 ```yaml
-# proto/lazygen.yml
+# proto/sloff.yml
 commands:
   - name: gen-options
     tools:
       - exec: ["buf", "--version"]
       - go-local: ./cmd/protoc-gen-foo
 
-# api/lazygen.yml
+# api/sloff.yml
 commands:
   - name: gen-api
     tools:
@@ -41,7 +41,7 @@ commands:
 
 ### O3. 「 tool」 という抽象が spec に表れない
 
-利用者は概念上 「 codegen pipeline で使う tool セット」 という単位で考えるが、 spec の中ではその単位が見えない。 `lazygen graph` / `--explain` の出力にも「 tool」 ノードが現れない。
+利用者は概念上 「 codegen pipeline で使う tool セット」 という単位で考えるが、 spec の中ではその単位が見えない。 `sloff graph` / `--explain` の出力にも「 tool」 ノードが現れない。
 
 ### References
 
@@ -53,10 +53,10 @@ commands:
 
 ### D1. tool を **named first-class entity** として spec に持たせる
 
-各 `lazygen.yml` ファイルは top-level に `tools:` ( map[name]DeclaredTool) を持てる。 task は `commands[*].tools` で **tool 名のリスト** ( `[]string`) として参照する。 inline 形式は完全廃止。
+各 `sloff.yml` ファイルは top-level に `tools:` ( map[name]DeclaredTool) を持てる。 task は `commands[*].tools` で **tool 名のリスト** ( `[]string`) として参照する。 inline 形式は完全廃止。
 
 ```yaml
-# proto/lazygen.yml
+# proto/sloff.yml
 tools:
   buf:
     exec: ["buf", "--version"]
@@ -73,29 +73,29 @@ commands:
 
 ### D2. **配置ルール**: 同一ファイル内共存可、 リポジトリ内分散定義可、 flat 名前空間
 
-- 1 つの `lazygen.yml` は `tools:` だけ / `commands:` だけ / 両方を持つことが許される ( 少なくとも片方は要、 空ファイルは error)
-- tool 定義は **どの `lazygen.yml`** に置いてもよい ( 共通 tool は root の `lazygen.yml` に集約してもよいし、 ある proto pipeline 専用 tool は `proto/lazygen.yml` 内で local に定義してもよい)
-- 名前空間は **リポジトリ全体で 1 つの flat 空間**。 `lazygen run` 1 回で discover する全 `lazygen.yml` の `tools:` を merge して registry を組む
+- 1 つの `sloff.yml` は `tools:` だけ / `commands:` だけ / 両方を持つことが許される ( 少なくとも片方は要、 空ファイルは error)
+- tool 定義は **どの `sloff.yml`** に置いてもよい ( 共通 tool は root の `sloff.yml` に集約してもよいし、 ある proto pipeline 専用 tool は `proto/sloff.yml` 内で local に定義してもよい)
+- 名前空間は **リポジトリ全体で 1 つの flat 空間**。 `sloff run` 1 回で discover する全 `sloff.yml` の `tools:` を merge して registry を組む
 - **同名 tool の重複定義は load 時 error** ( error message は両定義箇所のパスを併記)
 - **未定義 tool 名の参照は load 時 error** ( error message は参照元 task の場所を併記)
 
 ### D3. **path resolution は tool 定義側の dir 相対**
 
-tool 定義に含まれる path 系フィールド ( `go-local: ./cmd/foo` 等) は、 **その tool が定義されている `lazygen.yml` の dir** を基準に解決する ( 参照元 task の dir ではない)。
+tool 定義に含まれる path 系フィールド ( `go-local: ./cmd/foo` 等) は、 **その tool が定義されている `sloff.yml` の dir** を基準に解決する ( 参照元 task の dir ではない)。
 
 これにより tool 定義が「 自己完結した単位」 になる ( 別 dir の task から参照されても解釈は変わらない)。
 
 #### Cross-spec 参照時の cmd 側責任 ( foot-gun 注意)
 
-tool 定義の path は **resolver の hash 入力** ( files_hash / tools_hash 経路) に乗るだけで、 task の cmd が実行する binary 自体を lazygen が解決するわけではない。 cmd は task 自身の `specRelpath` ( 参照元 task の dir) を cwd として実行されるので、 **「 cmd 側 path が tool 定義の指す target と同じものを参照しているか」 は cmd 作者の責任**:
+tool 定義の path は **resolver の hash 入力** ( files_hash / tools_hash 経路) に乗るだけで、 task の cmd が実行する binary 自体を sloff が解決するわけではない。 cmd は task 自身の `specRelpath` ( 参照元 task の dir) を cwd として実行されるので、 **「 cmd 側 path が tool 定義の指す target と同じものを参照しているか」 は cmd 作者の責任**:
 
 ```yaml
-# packages/codegen/lazygen.yml
+# packages/codegen/sloff.yml
 tools:
   protoc-gen-foo:
     go-local: ./cmd/protoc-gen-foo   # → packages/codegen/cmd/protoc-gen-foo
 
-# proto/lazygen.yml
+# proto/sloff.yml
 commands:
   - name: gen
     cmd: ["go", "run", "./cmd/protoc-gen-foo"]   # ⚠ proto/cmd/protoc-gen-foo に解決される (別物)
@@ -108,7 +108,7 @@ commands:
 - task dir 基準の相対 path を書く: `cmd: ["go", "run", "../../packages/codegen/cmd/protoc-gen-foo"]`
 - 事前 build した binary を PATH 経由で呼ぶ: `cmd: ["protoc-gen-foo"]`
 
-など、 cwd 依存しない方法で同じ target を参照する。 lazygen は cmd 文字列の中身を validate しない方針 ( cmd_hash に乗るだけ) のため、 ここはユーザ規律で担保する。 cwd-independent な resolver ( pnpm-local、 PATH 経由 binary を呼ぶ script tool 等) ではこの問題は起きない。
+など、 cwd 依存しない方法で同じ target を参照する。 sloff は cmd 文字列の中身を validate しない方針 ( cmd_hash に乗るだけ) のため、 ここはユーザ規律で担保する。 cwd-independent な resolver ( pnpm-local、 PATH 経由 binary を呼ぶ script tool 等) ではこの問題は起きない。
 
 ### D4. **slug-style な命名規約**: tool 名は `[a-z0-9_-]+` のみ許容
 
@@ -126,7 +126,7 @@ Runner は `Run` の冒頭で discover 済み spec から `ToolRegistry` を構�
 
 ### D7. **internal-source tool の build / run は cmd 内責務**
 
-`pnpm-local` / `go-local` のような internal-source resolver が指す workspace package の **「 source 変更時の rebuild」 と「 実行」 は task の cmd 内に書く** 利用者責任とする。 lazygen 自身は build orchestration をしない:
+`pnpm-local` / `go-local` のような internal-source resolver が指す workspace package の **「 source 変更時の rebuild」 と「 実行」 は task の cmd 内に書く** 利用者責任とする。 sloff 自身は build orchestration をしない:
 
 ```yaml
 tools:
@@ -142,7 +142,7 @@ commands:
     tools: [codegen]
 ```
 
-cmd を組み立てる責務は利用者にある。 lazygen の関与は:
+cmd を組み立てる責務は利用者にある。 sloff の関与は:
 
 - pnpm-local resolver が当該 workspace package の **git-tracked + transitive workspace dep の git-tracked ファイル** を ExtraInputs に contribute → files_hash 経路で source 変更を検知
 - 当該 workspace の **transitive 外部 npm dep の resolved version** を `pnpm-deps:<pkg>@<ver>` ToolVersion として contribute → tools_hash 経路で外部 dep bump を検知
@@ -151,7 +151,7 @@ source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の buil
 
 **理由**:
 
-- go-local は `go run ./cmd/foo` が compile + execute を内包しており lazygen は build を意識しない。 pnpm-local も同じ責務分担に揃えるのが consistent
+- go-local は `go run ./cmd/foo` が compile + execute を内包しており sloff は build を意識しない。 pnpm-local も同じ責務分担に揃えるのが consistent
 - spec から「 build task と consumer task の関連付け」 という暗黙概念が消え、 spec が単純化する
 - 利用者は通常、 cmd を `pnpm run gen` 等の package.json script に逃がせるので spec の verbose さは増えない
 
@@ -159,11 +159,11 @@ source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の buil
 
 | 案 | 内容 | 棄却理由 |
 |---|---|---|
-| **build を別 lazygen task として宣言、 path overlap で link** | `codegen-build` task の outputs ( dist/**) と pnpm-local の bin path が path overlap → depgraph が依存 edge を貼る | link が暗黙 ( 文字列一致による偶然) で読み手の認知負荷が高い。 path 不一致は silent fail |
+| **build を別 sloff task として宣言、 path overlap で link** | `codegen-build` task の outputs ( dist/**) と pnpm-local の bin path が path overlap → depgraph が依存 edge を貼る | link が暗黙 ( 文字列一致による偶然) で読み手の認知負荷が高い。 path 不一致は silent fail |
 | **build task に `builds: [tool-name]` フィールドを宣言** | 「 この task が tool を build する」 を named cross-ref で明示化 | spec field 増。 overlap 機構との二重管理 |
 | **tool が `build:` block を内包 ( tool = build pipeline)** | tool 定義に cmd / inputs / outputs を持たせ、 task との境界を統合 | tool と task の概念境界が崩れる。 ADR-0008 の D1 ( tool は first-class entity) の意図と外れる |
-| **co-location 制約 ( pnpm-local は package dir の lazygen.yml に置く)** | 配置位置で「 同じ package について話している」 ことを明示 | 暗黙性は緩和されるが mechanism は path overlap のままで根本解決ではない |
-| **cmd 内 build ( 採用)** | go-local の go run と同じ責務分担、 lazygen は source hash だけ担当 | source 集合の精度を esbuild walk から git-tracked enumeration に下げる必要があるが、 過剰 invalidate にしか倒れず cache 健全性は壊れない |
+| **co-location 制約 ( pnpm-local は package dir の sloff.yml に置く)** | 配置位置で「 同じ package について話している」 ことを明示 | 暗黙性は緩和されるが mechanism は path overlap のままで根本解決ではない |
+| **cmd 内 build ( 採用)** | go-local の go run と同じ責務分担、 sloff は source hash だけ担当 | source 集合の精度を esbuild walk から git-tracked enumeration に下げる必要があるが、 過剰 invalidate にしか倒れず cache 健全性は壊れない |
 
 **精度トレードオフ**: 旧 esbuild walk は「 bin から transitive に import される実ファイルだけ」 を hash 入力にしていた。 git-tracked enumeration は「 package dir の全ファイル ( gitignore で除外されたものを除く)」 を入れる。 後者は **過剰 invalidate** ( 関係ない src/utils.ts 編集で gen が rerun) するが false hit にはならない。 Turborepo の default も同じアプローチで、 monorepo 規模での実用上の精度は問題にならないことが知られている。
 
@@ -183,17 +183,17 @@ resolver 内部で declared key の memo を持つだけでも O1 は解決で�
 
 ### 配置を「 root-only」 にしなかった理由
 
-「 root の `lazygen.tools.yml` 1 ファイルに集約」 案と比較:
+「 root の `sloff.tools.yml` 1 ファイルに集約」 案と比較:
 
 - 1 spec dir だけで使う local tool に関しても root に置くことを強制すると、 tool 名が膨れる + ファイル間の往復が増える
 - workspace package の close-knit な codegen pipeline は同じ dir で完結したい ( cognitive locality)
-- 一方で「 buf / protoc-gen-go のような repo 横断 tool」 は root の `lazygen.yml` に置く運用が自然
+- 一方で「 buf / protoc-gen-go のような repo 横断 tool」 は root の `sloff.yml` に置く運用が自然
 
 flat 名前空間 + 分散定義の組み合わせで、 利用者が必要に応じて中央集約 / 分散を選べる。
 
 ### 配置を「 cascading scope」 にしなかった理由
 
-「 spec dir A の tool は A 配下からのみ visible / unrelated B からは不可視」 のような scope rule もありうるが、 lazygen の規模 ( 200 task / 数十 tool オーダー) では:
+「 spec dir A の tool は A 配下からのみ visible / unrelated B からは不可視」 のような scope rule もありうるが、 sloff の規模 ( 200 task / 数十 tool オーダー) では:
 
 - name collision は実用上 滅多に起きない ( 起きたら名前を改名すればよい)
 - visibility rule を導入すると import 構文 / forward-ref の議論が発生し、 spec 形式が複雑化
@@ -216,9 +216,9 @@ named のみに統一する。 「 1 task 限定の使い捨て tool」 も name
 
 - **tool あたり 1 回 resolve** 構造が組み込まれ、 N tasks × M tools の monorepo でも O(M) の resolver 呼び出しに収まる
 - **DRY**: 共通 tool は 1 箇所定義 → 全 task が短い名前で参照
-- **`lazygen graph` / `--explain` で tool ノードが表現可能**になり、 「 task X が依存する tool 一覧」 の可視化ができる ( 将来実装)
+- **`sloff graph` / `--explain` で tool ノードが表現可能**になり、 「 task X が依存する tool 一覧」 の可視化ができる ( 将来実装)
 - **tool の差し替え / override がやりやすい** ( 例: テスト時に `buf` の定義だけ別ファイルに切り替える、 等の運用)
-- 各 `lazygen.yml` が「 自分の dir の責務」 + 「 他から使われる tool 提供」 の両方を担えるので、 monorepo の workspace 単位の自治が保てる
+- 各 `sloff.yml` が「 自分の dir の責務」 + 「 他から使われる tool 提供」 の両方を担えるので、 monorepo の workspace 単位の自治が保てる
 
 ### 負の影響 / 注意点
 
@@ -229,5 +229,5 @@ named のみに統一する。 「 1 task 限定の使い捨て tool」 も name
 ### 将来再考の余地
 
 - **cascading / qualified namespace**: 大規模化で flat 重複が頻発するなら、 spec dir prefix で qualify する形式 ( `proto:codegen`、 `services/api:gen` 等) を別 ADR で導入
-- **import 構文**: 「 tool catalog 専用ファイル」 を opt-in で許す ( 例: `lazygen.tools.yml` を root 検出すれば自動 merge) のような UX 改善は将来検討
-- **lint コマンド**: 未使用 tool / 命名違反 / 重複 spec を一括検出する `lazygen lint` の cli を別途検討
+- **import 構文**: 「 tool catalog 専用ファイル」 を opt-in で許す ( 例: `sloff.tools.yml` を root 検出すれば自動 merge) のような UX 改善は将来検討
+- **lint コマンド**: 未使用 tool / 命名違反 / 重複 spec を一括検出する `sloff lint` の cli を別途検討

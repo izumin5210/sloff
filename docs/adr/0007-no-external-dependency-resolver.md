@@ -1,19 +1,19 @@
-# ADR-0007: lazygen は外部依存専用 resolver ( go-external / pnpm-external) を持たない
+# ADR-0007: sloff は外部依存専用 resolver ( go-external / pnpm-external) を持たない
 
 ## Context
 
-lazygen の OS 横断 invalidate 戦略 ( architecture.md の対応節) では、 ツールを **どこから version 文字列を取るか** で channel を分類している。 当初の構想では「外部公開パッケージ」を独立 channel として扱う resolver を 2 種類想定していた:
+sloff の OS 横断 invalidate 戦略 ( architecture.md の対応節) では、 ツールを **どこから version 文字列を取るか** で channel を分類している。 当初の構想では「外部公開パッケージ」を独立 channel として扱う resolver を 2 種類想定していた:
 
 - **go-external resolver**: `go.mod` / `go.sum` を SSoT に Go module の `path@version` を版として採用
 - **pnpm-external resolver**: `pnpm-lock.yaml` を SSoT に npm registry 配布物の resolved version を採用
 
-実装に踏み込む前に、 これらが本当に独立 resolver として lazygen に組み込まれる必要があるかを再検討した。 結論は「 go-external も pnpm-external も導入しない、 既存の汎用プリミティブ ( script resolver + 内製ソース resolver) で機能的に過不足なくカバーできる」。 [ADR-0006](./0006-no-buf-specific-resolver-or-preflight.md) で buf を special-case しないと決めた延長線上にある判断を、 外部依存にも適用する。
+実装に踏み込む前に、 これらが本当に独立 resolver として sloff に組み込まれる必要があるかを再検討した。 結論は「 go-external も pnpm-external も導入しない、 既存の汎用プリミティブ ( script resolver + 内製ソース resolver) で機能的に過不足なくカバーできる」。 [ADR-0006](./0006-no-buf-specific-resolver-or-preflight.md) で buf を special-case しないと決めた延長線上にある判断を、 外部依存にも適用する。
 
 ### References
 
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
 - [ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一](./0005-eliminate-resolver-auto-dispatch.md)
-- [ADR-0006: lazygen は buf を special-case しない](./0006-no-buf-specific-resolver-or-preflight.md)
+- [ADR-0006: sloff は buf を special-case しない](./0006-no-buf-specific-resolver-or-preflight.md)
 - [Resolver: script](../design/resolver-script.md)
 - [Resolver: go-local](../design/resolver-go-local.md)
 - [Resolver: pnpm-local](../design/resolver-pnpm-local.md)
@@ -50,9 +50,9 @@ tools:
 
 **O3. 「lockfile を SSoT」 vs 「runtime --version を SSoT」 のトレードオフ**
 
-外部公開パッケージで lockfile-based ( pnpm-external 想定) を選ぶと preflight ( lockfile vs install 整合) が必須になる。 一方 runtime `--version` を取れば preflight 不要 ( runtime バイナリそのものが SSoT なので構造的にズレない、 architecture.md の preflight 要否表を参照)。 lazygen の責務は **cache 健全性** であって **依存管理ツール ( pnpm) の運用 lint** ではない、 という ADR-0006 の責務境界に従えば、 後者を選ぶのが一貫する。
+外部公開パッケージで lockfile-based ( pnpm-external 想定) を選ぶと preflight ( lockfile vs install 整合) が必須になる。 一方 runtime `--version` を取れば preflight 不要 ( runtime バイナリそのものが SSoT なので構造的にズレない、 architecture.md の preflight 要否表を参照)。 sloff の責務は **cache 健全性** であって **依存管理ツール ( pnpm) の運用 lint** ではない、 という ADR-0006 の責務境界に従えば、 後者を選ぶのが一貫する。
 
-なお内製ソース resolver ( `pnpm-local`) は lockfile を SSoT として外部 dep を hash に取り込む立場のため、 「 lockfile updated だが `pnpm install` 忘れ」 の install drift だけは別途検出する必要がある ( 検出しないと silent stale 実行が起きる)。 lazygen はこれを最小コストで処理する: pnpm が `pnpm install` 時に書く `node_modules/.pnpm/lock.yaml` は `pnpm-lock.yaml` の byte-for-byte コピーなので、 両者の byte 比較で drift detection できる ( 詳細は resolver-pnpm-local.md の「 Install drift check」 節)。 これは「 install 状態を SSoT にする」 ものではなく「 SSoT である lockfile と pnpm が書いた install snapshot の一致確認」 で、 ADR-0007 の責務境界とは矛盾しない。
+なお内製ソース resolver ( `pnpm-local`) は lockfile を SSoT として外部 dep を hash に取り込む立場のため、 「 lockfile updated だが `pnpm install` 忘れ」 の install drift だけは別途検出する必要がある ( 検出しないと silent stale 実行が起きる)。 sloff はこれを最小コストで処理する: pnpm が `pnpm install` 時に書く `node_modules/.pnpm/lock.yaml` は `pnpm-lock.yaml` の byte-for-byte コピーなので、 両者の byte 比較で drift detection できる ( 詳細は resolver-pnpm-local.md の「 Install drift check」 節)。 これは「 install 状態を SSoT にする」 ものではなく「 SSoT である lockfile と pnpm が書いた install snapshot の一致確認」 で、 ADR-0007 の責務境界とは矛盾しない。
 
 **O4. 内製ソース resolver は別の責務を持つので残す**
 
@@ -63,16 +63,16 @@ tools:
 pnpm-local が ExtraInputs を集める手段は複数検討した:
 
 - **esbuild Go API** ( 初期実装、 後に廃止): Go 製 bundler を in-process で呼び `bin` から transitive な import ファイルを抽出。 精度は高いが (a) eval / 動的 require / 動的 import で死角、 (b) bin が build 必須なのか fresh checkout で存在しないのかで挙動が分岐、 (c) consumer task との link が path overlap という暗黙機構に依存、 (d) tool 概念と build task との対応が implicit、 という設計面の問題が顕在化
-- **TypeScript Compiler API (tsc) / swc / oxc / tree-sitter**: Node.js / Rust runtime 依存または subprocess 必要、 もしくは path resolution / workspace 解決を自前で書く必要があり、 lazygen バイナリ単体完結を崩す
+- **TypeScript Compiler API (tsc) / swc / oxc / tree-sitter**: Node.js / Rust runtime 依存または subprocess 必要、 もしくは path resolution / workspace 解決を自前で書く必要があり、 sloff バイナリ単体完結を崩す
 - **`git ls-files --cached --others --exclude-standard`** ( 採用): 当該 package dir の「 利用者が repo に置いているファイル ( ただし `.gitignore` で除外されたものは除く)」 を SSoT として取る。 subprocess 1 回の overhead はあるが、 `.gitignore` の semantics を Go で再実装する必要が無く、 git の事実だけが SSoT で済む。 build / run の orchestration は task の cmd 内責務 ( ADR-0008 D7) に倒したので「 fresh checkout で bin が無い」 のような edge case 自体が消える
 
 精度は esbuild に対して下がる ( bin から実際に import されてないファイルも input に含む = 過剰 invalidate) が、 false hit は起きない。 Turborepo の default も同じ精度で、 monorepo 規模での実用上の精度は問題にならない。 詳細は [resolver-pnpm-local.md](../design/resolver-pnpm-local.md) 参照。
 
 ## Decision
 
-### D1. lazygen は go-external / pnpm-external resolver を持たない
+### D1. sloff は go-external / pnpm-external resolver を持たない
 
-`internal/lazygen/toolresolver/goexternal` も `internal/lazygen/toolresolver/pnpmexternal` も導入しない。 spec の `tools:` にも `go-external:` / `pnpm-external:` 形式の declared 種別を追加しない。 対応する preflight checker も持たない。
+`internal/sloff/toolresolver/goexternal` も `internal/sloff/toolresolver/pnpmexternal` も導入しない。 spec の `tools:` にも `go-external:` / `pnpm-external:` 形式の declared 種別を追加しない。 対応する preflight checker も持たない。
 
 ### D2. 外部公開ツールは script resolver で個別に declare する
 
@@ -104,7 +104,7 @@ tools:
 
 ### Responsibility boundary ( ADR-0006 と同じ論)
 
-lazygen の core 責務は「OS 横断 / 共有可能な cache を、 generator inputs / outputs / tools の同一性に基づいて管理する」 こと ( ADR-0001 / ADR-0002)。 lockfile drift の検出は依存管理ツール ( go / pnpm) 自体や利用者 CI の責務で、 lazygen が機械的に強制するのは越権。
+sloff の core 責務は「OS 横断 / 共有可能な cache を、 generator inputs / outputs / tools の同一性に基づいて管理する」 こと ( ADR-0001 / ADR-0002)。 lockfile drift の検出は依存管理ツール ( go / pnpm) 自体や利用者 CI の責務で、 sloff が機械的に強制するのは越権。
 
 ### Less is more ( ADR-0006 と同じ論)
 
@@ -118,20 +118,20 @@ go-external / pnpm-external 専用 resolver を導入すると、
 
 ### 一貫性
 
-ADR-0006 で buf を special-case しないと決めた延長線上にあり、 「lazygen は **lockfile-based 専用 resolver を持たない**」 一貫した立場が取れる ( 内製ソース resolver の `go.sum` 取り込みは内製 Go ツール解析の副産物に過ぎず、 外部依存単独を hash する目的ではない)。
+ADR-0006 で buf を special-case しないと決めた延長線上にあり、 「sloff は **lockfile-based 専用 resolver を持たない**」 一貫した立場が取れる ( 内製ソース resolver の `go.sum` 取り込みは内製 Go ツール解析の副産物に過ぎず、 外部依存単独を hash する目的ではない)。
 
 ## Consequences
 
 ### 正の影響
 
-- lazygen 本体に Go module / pnpm-lock の schema 知識が入らず、 schema 変更の追従コストがゼロ
+- sloff 本体に Go module / pnpm-lock の schema 知識が入らず、 schema 変更の追従コストがゼロ
 - preflight の対象が **内製ソース resolver のみ** ( pnpm-local の dist build 整合) に絞られ、 全体構成がシンプル
 - spec 宣言が「外部か内製かに関係なく `exec` + 必要なら内製ソース resolver」 で統一される
 - ADR-0005 の declared-only 原則と整合 ( 暗黙の lockfile parse がゼロ)
 
 ### 負の影響 / 注意点
 
-- `pnpm install` を忘れて lockfile drift した状態でも、 lazygen は runtime `--version` ベースで版を確定するため、 「stale な install の方が SSoT になる」現象は理論上起き得る。 ただし `pnpm exec` は install されていない bin を実行できないので、 実用上は最初の `pnpm exec ... --version` 起動時に失敗する ( = 早期 fail と等価)
+- `pnpm install` を忘れて lockfile drift した状態でも、 sloff は runtime `--version` ベースで版を確定するため、 「stale な install の方が SSoT になる」現象は理論上起き得る。 ただし `pnpm exec` は install されていない bin を実行できないので、 実用上は最初の `pnpm exec ... --version` 起動時に失敗する ( = 早期 fail と等価)
 - 外部 OSS ツールが `--version` を持たない / `--version` 出力に build timestamp / OS-arch を含む edge case では script resolver の `extract` regex で正規化が必要。 これは resolver-script.md の既存スコープ
 - 「外部依存を 1 行で全部 hash したい」要件 ( 大量の依存の version 一覧を一括取得) は満たせない。 必要なら利用者側で `tools:` map を機械生成する逃げ道が残る ( ADR-0008 で tool が named entity となったので、 codegen-of-spec 系の自動化と相性が良い)
 

@@ -5,7 +5,7 @@
 関連:
 - [Architecture](./architecture.md)
 - [ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一](../adr/0005-eliminate-resolver-auto-dispatch.md)
-- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md)
+- [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) ( D7 で「 build / run は cmd 責務」 を規定)
 - [Resolver: go-local](./resolver-go-local.md) ( Go 側の対応物)
 
@@ -15,10 +15,10 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 設計上、 `pnpm-local` は go-local と **同じ責務分担** に揃えている ( ADR-0008 D7):
 
-- **lazygen の役割**: workspace package のソース集合を hash 入力に取り、 transitive 外部 dep の resolved version を ToolVersion として contribute する。 これだけ
+- **sloff の役割**: workspace package のソース集合を hash 入力に取り、 transitive 外部 dep の resolved version を ToolVersion として contribute する。 これだけ
 - **利用者の役割**: build が必要なら task の cmd 内に build を含める ( go-local の `go run ./cmd/foo` が compile + run を 1 cmd に閉じるのと同じ責務分担)
 
-つまり lazygen は build orchestration をしない。 spec から「 build task と consumer task の path overlap で連携」 のような暗黙概念は消えている。
+つまり sloff は build orchestration をしない。 spec から「 build task と consumer task の path overlap で連携」 のような暗黙概念は消えている。
 
 「 内製ソース ( = `local`)」 という意味では [go-local](./resolver-go-local.md) と並立で、 Result の shape も揃う:
 
@@ -65,17 +65,17 @@ toolresolver.Result{
 
 ### Dispatch ( declared-only + named-tool)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により lazygen は declared-only + named-tool。 `tools:` map で `pnpm-local: <package-name>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により sloff は declared-only + named-tool。 `tools:` map で `pnpm-local: <package-name>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する。
 
 ### Resolver の利用例
 
 ```yaml
-# packages/codegen/lazygen.yml ( 共通配置だが、 root の lazygen.yml に集約しても良い)
+# packages/codegen/sloff.yml ( 共通配置だが、 root の sloff.yml に集約しても良い)
 tools:
   codegen:
     pnpm-local: "@org/codegen"
 
-# proto/lazygen.yml ( 利用側 task)
+# proto/sloff.yml ( 利用側 task)
 commands:
   - name: gen
     cmd: ["sh", "-c", "pnpm --filter @org/codegen build && pnpm exec my-codegen"]
@@ -91,7 +91,7 @@ commands:
 - 外部 npm dep ( lodash 等) の resolved version 変化 → tools_hash 変化 → gen 再実行
 - ts-node / tsx で `bin: src/cli.ts` ( build 不要) なら cmd は `["pnpm", "exec", "my-ts-codegen"]` でよい ( ts-node が src を直接読む)
 
-build が必要かどうかは **cmd の中身次第** で、 lazygen は知らない。 dist/src のような慣習名前を一切前提しない。
+build が必要かどうかは **cmd の中身次第** で、 sloff は知らない。 dist/src のような慣習名前を一切前提しない。
 
 ### Resolver 実装イメージ
 
@@ -149,7 +149,7 @@ git ls-files --cached --others --exclude-standard -- <pkg-dir>
 - **filepath.Walk + 慣習的な exclude list ( `dist/`, `build/`, `node_modules/`)**: 慣習依存 ( ADR-0008 D7 の精神に反する)
 - **esbuild Go API で bin entry から transitive 解析** ( 旧設計): 精度高いが eval / 動的 require / 動的 import で死角、 esbuild バイナリサイズ増、 build 必要なツールでは bin が存在しない fresh checkout で fall-back 必要、 tool 概念と build task の path overlap link が必要 ( 暗黙性問題)
 
-`git ls-files` 採用は subprocess 1 回の overhead を許容する代わりに、 git の事実だけを SSoT に取る一番素直な選択。 lazygen の cache record も git 管理前提なので、 git 依存はすでに implicit。
+`git ls-files` 採用は subprocess 1 回の overhead を許容する代わりに、 git の事実だけを SSoT に取る一番素直な選択。 sloff の cache record も git 管理前提なので、 git 依存はすでに implicit。
 
 ### 過剰 invalidate の許容
 
@@ -179,7 +179,7 @@ walk := WalkDeps(lockfile, "packages/codegen")
 
 pnpm-local の hash 入力は **lockfile から walk した resolved version** だが、 cmd 実行時は **node_modules に install された実体** を読み込む。 利用者が `git pull` で新 `pnpm-lock.yaml` を取り込んでから `pnpm install` を忘れると、 hash 経路は新 lockfile を、 runtime は古い install を見ることになる ( silent stale)。
 
-これを構造的に防ぐため、 **`internal/lazygen/preflight/pnpmlocal`** に Checker を置いている。 runner が cmd 実行前に preflight を回す段階で:
+これを構造的に防ぐため、 **`internal/sloff/preflight/pnpmlocal`** に Checker を置いている。 runner が cmd 実行前に preflight を回す段階で:
 
 ```
 hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
@@ -196,7 +196,7 @@ hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
 
 ### preflight 経由にする利点 ( resolver 内に置かないこと)
 
-- **`LAZYGEN_ALLOW_STALE_DEPS=1` の escape hatch を継承**: 利用者が一時的に通したいケース ( experimental edit を試したい等) で warn 降格 + read-only モードで run できる。 resolver 内で fail させると、 この escape hatch 経路が効かない
+- **`SLOFF_ALLOW_STALE_DEPS=1` の escape hatch を継承**: 利用者が一時的に通したいケース ( experimental edit を試したい等) で warn 降格 + read-only モードで run できる。 resolver 内で fail させると、 この escape hatch 経路が効かない
 - **概念整理**: 「 preflight = state 検証」 という general subsystem として一貫させ、 「 build 用 preflight は廃止 / install drift 用 preflight は別経路」 のような暗黙の分類を作らない ( ADR-0008 D7 末尾参照)
 - **scope-by-referenced-resolver**: runner は「 spec で実際に referenced されている resolver name」 集合を作って、 一致する Checker だけ起動する。 pnpm-local 未使用の repo では Checker そのものが起動しないので、 catalog-style な repo でも余計な validation が走らない
 
@@ -211,7 +211,7 @@ hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
 
 旧設計では「`bin` が `dist/` を指していれば build 必須、 `dist/` が存在 / src より新しいかで判定」 という preflight checker を持っていたが、 ADR-0008 D7 で「 build / run は cmd 責務」 と決めた時点で構造的に不要になった:
 
-- `dist/` `src/` は pnpm / npm 標準ではなくコミュニティ慣習にすぎず、 lazygen が前提にすると別 layout の repo で破綻する
+- `dist/` `src/` は pnpm / npm 標準ではなくコミュニティ慣習にすぎず、 sloff が前提にすると別 layout の repo で破綻する
 - 「 rebuild 忘れ」 は cmd 内に `pnpm build && exec` を書いてもらうことで構造的に消える ( source 編集 → files_hash 変化 → cmd 再実行 → cmd 内 build → 最新 binary で実行)
 - pnpm-local 自身は「 利用者が repo に置いているファイルを inputs に乗せる」 input contributor だけを担う
 

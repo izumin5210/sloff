@@ -1,13 +1,13 @@
-# lazygen Architecture
+# sloff Architecture
 
-`lazygen` は monorepo 向けの **共有可能なキャッシュ機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Nx / Bazel / moonrepo / Pants) では実現できなかった「キャッシュ健全性の 2 防御線 ( OS 中立な logical version の取得元が runtime と必ず整合する仕組み / output-comparison)」を設計レベルで強制することを設計目標とする。
+`sloff` は monorepo 向けの **共有可能なキャッシュ機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Nx / Bazel / moonrepo / Pants) では実現できなかった「キャッシュ健全性の 2 防御線 ( OS 中立な logical version の取得元が runtime と必ず整合する仕組み / output-comparison)」を設計レベルで強制することを設計目標とする。
 
 関連:
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md) (= 自作)
 - [ADR-0002: キャッシュヒット判定モデル](../adr/0002-cache-hit-decision-model.md) (= output-comparison)
 - [ADR-0003: キャッシュレコードのストレージ方式](../adr/0003-record-storage-strategy.md) (= git per-task per-input ファイル)
-- [ADR-0006: lazygen は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
-- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
+- [ADR-0006: sloff は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
+- [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
@@ -24,20 +24,20 @@
 
 - **[ADR-0001](../adr/0001-cache-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Nx / Bazel / moonrepo / Pants) は「キャッシュ健全性 2 防御線」を満たさないため **自作する**
 - **[ADR-0002](../adr/0002-cache-hit-decision-model.md)**: cache hit 判定は **output-comparison** ( input_hash 一致 + record の output_hash と現状ツリーの output_hash 一致)
-- **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
+- **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
 
-本 Design Doc はこれら 3 つの決定を所与として、 `lazygen` の **全体アーキテクチャ** をまとめる。 各 distribution channel に対応する Resolver の詳細は別 doc に分割している ( 本 doc 冒頭の関連リンク参照)。
+本 Design Doc はこれら 3 つの決定を所与として、 `sloff` の **全体アーキテクチャ** をまとめる。 各 distribution channel に対応する Resolver の詳細は別 doc に分割している ( 本 doc 冒頭の関連リンク参照)。
 
 ### 前提 ( ADR から継承)
 
 - generator output は git 管理されている前提を採る ( typical な monorepo の運用)
 - ヒット判定は output-comparison 方式 ( record の output_hash と現状ツリーの output_hash を照合)
-- record は git 管理の per-task per-input ファイル (`.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
+- record は git 管理の per-task per-input ファイル (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
 - 開発者の OS は `darwin/arm64` / `linux/amd64` / `linux/arm64` のいずれかが基本対象。 Windows は対象外
 
 ### Goal
 
-1. `lazygen` を Go 製の単一バイナリとして実装し、 開発者間 / CI 間で共有可能なコード生成キャッシュを提供する
+1. `sloff` を Go 製の単一バイナリとして実装し、 開発者間 / CI 間で共有可能なコード生成キャッシュを提供する
 2. `darwin/arm64` で生成された cache record を `linux/amd64` の CI でもそのまま再利用できる ( OS 横断キャッシュ共有)
 3. cache record が構造的にコンフリクトしない ( ブランチ独立に生成しても安全にマージできる)
 4. OSS / 内製を問わず generator が更新されたら自動で invalidate される
@@ -49,7 +49,7 @@
 - Windows 対応
 - watch モード ( 初版では非対応)
 - record の `schema_version` 移行戦略 ( 初版は schema_version 1 固定、 将来 schema を変える必要が生じた段階で別途検討)
-- 環境構築タスク ( パッケージマネージャの install 等) のオーケストレーション。 lazygen は「pure な代入関数 ( inputs → outputs) としての generator」だけを扱い、 副作用が大きい install タスクは利用者の Makefile / shell スクリプト側に委ねる
+- 環境構築タスク ( パッケージマネージャの install 等) のオーケストレーション。 sloff は「pure な代入関数 ( inputs → outputs) としての generator」だけを扱い、 副作用が大きい install タスクは利用者の Makefile / shell スクリプト側に委ねる
 
 ## 要件
 
@@ -66,9 +66,9 @@
 
 ### 高レベル方針
 
-- 単一バイナリ `lazygen` ( Go 製) として実装
-- spec ファイル形式は `lazygen.yml` ( spec dir 単位で 1 ファイル)
-- record は `.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` に git 管理で配置
+- 単一バイナリ `sloff` ( Go 製) として実装
+- spec ファイル形式は `sloff.yml` ( spec dir 単位で 1 ファイル)
+- record は `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` に git 管理で配置
 - record は **input hash → output hash + output ファイル一覧** の mapping のみ ( artifact は含まない)
 - cache hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
 - ツール invalidate は **OS 非依存な論理 version 文字列** を入力源別に取得して実現:
@@ -80,7 +80,7 @@
 
 ```mermaid
 flowchart TD
-    START["lazygen run task"] --> CALC["input_hash 計算<br/>= hash(files_hash, cmd_hash, tools_hash)"]
+    START["sloff run task"] --> CALC["input_hash 計算<br/>= hash(files_hash, cmd_hash, tools_hash)"]
     CALC --> LOOKUP{"record (input_hash) 存在?"}
     LOOKUP -- No --> RUN1["generator 実行"]
     LOOKUP -- Yes --> SCAN["record の output.files を<br/>現在の作業ツリーから読み込み<br/>output_hash 再計算"]
@@ -96,7 +96,7 @@ flowchart TD
 ### spec ファイル形式
 
 ```yaml
-# <spec_dir>/lazygen.yml — tools と commands は同居 / どちらか片方だけでも可 ( ADR-0008)
+# <spec_dir>/sloff.yml — tools と commands は同居 / どちらか片方だけでも可 ( ADR-0008)
 tools:
   # tool 名 ( slug-style: [a-z0-9_-]+) → 1 つの resolver shape
   buf:
@@ -121,9 +121,9 @@ commands:
 文法ポイント:
 
 - `inputs` / `outputs` の **明示分離が必須**
-- `tools` ブロックは **任意**。 同じ `lazygen.yml` 内で `commands:` と共存可、 別 `lazygen.yml` で定義された tool を参照することも可 ( namespace は repo-wide で flat、 ADR-0008)
+- `tools` ブロックは **任意**。 同じ `sloff.yml` 内で `commands:` と共存可、 別 `sloff.yml` で定義された tool を参照することも可 ( namespace は repo-wide で flat、 ADR-0008)
 - `commands[*].tools` は **tool 名の文字列リスト** ( inline 宣言は不可)。 prebuilt binary は script resolver、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
-- tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `lazygen.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
+- tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `sloff.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
 - `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
 
 ### キャッシュレコード schema
@@ -132,16 +132,16 @@ commands:
 
 ```
 <repo_root>/
-└── .lazygen/cache/
+└── .sloff/cache/
     └── <spec_relpath>/             # spec dir からの相対パス ( ディレクトリ階層をそのまま展開)
         └── <task_id>/              # spec.commands[*].name の slug
             └── <input_hash>.yml    # 1 ファイル = 1 record
 ```
 
-例: `path/to/spec/lazygen.yml` の `protoc-gen-go` タスクの場合
+例: `path/to/spec/sloff.yml` の `protoc-gen-go` タスクの場合
 
 ```
-.lazygen/cache/path/to/spec/protoc-gen-go/3f9a1c....yml
+.sloff/cache/path/to/spec/protoc-gen-go/3f9a1c....yml
 ```
 
 `spec_relpath` は階層を verbatim に保持する ( `"/"` を `"_"` 等に置換しない)。これにより `Storage.List` が record パスから `spec_relpath` をロスレスに復元でき、 spec dir 名にアンダースコアを含むケースでも識別が破綻しない。
@@ -149,7 +149,7 @@ commands:
 #### YAML schema
 
 ```yaml
-# .lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml
+# .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml
 schema_version: 1
 spec:
   dir: path/to/spec
@@ -188,7 +188,7 @@ generated_at: 2026-05-05T12:34:56Z      # 情報用。hash 計算には含めな
 ```go
 func runTask(spec CmdSpec) error {
     inputHash := computeInputHash(spec)
-    recordPath := recordPath(spec, inputHash) // .lazygen/cache/<dir>/<task>/<hash>.yml
+    recordPath := recordPath(spec, inputHash) // .sloff/cache/<dir>/<task>/<hash>.yml
     if record, ok := loadRecord(recordPath); ok {
         currentOutputHash, err := hashOutputsOnDisk(record.Output.Files)
         if err == nil && currentOutputHash == record.Output.Hash {
@@ -219,7 +219,7 @@ func computeInputHash(spec CmdSpec) string {
 そのため record の永続化レイヤは **Go interface を切り、 backend を plug-in 可能にする**。 これは resolver / preflight checker の拡張性設計と同じ思想。
 
 ```go
-// internal/lazygen/cache/storage.go
+// internal/sloff/cache/storage.go
 package cache
 
 import "context"
@@ -257,7 +257,7 @@ type ListFilter struct {
 
 組み込み実装 ( 初版):
 
-- **`LocalStorage`** ( ADR-0003 で採用): `.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
 
 将来追加候補 ( 必要が生じた段階で対応):
 
@@ -269,10 +269,10 @@ backend 選択は環境変数で切り替える想定:
 
 ```sh
 # 既定 ( 初版実装ではこれのみ)
-LAZYGEN_CACHE_BACKEND=local lazygen run --pattern '**/lazygen.yml'
+SLOFF_CACHE_BACKEND=local sloff run --pattern '**/sloff.yml'
 
 # 将来 S3 を導入した場合
-LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
+SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
 ```
 
 ##### 設計上の責務分離
@@ -321,7 +321,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 ```mermaid
 flowchart LR
-    YAML["**/lazygen.yml<br/>(tools: + commands:)"] --> REG["spec.ToolRegistry<br/>name → DeclaredTool<br/>( repo-wide flat namespace,<br/>ADR-0008)"]
+    YAML["**/sloff.yml<br/>(tools: + commands:)"] --> REG["spec.ToolRegistry<br/>name → DeclaredTool<br/>( repo-wide flat namespace,<br/>ADR-0008)"]
     REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Resolver.Resolve 1 回)"]
     PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(protoc-gen-go / buf /<br/>pnpm exec / go tool ... 等)"]
     PRE -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
@@ -336,9 +336,9 @@ flowchart LR
 
 #### Dispatch: declared-only + named-tool registry
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により resolver の起動経路は **declared のみ**、 さらに [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により declared は **`lazygen.yml` の top-level `tools:` map で名前付き定義された entity への参照** に統一されている。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により resolver の起動経路は **declared のみ**、 さらに [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により declared は **`sloff.yml` の top-level `tools:` map で名前付き定義された entity への参照** に統一されている。
 
-- `commands[*].tools: [name1, name2]` は string list、 各 name は `spec.ToolRegistry` ( 全 lazygen.yml の tools[] を merge した repo-wide flat namespace) に対する lookup key
+- `commands[*].tools: [name1, name2]` は string list、 各 name は `spec.ToolRegistry` ( 全 sloff.yml の tools[] を merge した repo-wide flat namespace) に対する lookup key
 - 同名 tool が 2 ファイル以上で定義されたら load 時 error。 未定義 name を参照した task も load 時 error
 - runner は `Run` 冒頭で全 tool を 1 回ずつ resolve し、 結果を name 別 cache に保持 ( N task が同じ tool を参照しても Resolver 呼び出しは 1 回、 ADR-0008 D6)
 - 一つの task で複数 resolver / tool を組み合わせたい場合 ( 例: `tools: [go-toolchain, my-codegen]`) は名前を並べる
@@ -351,14 +351,14 @@ declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / 
 
 #### `SourceLister` 共通の挙動 / 利点
 
-内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は内部で `SourceLister` を選択するが、 これは **Resolver 内部の実装詳細** であって lazygen のトップレベル拡張ポイントには数えない。 詳細は各 Resolver doc ([go-local](./resolver-go-local.md), [pnpm-local](./resolver-pnpm-local.md)) を参照。
+内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は内部で `SourceLister` を選択するが、 これは **Resolver 内部の実装詳細** であって sloff のトップレベル拡張ポイントには数えない。 詳細は各 Resolver doc ([go-local](./resolver-go-local.md), [pnpm-local](./resolver-pnpm-local.md)) を参照。
 
 `SourceLister` は実装にかかわらず ( `globLister` / `goPackagesLister` のいずれでも) 以下を共通とする:
 
 - **OS 非依存** ( build 成果物ではなくソーステキストの hash)
-- **lazygen バイナリ単体で完結** ( go API 直接 import、 外部 CLI ツールへの依存ゼロ、 subprocess spawn なし)
+- **sloff バイナリ単体で完結** ( go API 直接 import、 外部 CLI ツールへの依存ゼロ、 subprocess spawn なし)
 - ソース変更には敏感に反応する
-- **lazygen 1 run 内のメモ化**: 同一 entry ( 例: 同じ内製 protoc-gen-foo を多数の proto task が使う) を複数 task が参照する場合、 `SourceLister.List(ctx, entry)` の結果を `entry` をキーに run 内でキャッシュして 1 回だけ評価する。 これは Resolver / SourceLister の単純な最適化で、 cache 健全性に影響しない ( 同一入力に対する純粋関数の結果メモ化)
+- **sloff 1 run 内のメモ化**: 同一 entry ( 例: 同じ内製 protoc-gen-foo を多数の proto task が使う) を複数 task が参照する場合、 `SourceLister.List(ctx, entry)` の結果を `entry` をキーに run 内でキャッシュして 1 回だけ評価する。 これは Resolver / SourceLister の単純な最適化で、 cache 健全性に影響しない ( 同一入力に対する純粋関数の結果メモ化)
 - **Resolver 単位で `SourceLister` を切替可能**: 標準実装で対応できないケース ( `go/packages` で正しく取れない構造の Go プロジェクト等) では、 該当 Resolver の `SourceLister` を `globLister` に切り替える。 「精度は下がるが死角ゼロ」を選ぶ retreat path として常に提供する。 切替単位は Resolver なので、 影響範囲が局所化される
 
 ##### 性能上の優位性は別途 benchmark で検証が必要
@@ -380,14 +380,14 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 preflight は **「 cmd を実行する前に validate しておきたい invariant」 を channel ごとに表現する general subsystem**。 何を validate するかに「 build 専用」 「 install 専用」 のような暗黙の分類は持たず、 channel 側が必要に応じて Checker を登録する。 想定する責務の例:
 
-| 例 | 説明 | lazygen での扱い |
+| 例 | 説明 | sloff での扱い |
 |---|---|---|
 | **install drift check** | lockfile を SSoT に取る resolver で、 lockfile が install と乖離していないかを確認 | `pnpm-local` が builtin Checker を持つ ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致) |
 | **build artefact freshness check** | source / 設定の更新後に build artefact が再生成されていることを確認 | **Checker を持たない**。 内製ソースの rebuild は cmd 責務 ( ADR-0008 D7) に倒した。 利用者は cmd 内に `pnpm build && exec` / `go run ...` 等を書くか、 自前の Make / pre-commit hook で担保する |
 | **lockfile pinning lint** | unpinned tag (`:latest` 等) や pinned tag からの drift を弾く | **Checker を持たない**。 buf に対しては ADR-0006、 npm / Go OSS に対しては ADR-0007 で「 利用者 / 依存管理ツール側の規律」 と決めた |
 | **toolchain availability check** | 必要なバイナリが PATH に居ることを確認 | **Checker を持たない**。 script resolver は `<bin> --version` の実行で構造的に検出する ( binary 不在なら早期 fail) |
 
-つまり「 何を validate しないか」 は channel 別の意図的な判断で、 「 lazygen の preflight subsystem は一切 build / install / lint をしない」 でも「 全部やる」 でもない、 という整理。
+つまり「 何を validate しないか」 は channel 別の意図的な判断で、 「 sloff の preflight subsystem は一切 build / install / lint をしない」 でも「 全部やる」 でもない、 という整理。
 
 具体的に builtin で持っているのは:
 
@@ -396,26 +396,26 @@ preflight は **「 cmd を実行する前に validate しておきたい invari
   - `script` resolver: runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない
   - `go-local`: Go は別途 install ステップを持たず `go run` 等が on-demand で `$GOMODCACHE` に download するため、 「 lockfile updated だが install 忘れ」 という drift state が **構造的に作れない** ( `-mod=readonly` / `vendor/` 構成でも fail-loudly に倒れる、 詳細は [resolver-go-local.md の Preflight Checker は持たない 節](./resolver-go-local.md#preflight-checker-は持たない--go-の-install-model-に由来する構造的理由))
 
-buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により lazygen は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。 外部公開 npm / Go OSS パッケージについても [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で吸収するため preflight は不要。
+buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により sloff は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。 外部公開 npm / Go OSS パッケージについても [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で吸収するため preflight は不要。
 
 各 channel の検証内容は対応する Resolver doc を参照 ( [pnpm-local の install drift](./resolver-pnpm-local.md#install-drift-check-pnpm-install-忘れ検出--preflight-経由))。
 
 不整合検出時の挙動 ( preflight が走った channel 共通):
 
-- **デフォルト**: lazygen を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
+- **デフォルト**: sloff を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
 - **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
-- **ローカル escape hatch**: `LAZYGEN_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で lazygen を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
+- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 
 代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
 
 ### resolver / preflight の拡張性 (interface 設計)
 
-新しいツールチェーン (例: `mise`、 `asdf`、 `nix`、 `bun`、 `deno`、 `cargo` 等) や独自の依存プロバイダが将来導入された場合に、 lazygen 本体の改修を最小化したい。 そのため tool version resolver と preflight checker は **それぞれ Go interface を切り、 registry に登録する plugin パターン** で実装する。
+新しいツールチェーン (例: `mise`、 `asdf`、 `nix`、 `bun`、 `deno`、 `cargo` 等) や独自の依存プロバイダが将来導入された場合に、 sloff 本体の改修を最小化したい。 そのため tool version resolver と preflight checker は **それぞれ Go interface を切り、 registry に登録する plugin パターン** で実装する。
 
 #### Resolver interface
 
 ```go
-// internal/lazygen/toolresolver/resolver.go
+// internal/sloff/toolresolver/resolver.go
 package toolresolver
 
 import "context"
@@ -453,7 +453,7 @@ type ToolVersion struct {
 Registry:
 
 ```go
-// internal/lazygen/toolresolver/registry.go
+// internal/sloff/toolresolver/registry.go
 type Registry struct {
     byName map[string]Resolver  // 明示宣言の dispatch ( ADR-0005 で declared-only)
 }
@@ -473,7 +473,7 @@ func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, de
 #### Preflight interface
 
 ```go
-// internal/lazygen/preflight/preflight.go
+// internal/sloff/preflight/preflight.go
 package preflight
 
 import "context"
@@ -500,8 +500,8 @@ type Issue struct {
 
 Registry の動作:
 
-- lazygen の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 そのうち Checker を持つ channel についてだけ all-or-nothing で実行
-- いずれかが Issue を返したら lazygen は fail ( `LAZYGEN_ALLOW_STALE_DEPS=1` の場合は warn 降格 + read-only モード)
+- sloff の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 そのうち Checker を持つ channel についてだけ all-or-nothing で実行
+- いずれかが Issue を返したら sloff は fail ( `SLOFF_ALLOW_STALE_DEPS=1` の場合は warn 降格 + read-only モード)
 - runner は registered Checker のうち「 spec で referenced されている resolver name」 と一致するものだけ起動する ( catalog-style の inert tool 定義の Checker は起動しない)
 
 #### 拡張ポイントの責務分離
@@ -517,7 +517,7 @@ Registry の動作:
 
 内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は、 内部で「ソースファイル列挙戦略」を選ぶ ( 標準 `globLister`、 言語別 `goPackagesLister` 等)。 これは **Resolver 内部の実装詳細** であり、 トップレベルの拡張ポイントには数えない。 詳細は [resolver-go-local.md](./resolver-go-local.md) / [resolver-pnpm-local.md](./resolver-pnpm-local.md) を参照。
 
-新しい言語 ( Python / Rust 等) の内製ツールに対応する場合、 該当する Resolver 実装の中で `SourceLister` を新規実装するか、 既存 `globLister` で済ませるかを選ぶ。 `SourceLister` は Resolver 単位で完結するため、 lazygen 全体の拡張ポイントを増やさない。
+新しい言語 ( Python / Rust 等) の内製ツールに対応する場合、 該当する Resolver 実装の中で `SourceLister` を新規実装するか、 既存 `globLister` で済ませるかを選ぶ。 `SourceLister` は Resolver 単位で完結するため、 sloff 全体の拡張ポイントを増やさない。
 
 #### Future channel candidates ( 拡張想定)
 
@@ -533,11 +533,11 @@ prebuilt binary 系 ( `nix` / `mise` / `aqua` 等で配布される CLI 等) は
 | `cargo` | `Cargo.lock` | `cargo metadata` | `cargo metadata --format-version 1` 経由の rust 用 lister を検討 |
 | Python ( 仮) | `*.lock` ( poetry / uv) | install 状態確認 | ast module ベースの python 用 lister を検討 |
 
-これらは現時点では実装しないが、 必要が生じた段階で対応する **Resolver / Preflight Checker** を 1 対追加するだけで対応可能 ( lazygen 本体に変更不要)。 Resolver 内部の `SourceLister` は Resolver 実装側で必要なら新規追加する ( トップレベルの拡張ポイントは増やさない)。
+これらは現時点では実装しないが、 必要が生じた段階で対応する **Resolver / Preflight Checker** を 1 対追加するだけで対応可能 ( sloff 本体に変更不要)。 Resolver 内部の `SourceLister` は Resolver 実装側で必要なら新規追加する ( トップレベルの拡張ポイントは増やさない)。
 
 ### タスク間依存 (inputs / outputs からの自動導出)
 
-依存関係は **`inputs` と `outputs` から完全に自動導出する**。 lazygen には `depends` のような手動依存宣言フィールドは **存在しない**。
+依存関係は **`inputs` と `outputs` から完全に自動導出する**。 sloff には `depends` のような手動依存宣言フィールドは **存在しない**。
 
 これは単に DRY のためではなく、 **キャッシュ機構の健全性を担保するための必然** である。 詳細は本節末尾の [なぜ手動 `depends` を持たないか](#なぜ手動-depends-を持たないか-キャッシュ健全性の前提) を参照。
 
@@ -563,11 +563,11 @@ example:
   - `inputs: ["**/*.proto", "**/*.options.pb.go", "buf.gen.yaml"]`
   - `outputs: ["**/*.pb.go", "**/*.connect.go"]`
 
-→ `protoc-gen-go` の `inputs` glob に `*.options.pb.go` が含まれており、 これは `options-codegen` の `outputs` の実ファイルにマッチする。 lazygen は自動的に **`protoc-gen-go → options-codegen` の依存** を構築する。
+→ `protoc-gen-go` の `inputs` glob に `*.options.pb.go` が含まれており、 これは `options-codegen` の `outputs` の実ファイルにマッチする。 sloff は自動的に **`protoc-gen-go → options-codegen` の依存** を構築する。
 
 #### なぜ手動 `depends` を持たないか (キャッシュ健全性の前提)
 
-lazygen のキャッシュが信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと。 この前提が成立するなら、 上流 task の output が変わったときに下流 task の `input_hash` が必ず変わる ( 上流 output が下流 inputs に含まれるため)。
+sloff のキャッシュが信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと。 この前提が成立するなら、 上流 task の output が変わったときに下流 task の `input_hash` が必ず変わる ( 上流 output が下流 inputs に含まれるため)。
 
 仮に「inputs にも outputs にも現れない論理依存」があるとすると:
 
@@ -577,12 +577,12 @@ lazygen のキャッシュが信頼できる前提は、 **「generator は spec
 
 つまり「手動 `depends` で表現したくなる依存」が存在する状況 = **「inputs / outputs の宣言が現実の generator 挙動を反映していない」状況** = **cache 機構自体が信頼できない状況**。 手動 `depends` を導入してその場の DAG を救済しても、 hash ベースの cache 判定が嘘をついている根本問題は解消されない ( むしろ「依存は明示してあるからキャッシュも信頼できる」という偽の安心感を生む)。
 
-したがって lazygen では:
+したがって sloff では:
 
 - **手動 `depends` フィールドは設けない**
 - 依存表現はすべて inputs / outputs からの自動導出で行う
 - もし「自動導出で見つからない依存」が必要に見えたら、 それは spec の `inputs` / `outputs` 宣言が不完全である合図。 spec を修正するのが正しい対応
-- 上記の前提を満たせない generator (`inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) は **そもそも lazygen のスコープ外**。 利用者の Makefile / shell スクリプト側に残すか、 generator 自体を修正する
+- 上記の前提を満たせない generator (`inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) は **そもそも sloff のスコープ外**。 利用者の Makefile / shell スクリプト側に残すか、 generator 自体を修正する
 
 この立場は不便なように見えるが、 「キャッシュは健全な generator にのみ意味がある」という根本原則を spec / 実装レベルで強制する設計判断。
 
@@ -592,18 +592,18 @@ invalidate チェーンの実装は、 **「上流 task の最新 output hash �
 
 #### 実装上の留意点
 
-- 全 task の glob expand は **lazygen 1 run 内で 1 回だけ** 行い、 task 間で結果を共有する ( I_t / O_t の集合をメモ化)
+- 全 task の glob expand は **sloff 1 run 内で 1 回だけ** 行い、 task 間で結果を共有する ( I_t / O_t の集合をメモ化)
 - 交差判定は task 数 N に対して O(N²) だが、 実用上の monorepo 規模 ( 200 task 程度) では現実的なオーダー
 - chicken-and-egg ( 完全初回で output ファイルが存在しない) は generator 出力が git 管理されている前提のため通常起きない。 fresh clone 直後でも前回の generator output は git tree に存在する。 完全な初期化は cache miss で全 task 実行
-- `lazygen graph` サブコマンドで導出された DAG を Mermaid / DOT で可視化し、 「なぜ A → B の依存があるのか」をデバッグできるようにする (auto-detect の根拠ファイルも併記)
-- `lazygen run --explain <task>` で個別 task の cache hit / miss 理由 ( 上流のどの output が変わって invalidate されたか) を表示
+- `sloff graph` サブコマンドで導出された DAG を Mermaid / DOT で可視化し、 「なぜ A → B の依存があるのか」をデバッグできるようにする (auto-detect の根拠ファイルも併記)
+- `sloff run --explain <task>` で個別 task の cache hit / miss 理由 ( 上流のどの output が変わって invalidate されたか) を表示
 
 #### 暗黙性の懸念と緩和策
 
 自動導出は spec から「なぜこの順序か」が読み取りにくくなる暗黙性のトレードオフがある。 緩和策:
 
-- `lazygen graph` で可視化
-- `lazygen run --explain` で個別判定の根拠表示
+- `sloff graph` で可視化
+- `sloff run --explain` で個別判定の根拠表示
 - `inputs` / `outputs` の宣言粒度を細かく保つ文化 (`outputs: ["**/*"]` のような雑な宣言を spec lint で警告)
 - PR レビュー時、 spec の `inputs` / `outputs` 変更が依存関係を変える可能性があることを意識する運用ルール
 
@@ -612,19 +612,19 @@ invalidate チェーンの実装は、 **「上流 task の最新 output hash �
 per-task per-input ファイル方式では record が累積する。 容量見積りは保守的に試算しても、 `1 record ≒ 2KB × タスク数 200 × 並走世代 10 ≒ 4MB` 程度に収まる見込み。 ただし長期運用では掃除機構が必要。 4 段で提供する:
 
 - **CI nightly sweep**: GitHub Actions の scheduled job で、 git mtime が直近 90 日以内に触れられていない record を列挙し、 削除 PR を bot 投稿する
-- **`lazygen cache gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる
-- **task rename / 削除コミットでの自動削除**: lefthook / pre-commit hook に「 spec を変更/削除する diff があれば、 対応する `.lazygen/cache/<spec_dir>/<task_id>/` も削除する」step を追加
+- **`sloff cache gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる
+- **task rename / 削除コミットでの自動削除**: lefthook / pre-commit hook に「 spec を変更/削除する diff があれば、 対応する `.sloff/cache/<spec_dir>/<task_id>/` も削除する」step を追加
 - **長期的オプション ( 本 Doc スコープ外)**: record 容量が想定を超えたら git LFS 化、 または Hybrid ( ADR-0003 Option E) への拡張余地は残す
 
 ### PR ノイズ抑制
 
-`.lazygen/cache/**` を `.gitattributes` で `linguist-generated=true` 指定し、 GitHub PR diff の default collapsed 化。 PR template に「`.lazygen/cache/` 配下の差分は人間レビュー対象外」と明記する運用ルールを併設する。
+`.sloff/cache/**` を `.gitattributes` で `linguist-generated=true` 指定し、 GitHub PR diff の default collapsed 化。 PR template に「`.sloff/cache/` 配下の差分は人間レビュー対象外」と明記する運用ルールを併設する。
 
 ## Open Questions
 
 - **Q1**: 同 input hash で複数 OS が独立に走った時、 output hash が真に一致するか。 一致しない generator (例: 行末コード差、 絶対パス埋込、 time.Now embed) が出た場合の対処方針。 cross-OS double-run 検証 CI を入れて早期発見するか
-- **Q2**: 開発者が手元で `.lazygen/cache/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
-- **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 lazygen は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと cache が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
+- **Q2**: 開発者が手元で `.sloff/cache/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
+- **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと cache が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
 - **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
 
 各 Resolver 固有の Open Questions は対応する Resolver doc を参照。
@@ -632,21 +632,21 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 ## File Layout
 
 ```
-.lazygen/cache/                             # ★ cache record root (利用者リポジトリ側に作成)
+.sloff/cache/                             # ★ cache record root (利用者リポジトリ側に作成)
   <spec_relpath>/<task_id>/<input_hash>.yml
 
-# lazygen 自身のコードベース ( github.com/izumin5210/lazygen):
-cmd/lazygen/main.go                         # CLI エントリ (`lazygen run` / `lazygen cache gc` 等)
-internal/lazygen/
-  spec.go                                   # lazygen.yml パース、 CmdSpec
+# sloff 自身のコードベース ( github.com/izumin5210/sloff):
+cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff cache gc` 等)
+internal/sloff/
+  spec.go                                   # sloff.yml パース、 CmdSpec
   runner.go                                 # 並列 runner、 cache lookup / write
   hash.go                                   # input/output hash 計算
   depgraph.go                               # inputs / outputs からの依存自動導出 + DAG 構築
-  explain.go                                # `lazygen run --explain` / `lazygen graph` の判定根拠出力
+  explain.go                                # `sloff run --explain` / `sloff graph` の判定根拠出力
   cache/                                    # ★ Storage interface + Registry
     record.go                               # Record 型 (YAML schema, deterministic marshal/unmarshal)
     storage.go                              # Storage interface, Key / ListFilter 型
-    registry.go                             # Storage registry (LAZYGEN_CACHE_BACKEND による backend 選択)
+    registry.go                             # Storage registry (SLOFF_CACHE_BACKEND による backend 選択)
     local/                                # ★ 各 backend は独立 Go package
       local.go                            # LocalStorage (採用、 ADR-0003)
     # 将来追加候補 ( 初版では実装しない、 各々独立 package で実装):
@@ -681,10 +681,10 @@ internal/lazygen/
     # - script resolver / go-local: 構造的に不要 ( runtime / source 自体が SSoT で drift 概念が無い)
     # - buf: ADR-0006、 外部公開: ADR-0007 で利用者責務に倒した
 
-# 利用者リポジトリ側に作成するファイル ( lazygen 利用時)
-<spec_dir>/lazygen.yml                      # task 定義
-.lazygen/cache/                             # 自動生成される record 群
-.gitattributes                              # .lazygen/cache/** に linguist-generated=true を指定推奨
+# 利用者リポジトリ側に作成するファイル ( sloff 利用時)
+<spec_dir>/sloff.yml                      # task 定義
+.sloff/cache/                             # 自動生成される record 群
+.gitattributes                              # .sloff/cache/** に linguist-generated=true を指定推奨
 ```
 
 #### Resolver / Preflight Checker / Storage backend の package 分割方針

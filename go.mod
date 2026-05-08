@@ -1,4 +1,4 @@
-module github.com/izumin5210/lazygen
+module github.com/izumin5210/sloff
 
 go 1.26.2
 

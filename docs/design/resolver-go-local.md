@@ -6,7 +6,7 @@
 - [Architecture](./architecture.md)
 - [Resolver: script](./resolver-script.md) ( 外部配布 Go ツール側は script resolver で `<bin> --version` を取る)
 - [Resolver: pnpm-local](./resolver-pnpm-local.md) ( pnpm 側の対応物 = workspace 内 内製パッケージ)
-- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) ( go-deps / pnpm-deps 表記の根拠)
+- [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) ( go-deps / pnpm-deps 表記の根拠)
 
 ## Context
 
@@ -25,7 +25,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 ### 取得元
 
-1. spec の top-level `tools:` map で `go-local: <import-path>` 形式で named 定義された tool entry を取得 ( ADR-0008)。 entry は **その tool が定義された `lazygen.yml` の dir** に相対
+1. spec の top-level `tools:` map で `go-local: <import-path>` 形式で named 定義された tool entry を取得 ( ADR-0008)。 entry は **その tool が定義された `sloff.yml` の dir** に相対
 2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存を解析し `Listing{InternalFiles, ExternalModules}` を得る
 3. **InternalFiles → Result.ExtraInputs** に詰めて返す ( runner が task.inputs に union)
 4. **ExternalModules → 1 個ずつ Result.Versions の ToolVersion** に変換して返す
@@ -53,12 +53,12 @@ toolresolver.Result{
 
 ### Dispatch ( declared-only)
 
-go-local resolver は `lazygen.yml` の top-level `tools:` で `go-local: <import-path>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する ( [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md))。
+go-local resolver は `sloff.yml` の top-level `tools:` で `go-local: <import-path>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する ( [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md))。
 
 ```yaml
 tools:
   protoc-gen-foo:
-    go-local: ./cmd/protoc-gen-foo   # この tool 定義を含む lazygen.yml の dir 相対
+    go-local: ./cmd/protoc-gen-foo   # この tool 定義を含む sloff.yml の dir 相対
   go:
     exec: ["go", "version"]
     extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
@@ -86,8 +86,8 @@ import (
     "encoding/hex"
     "errors"
 
-    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
-    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+    "github.com/izumin5210/sloff/internal/sloff/toolresolver"
+    "github.com/izumin5210/sloff/internal/sloff/toolresolver/lister"
 )
 
 const DepsPrefix = "go-deps:"
@@ -133,7 +133,7 @@ func encodeExternalVersion(m lister.ExternalModule) string {
 
 ## SourceLister: `goPackagesLister` (`go/packages` を直接 import)
 
-`goLocalResolver` の標準実装は `goPackagesLister`。 **`golang.org/x/tools/go/packages` パッケージを Go API で直接 import** して in-process で呼び出す。 lazygen バイナリのメモリ空間内で完結し、 `go list` を subprocess で起動するオーバーヘッドがない。
+`goLocalResolver` の標準実装は `goPackagesLister`。 **`golang.org/x/tools/go/packages` パッケージを Go API で直接 import** して in-process で呼び出す。 sloff バイナリのメモリ空間内で完結し、 `go list` を subprocess で起動するオーバーヘッドがない。
 
 ```go
 import "golang.org/x/tools/go/packages"
@@ -220,7 +220,7 @@ for each pkg in transitive(pkgs):
 `go/packages` で正しく取れない構造の Go プロジェクトに対応する場合は、 該当 `goLocalResolver` の `SourceLister` を `globLister` に切り替える:
 
 ```go
-import "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+import "github.com/izumin5210/sloff/internal/sloff/toolresolver/lister"
 
 resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.go"}))
 ```
@@ -229,7 +229,7 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
 
 ### `SourceLister` 共通の挙動
 
-[Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / lazygen バイナリ単体完結等の共通機能。
+[Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / sloff バイナリ単体完結等の共通機能。
 
 ## Preflight Checker は持たない ( Go の install model に由来する構造的理由)
 
@@ -240,8 +240,8 @@ go-local には install drift / build artefact freshness いずれの Checker �
 `go run ./cmd/foo` / `go build` / `go test` は default の `-mod=mod` で「 必要な module を実行時に `$GOMODCACHE` へ on-demand download」 する。 「 利用者が `git pull` で新 `go.mod` / `go.sum` を取り込んだだけで、 `go install deps` を別途走らせていない」 という pnpm 的な状態が **構造上発生しない**:
 
 - 利用者の cmd ( `go run ./cmd/foo`) が実行されると、 必要 module は download or 既存 cache から read される
-- lazygen の `packages.Load` ( `go/packages` 経由) も同じ auto-download 経路を共有
-- → cmd 実行時と lazygen の hash 計算時で必ず同じ install state を見る
+- sloff の `packages.Load` ( `go/packages` 経由) も同じ auto-download 経路を共有
+- → cmd 実行時と sloff の hash 計算時で必ず同じ install state を見る
 
 つまり pnpm-local が抱える「 lockfile を SSoT に取った hash」 vs 「 古い install で動く cmd」 という乖離が **Go では起こりえない**。
 
@@ -255,7 +255,7 @@ go-local には install drift / build artefact freshness いずれの Checker �
 
 ### 副次的: `packages.Load` 自体が install 検証を兼ねる
 
-`packages.Load` を Resolve の中で呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっている。 transitive 依存が download されていなければ Resolve 段階でエラー → lazygen 全体が止まる。 別途 preflight Checker を立てる意味は無い。
+`packages.Load` を Resolve の中で呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっている。 transitive 依存が download されていなければ Resolve 段階でエラー → sloff 全体が止まる。 別途 preflight Checker を立てる意味は無い。
 
 ### pnpm-local との対比
 

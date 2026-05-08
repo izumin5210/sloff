@@ -19,7 +19,7 @@
 
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
 - [ADR-0003: キャッシュレコードのストレージ方式](./0003-record-storage-strategy.md)
-- [Design Doc: lazygen Architecture](../design/architecture.md)
+- [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
 

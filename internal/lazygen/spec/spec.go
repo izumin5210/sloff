@@ -1,4 +1,6 @@
-// Package spec provides parsers for lazygen.yml task specs.
+// Package spec provides parsers for lazygen.yml task specs and the
+// repository-wide tool registry that named tools[] references resolve against
+// (ADR-0008).
 package spec
 
 import (
@@ -7,24 +9,30 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	yaml "github.com/goccy/go-yaml"
 )
 
-// File represents one parsed lazygen.yml file.
+// File represents one parsed lazygen.yml file. Each file may carry tool
+// definitions, command definitions, or both — at least one must be present.
+// Tool names declared here are merged into the repo-wide tool registry by
+// BuildToolRegistry; commands reference tools by name only.
 type File struct {
-	Commands []Command `yaml:"commands"`
+	Tools    map[string]DeclaredTool `yaml:"tools,omitempty"`
+	Commands []Command               `yaml:"commands,omitempty"`
 }
 
-// Command corresponds to one entry in commands[].
+// Command corresponds to one entry in commands[]. Tools is a list of tool
+// names that must resolve to entries in the repo-wide tool registry.
 type Command struct {
-	Cmd     CmdLine        `yaml:"cmd"`
-	Inputs  []string       `yaml:"inputs"`
-	Name    string         `yaml:"name"`
-	Outputs []string       `yaml:"outputs"`
-	Tools   []DeclaredTool `yaml:"tools,omitempty"`
+	Cmd     CmdLine  `yaml:"cmd"`
+	Inputs  []string `yaml:"inputs"`
+	Name    string   `yaml:"name"`
+	Outputs []string `yaml:"outputs"`
+	Tools   []string `yaml:"tools,omitempty"`
 }
 
 // CmdLine is a command-line that may be either a YAML scalar (whitespace-split into args)
@@ -46,18 +54,22 @@ func (c *CmdLine) UnmarshalYAML(b []byte) error {
 	return nil
 }
 
-// DeclaredTool is one entry of a command's tools: list. The resolver is determined by
-// which fields are present in the YAML; for the script resolver an `exec` field is
-// required and `extract` is optional, and for the go-local resolver a `go-local` field
-// names the main package import path.
+// DeclaredTool is one entry of the file-level tools: map. The resolver is
+// determined by which fields are present in the YAML; the three forms are
+// mutually exclusive.
 //
 // Example:
 //
 //	tools:
-//	  - exec: ["buf", "--version"]
-//	  - exec: ["go", "version"]
+//	  buf:
+//	    exec: ["buf", "--version"]
+//	  go-version:
+//	    exec: ["go", "version"]
 //	    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
-//	  - go-local: ./cmd/protoc-gen-foo/...
+//	  protoc-gen-foo:
+//	    go-local: ./cmd/protoc-gen-foo/...
+//	  codegen:
+//	    pnpm-local: '@org/my-codegen'
 type DeclaredTool struct {
 	// Resolver is the resolver name inferred from the YAML shape, e.g. "script".
 	Resolver string
@@ -69,24 +81,30 @@ type DeclaredTool struct {
 	// Entry is the go-local resolver input: the main package import path
 	// (must begin with "./").
 	Entry string
+
+	// PackageName is the pnpm-local resolver input: a workspace package name
+	// (e.g. "@org/my-codegen") that pnpm-lock.yaml registers as an importer.
+	PackageName string
 }
 
 type rawDeclaredTool struct {
-	Exec    []string `yaml:"exec"`
-	Extract string   `yaml:"extract"`
-	GoLocal string   `yaml:"go-local"`
+	Exec      []string `yaml:"exec"`
+	Extract   string   `yaml:"extract"`
+	GoLocal   string   `yaml:"go-local"`
+	PnpmLocal string   `yaml:"pnpm-local"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
 func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	var raw rawDeclaredTool
 	if err := yaml.Unmarshal(b, &raw); err != nil {
-		return fmt.Errorf("tools entry: %w", err)
+		return fmt.Errorf("tool entry: %w", err)
 	}
 	hasExec := len(raw.Exec) > 0
 	hasGoLocal := raw.GoLocal != ""
-	if hasExec && hasGoLocal {
-		return errors.New("tools entry: exec and go-local are mutually exclusive")
+	hasPnpmLocal := raw.PnpmLocal != ""
+	if moreThanOneTrue(hasExec, hasGoLocal, hasPnpmLocal) {
+		return errors.New("tool entry: exec, go-local, and pnpm-local are mutually exclusive")
 	}
 	switch {
 	case hasExec:
@@ -98,18 +116,35 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 		// Spec-relative entries must start with `./` or `../` (or be a bare
 		// `.` / `..`): these forms disambiguate a relative repo path from a
 		// Go module import path and match what `go run` / `go/packages`
-		// accept. Parent-relative paths matter for nested specs that share a
-		// generator with their parent directory (`go run ../cmd/gen`).
+		// accept. Parent-relative paths matter for tools defined in nested
+		// lazygen.yml files that share a generator with their parent.
 		if !isRelativeEntry(raw.GoLocal) {
-			return fmt.Errorf("tools entry: go-local must start with %q or %q (or be %q / %q), got %q",
+			return fmt.Errorf("tool entry: go-local must start with %q or %q (or be %q / %q), got %q",
 				"./", "../", ".", "..", raw.GoLocal)
 		}
 		d.Resolver = "go-local"
 		d.Entry = raw.GoLocal
 		return nil
+	case hasPnpmLocal:
+		d.Resolver = "pnpm-local"
+		d.PackageName = raw.PnpmLocal
+		return nil
 	default:
-		return errors.New("tools entry: required field is missing (supported: exec [+ extract], go-local)")
+		return errors.New("tool entry: required field is missing (supported: exec [+ extract], go-local, pnpm-local)")
 	}
+}
+
+func moreThanOneTrue(bs ...bool) bool {
+	count := 0
+	for _, b := range bs {
+		if b {
+			count++
+			if count > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isRelativeEntry reports whether s is in the spec-relative entry form
@@ -120,7 +155,16 @@ func isRelativeEntry(s string) bool {
 		strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
-// Parse reads a lazygen.yml document and validates the required fields.
+// toolNamePattern is the slug-style regex tool names must match per ADR-0008
+// D4: lower-case letters, digits, hyphens and underscores only. Names like
+// "go-local" and "pnpm-local" themselves match this so spec authors can reuse
+// resolver names as tool names if they want.
+var toolNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// Parse reads a lazygen.yml document and validates the file-level structural
+// rules. Cross-file validation (tool name uniqueness across the repo, task
+// references resolving to defined tools) lives in BuildToolRegistry /
+// ValidateToolReferences and is run on the full Spec set after Discover.
 func Parse(b []byte) (*File, error) {
 	f := &File{}
 	if err := yaml.Unmarshal(b, f); err != nil {
@@ -133,11 +177,28 @@ func Parse(b []byte) (*File, error) {
 }
 
 func validate(f *File) error {
-	if len(f.Commands) == 0 {
-		return errors.New("at least one command is required")
+	if len(f.Tools) == 0 && len(f.Commands) == 0 {
+		return errors.New("lazygen.yml must declare at least one of tools[] or commands[]")
 	}
-	seen := make(map[string]struct{}, len(f.Commands))
-	for i, c := range f.Commands {
+	if err := validateTools(f.Tools); err != nil {
+		return err
+	}
+	return validateCommands(f.Commands)
+}
+
+func validateTools(tools map[string]DeclaredTool) error {
+	for name := range tools {
+		if !toolNamePattern.MatchString(name) {
+			return fmt.Errorf("tools[%q]: name must match %s (lower-case letters, digits, hyphen, underscore)",
+				name, toolNamePattern)
+		}
+	}
+	return nil
+}
+
+func validateCommands(cmds []Command) error {
+	seen := make(map[string]struct{}, len(cmds))
+	for i, c := range cmds {
 		if c.Name == "" {
 			return fmt.Errorf("commands[%d]: name is required", i)
 		}
@@ -150,11 +211,19 @@ func validate(f *File) error {
 		if len(c.Outputs) == 0 {
 			return fmt.Errorf("commands[%d] (%s): outputs is required", i, c.Name)
 		}
+		// tools is required because lazygen mixes resolved tool contributions into
+		// the cache key (ADR-0004 D1). Empty tools means the task has no version
+		// signal at all and stale outputs could be served indefinitely.
 		if len(c.Tools) == 0 {
-			// tools is required because lazygen mixes the resolved tool versions into the
-			// cache key. Without it, upgrading a generator binary cannot invalidate the
-			// cache and stale outputs would be served indefinitely.
 			return fmt.Errorf("commands[%d] (%s): tools is required", i, c.Name)
+		}
+		// Tool-name references are validated against the repo-wide registry by
+		// ValidateToolReferences after Discover; here we just guard against empty
+		// strings sneaking in.
+		for j, name := range c.Tools {
+			if name == "" {
+				return fmt.Errorf("commands[%d] (%s): tools[%d] is empty", i, c.Name, j)
+			}
 		}
 		if _, dup := seen[c.Name]; dup {
 			return fmt.Errorf("duplicate task name %q within the same lazygen.yml", c.Name)

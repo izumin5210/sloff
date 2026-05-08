@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,12 +62,11 @@ type Options struct {
 // Runner executes all discovered specs in topological order with cache lookup and
 // output-comparison invalidation.
 type Runner struct {
-	opts     Options
-	logger   Logger
-	stdout   io.Writer
-	stderr   io.Writer
-	checkers []string            // resolver names of registered preflight checkers (run all in MVP)
-	byKey    map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
+	opts   Options
+	logger Logger
+	stdout io.Writer
+	stderr io.Writer
+	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
 
 	// producedBy maps each resolved output path to the task that produced it. Cross-task
 	// duplicate writes are spec conflicts that depgraph cannot catch on a clean checkout
@@ -92,35 +92,46 @@ func New(opts Options) *Runner {
 	if opts.Clock == nil {
 		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
-	r := &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
-
-	// PR1: run every registered checker. Future PRs will scope by used resolvers.
-	if opts.Preflight != nil {
-		for _, name := range opts.Preflight.Names() {
-			r.checkers = append(r.checkers, name)
-		}
-	}
-	return r
+	return &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
 }
 
 // Run executes preflight then every task. Errors during preflight or task execution
 // abort the run.
 func (r *Runner) Run(ctx context.Context) error {
-	if r.opts.Preflight != nil && len(r.checkers) > 0 {
-		res, err := r.opts.Preflight.Run(ctx, ".", r.checkers)
-		if err != nil {
-			return err
-		}
-		if !res.OK {
-			r.reportPreflightIssues(res.Issues)
-			if !r.opts.ReadOnly {
-				return fmt.Errorf("preflight failed (%d issues); set LAZYGEN_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
-			}
-			r.logger.Warnf("preflight issues ignored due to ReadOnly mode; cache records will not be written")
-		}
+	// ADR-0008: build the repo-wide tool registry once, validate every task's
+	// references resolve to a defined tool, then resolve each *referenced*
+	// tool exactly once. Storing results by name lets collectTasks fan a
+	// tool out across N referencing tasks at zero additional resolver cost.
+	//
+	// We deliberately resolve only the subset of tools that some command
+	// actually references. The registry is repo-wide and may carry catalog-
+	// style definitions whose dependencies aren't installed on this machine
+	// (e.g. a pnpm-local entry for a workspace package missing from the
+	// current checkout); resolving them eagerly would block unrelated tasks
+	// that never use those tools.
+	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	if err != nil {
+		return err
+	}
+	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return err
+	}
+	referencedToolNames := referencedTools(r.opts.Specs)
+
+	// Preflight runs only the checkers whose resolver name matches a tool the
+	// current spec set actually references — same scoping discipline as
+	// resolveReferencedTools below. Catalog tools that no command pulls in
+	// stay inert; their checkers aren't invoked either.
+	if err := r.runPreflight(ctx, registry, referencedToolNames); err != nil {
+		return err
 	}
 
-	tasks, err := r.collectTasks()
+	resolved, err := r.resolveReferencedTools(ctx, registry, referencedToolNames)
+	if err != nil {
+		return err
+	}
+
+	tasks, err := r.collectTasks(resolved)
 	if err != nil {
 		return err
 	}
@@ -141,6 +152,111 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// runPreflight invokes only the registered Checkers whose names match a
+// resolver actually pulled in by some command in this run. Scoping by
+// referenced resolver names keeps catalog-style tool registries lean: a
+// pnpm-local Checker shouldn't run (and shouldn't fail) when no command
+// uses pnpm-local at all.
+//
+// Drift-style failures arrive as preflight.Issue entries; the runner
+// reports them and either aborts (the default) or, when ReadOnly is set
+// via LAZYGEN_ALLOW_STALE_DEPS, degrades to read-only so cache records
+// are not written for a known-suspect run. Hard errors from a checker
+// (the check itself couldn't execute) bypass the read-only fall-through
+// and fail the run regardless.
+func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) error {
+	if r.opts.Preflight == nil {
+		return nil
+	}
+	checkers := scopeCheckers(r.opts.Preflight.Names(), registry, referencedToolNames)
+	if len(checkers) == 0 {
+		return nil
+	}
+	res, err := r.opts.Preflight.Run(ctx, ".", checkers)
+	if err != nil {
+		return err
+	}
+	if !res.OK {
+		r.reportPreflightIssues(res.Issues)
+		if !r.opts.ReadOnly {
+			return fmt.Errorf("preflight failed (%d issues); set LAZYGEN_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
+		}
+		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; cache records will not be written")
+	}
+	return nil
+}
+
+// scopeCheckers intersects the registered Checker names with the resolver
+// names referenced by any command in this run. The resolver/checker pairing
+// is by Name (architecture.md), so a referenced tool whose Declared.Resolver
+// is "pnpm-local" pulls in the "pnpm-local" Checker if one exists.
+func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, referencedToolNames []string) []string {
+	if len(checkerNames) == 0 {
+		return nil
+	}
+	usedResolvers := map[string]struct{}{}
+	for _, toolName := range referencedToolNames {
+		if entry, ok := registry.Lookup(toolName); ok {
+			usedResolvers[entry.Declared.Resolver] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(checkerNames))
+	for _, name := range checkerNames {
+		if _, ok := usedResolvers[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// resolveReferencedTools invokes the toolresolver registry once per name in
+// referenced and returns a name → Result map. specDir for each invocation is
+// the dir where the tool was *defined* (ADR-0008 D3), not where it's
+// referenced from, so tool definitions stay self-contained relative to their
+// host lazygen.yml.
+//
+// Names not in the registry have already been rejected by
+// ValidateToolReferences, so this loop assumes every name resolves; a missing
+// entry would indicate a programmer error elsewhere and we surface it as
+// such rather than silently dropping the contribution.
+func (r *Runner) resolveReferencedTools(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string]toolresolver.Result, error) {
+	out := make(map[string]toolresolver.Result, len(referenced))
+	for _, name := range referenced {
+		entry, ok := registry.Lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
+		}
+		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+		res, err := r.opts.Resolvers.Resolve(ctx, entry.SpecDir, nil, declared)
+		if err != nil {
+			return nil, fmt.Errorf("resolve tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+		}
+		out[entry.Name] = res
+	}
+	return out, nil
+}
+
+// referencedTools collects the deduplicated, sorted set of tool names any
+// command in specs references. Tools defined in the registry but never
+// referenced are intentionally absent so the runner doesn't pay (or fail on)
+// their resolver cost.
+func referencedTools(specs []spec.Spec) []string {
+	seen := map[string]struct{}{}
+	for _, sp := range specs {
+		for _, c := range sp.File.Commands {
+			for _, name := range c.Tools {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // taskInfo carries the bits of spec.Command needed to execute it. Stored on the depgraph.Task
 // via the SpecRelpath/Name key — we look it back up by key when executing.
 type taskInfo struct {
@@ -148,10 +264,18 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
+	// resolverResult is computed once per task during collectTasks so depgraph
+	// sees resolver-contributed extra inputs (e.g. pnpm-local pulls workspace
+	// tool sources) and runTask can hash without re-running the resolver.
+	resolverResult toolresolver.Result
 }
 
-// collectTasks expands inputs/outputs for every spec command and returns the depgraph.Task slice.
-func (r *Runner) collectTasks() ([]depgraph.Task, error) {
+// collectTasks expands inputs/outputs for every spec command and folds each
+// task's referenced tools' contributions (from the pre-resolved per-tool
+// cache) into the task's input set. Folding extras in here is what lets
+// depgraph wire up workspace-tool build tasks to their consumers via the
+// usual output-overlap rule, instead of needing a parallel dependency channel.
+func (r *Runner) collectTasks(resolved map[string]toolresolver.Result) ([]depgraph.Task, error) {
 	r.byKey = map[string]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
@@ -164,33 +288,81 @@ func (r *Runner) collectTasks() ([]depgraph.Task, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s/%s: expand outputs: %w", sp.Dir, c.Name, err)
 			}
+
+			combined := combineToolResults(c.Tools, resolved)
+			mergedInputs := mergeInputs(inputs, combined.ExtraInputs)
+
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
 				Name:        c.Name,
-				Inputs:      inputs,
+				Inputs:      mergedInputs,
 				Outputs:     outputs,
 			}
 			tasks = append(tasks, t)
 			r.byKey[depgraphKey(t)] = taskInfo{
 				specRelpath:    sp.Dir,
 				command:        c,
-				inputPaths:     inputs,
+				inputPaths:     mergedInputs,
 				outputPatterns: c.Outputs,
+				resolverResult: combined,
 			}
 		}
 	}
 	return tasks, nil
 }
 
+// combineToolResults concatenates Versions and ExtraInputs in the order tools
+// appear in the spec's tools[] list, mirroring the previous inline behaviour
+// where dispatch order followed declaration order. ValidateToolReferences has
+// already guaranteed every name resolves, so a missing entry here is a
+// programmer error and we panic to surface it loudly during tests.
+func combineToolResults(names []string, resolved map[string]toolresolver.Result) toolresolver.Result {
+	var combined toolresolver.Result
+	for _, name := range names {
+		r, ok := resolved[name]
+		if !ok {
+			panic(fmt.Sprintf("runner: tool %q missing from resolved registry; ValidateToolReferences should have caught this", name))
+		}
+		combined.Versions = append(combined.Versions, r.Versions...)
+		combined.ExtraInputs = append(combined.ExtraInputs, r.ExtraInputs...)
+	}
+	return combined
+}
+
+// mergeInputs returns the deduplicated, sorted union of declared and extra
+// input paths. Extras are normalised to OS-native form so they compare equal
+// to glob.Expand output, which uses the OS separator.
+func mergeInputs(declared, extra []string) []string {
+	if len(extra) == 0 {
+		return declared
+	}
+	seen := make(map[string]struct{}, len(declared)+len(extra))
+	out := make([]string, 0, len(declared)+len(extra))
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, p := range declared {
+		add(p)
+	}
+	for _, p := range extra {
+		add(filepath.FromSlash(p))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Name }
 
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	info := r.byKey[depgraphKey(t)]
-
-	versions, err := r.opts.Resolvers.Resolve(ctx, info.specRelpath, info.command.Cmd, declaredFromSpec(info.command.Tools))
-	if err != nil {
-		return fmt.Errorf("%s: resolve tools: %w", t.Name, err)
-	}
+	versions := info.resolverResult.Versions
 
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
@@ -328,20 +500,18 @@ func (r *Runner) reportPreflightIssues(issues []preflight.Issue) {
 
 // Helpers ------------------------------------------------------------------
 
-func declaredFromSpec(tools []spec.DeclaredTool) []toolresolver.DeclaredTool {
-	if len(tools) == 0 {
-		return nil
+// toolresolverDeclared bridges spec.DeclaredTool (the YAML-parsed shape) to
+// toolresolver.DeclaredTool (the resolver dispatch shape). The two types stay
+// separate so the spec package doesn't depend on toolresolver, but the field
+// set is structurally identical.
+func toolresolverDeclared(t spec.DeclaredTool) toolresolver.DeclaredTool {
+	return toolresolver.DeclaredTool{
+		Resolver:    t.Resolver,
+		Exec:        t.Exec,
+		Extract:     t.Extract,
+		Entry:       t.Entry,
+		PackageName: t.PackageName,
 	}
-	out := make([]toolresolver.DeclaredTool, len(tools))
-	for i, t := range tools {
-		out[i] = toolresolver.DeclaredTool{
-			Resolver: t.Resolver,
-			Exec:     t.Exec,
-			Extract:  t.Extract,
-			Entry:    t.Entry,
-		}
-	}
-	return out
 }
 
 func versionStrings(versions []toolresolver.ToolVersion) []string {

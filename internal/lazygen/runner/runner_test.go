@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,11 +16,13 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
+	preflightpnpm "github.com/izumin5210/lazygen/internal/lazygen/preflight/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/golocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
+	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver/script"
 )
 
@@ -76,11 +79,35 @@ func setupHarness(t *testing.T, name string) *harness {
 	if err := os.CopyFS(workdir, os.DirFS(initial)); err != nil {
 		t.Fatalf("copy initial: %v", err)
 	}
+	// pnpm-local enumerates source files via `git ls-files`; non-pnpm cases
+	// don't care, so we git-init every harness unconditionally rather than
+	// branch on fixture content. The init is also configured with a
+	// deterministic identity so any incidental `git add` (none today) would
+	// not need ambient user config.
+	gitInitWorkdir(t, workdir)
 	return &harness{
 		t:           t,
 		caseDir:     caseDir,
 		workdir:     workdir,
 		expectedDir: filepath.Join(caseDir, "expected"),
+	}
+}
+
+func gitInitWorkdir(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available, skipping git-backed E2E: %v", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "lazygen-test@example.com"},
+		{"config", "user.name", "lazygen-test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
 }
 
@@ -96,12 +123,19 @@ func runStep() step {
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
 		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
+		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles)
+		if err != nil {
+			t.Fatalf("pnpmlocal.New: %v", err)
+		}
+		resolverReg.Register(pnpmRes)
+		preflightReg := preflight.NewRegistry()
+		preflightReg.Register(preflightpnpm.New(h.workdir))
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
 			Storage:   local.New(h.workdir),
 			Resolvers: resolverReg,
-			Preflight: preflight.NewRegistry(),
+			Preflight: preflightReg,
 			Clock:     func() time.Time { return fixedClock },
 		})
 		if err := r.Run(context.Background()); err != nil {
@@ -153,7 +187,8 @@ func (h *harness) assertExpected(t *testing.T) {
 }
 
 // readTree returns a map[forward-slash relpath]string-content for every regular file under
-// root. Symlinks are not followed; directories are implied by their entries.
+// root. Symlinks are not followed; the .git directory is skipped because the harness git-
+// inits the workdir for git ls-files but the goldens shouldn't capture that bookkeeping.
 func readTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -161,6 +196,9 @@ func readTree(root string) (map[string]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(root, p)
@@ -181,8 +219,7 @@ func readTree(root string) (map[string]string, error) {
 }
 
 // mirrorTree copies all regular files (not symlinks) from src into dst, creating dst and
-// any necessary subdirectories. Existing dst contents are not deleted; callers should
-// remove dst beforehand if they want a clean snapshot.
+// any necessary subdirectories. The .git directory is skipped (see readTree).
 func mirrorTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -194,6 +231,9 @@ func mirrorTree(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return os.MkdirAll(target, 0o755)
 		}
 		b, err := os.ReadFile(p)
@@ -228,14 +268,17 @@ func TestRunner_ToolVersionBumpInvalidates(t *testing.T) {
 	runE2E(
 		t, "tool-version-bump-invalidates",
 		runStep(),
-		writeStep("spec/lazygen.yml", `commands:
+		writeStep("spec/lazygen.yml", `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v2.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: copy
     cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
     inputs: ["input.txt"]
     outputs: ["output.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v2.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `),
 		runStep(),
 	)
@@ -316,6 +359,40 @@ func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
 	runE2E(t, "golocal-nested-spec", runStep())
 }
 
+// pnpmLocalGeneratorV2 flips the source content the esbuild lister hashes.
+// It is dropped into packages/codegen/dist/lib.js so the tools_hash changes
+// even though input.txt and the cmd are unchanged.
+const pnpmLocalGeneratorV2 = "export const helper = 'v2';\n"
+
+func TestRunner_PnpmLocal_FirstRunWritesRecord(t *testing.T) {
+	runE2E(t, "pnpmlocal-first-run-writes-record", runStep())
+}
+
+func TestRunner_PnpmLocal_SecondRunHits(t *testing.T) {
+	runE2E(t, "pnpmlocal-second-run-hits", runStep(), runStep())
+}
+
+// TestRunner_PnpmLocal_SourceChangeInvalidates is the pnpm-local equivalent
+// of the go-local source-change test: editing a transitive source file in
+// the workspace package must flip tools_hash and trigger re-execution.
+func TestRunner_PnpmLocal_SourceChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "pnpmlocal-source-change-invalidates",
+		runStep(),
+		writeStep("packages/codegen/dist/lib.js", pnpmLocalGeneratorV2),
+		runStep(),
+	)
+}
+
+func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
+	runE2E(
+		t, "pnpmlocal-input-change-invalidates",
+		runStep(),
+		writeStep("input.txt", "world\n"),
+		runStep(),
+	)
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and
@@ -329,14 +406,17 @@ func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: writes-nothing
     cmd: ["sh", "-c", "true"]
     inputs: ["input.txt"]
     outputs: ["output.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)
@@ -386,21 +466,22 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: first
     cmd: ["sh", "-c", "cp input.txt shared.txt"]
     inputs: ["input.txt"]
     outputs: ["shared.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
   - name: second
     cmd: ["sh", "-c", "cp input.txt shared.txt"]
     inputs: ["input.txt"]
     outputs: ["shared.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)
@@ -432,6 +513,291 @@ func TestRunner_DuplicateProducerAtRuntimeErrors(t *testing.T) {
 	}
 }
 
+// TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing guards the drift
+// preflight end to end: when a task references a pnpm-local tool but
+// node_modules/.pnpm/lock.yaml is missing (pnpm install was never run
+// against this checkout), the runner aborts before any cmd executes.
+// Without the abort, the resolver would hand the cmd a stale-install cache
+// key and silent stale outputs would propagate.
+func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */)
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when node_modules/.pnpm/lock.yaml is missing")
+	}
+	if !strings.Contains(err.Error(), "preflight failed") {
+		t.Errorf("error should mention preflight failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "LAZYGEN_ALLOW_STALE_DEPS") {
+		t.Errorf("error should mention the bypass env var, got: %v", err)
+	}
+}
+
+// TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch covers the
+// LAZYGEN_ALLOW_STALE_DEPS=1 path: drift surfaces as a preflight Issue but
+// the runner continues in read-only mode (cache records are not written).
+// This is the existing preflight escape hatch; pnpm-local's drift checker
+// inherits it by virtue of going through the preflight subsystem instead of
+// failing inside the resolver.
+func TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	r := newPnpmDriftRunner(t, workdir, specs, true /* readOnly */)
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("expected drift to degrade to read-only under LAZYGEN_ALLOW_STALE_DEPS, got: %v", err)
+	}
+	cacheDir := filepath.Join(workdir, ".lazygen", "cache")
+	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
+		t.Errorf("read-only mode must not write cache records, got: %v", entries)
+	}
+}
+
+// setupPnpmDriftFixture materialises a minimal repo that uses a pnpm-local
+// tool, with or without a matching install snapshot. installInSync=false
+// leaves node_modules/.pnpm/lock.yaml absent so AssertInstallInSync fails;
+// true mirrors pnpm-lock.yaml into it so the drift check passes.
+func setupPnpmDriftFixture(t *testing.T, installInSync bool) (string, []spec.Spec) {
+	t.Helper()
+	workdir := t.TempDir()
+	gitInitWorkdir(t, workdir)
+	write := func(rel, contents string) {
+		full := filepath.Join(workdir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const lockfile = `lockfileVersion: '9.0'
+importers:
+  packages/codegen: {}
+`
+	write("pnpm-lock.yaml", lockfile)
+	write("package.json", `{"name":"monorepo-root","private":true}`)
+	write("packages/codegen/package.json", `{"name":"@org/codegen"}`)
+	write("input.txt", "hello")
+	write("lazygen.yml", `tools:
+  codegen:
+    pnpm-local: "@org/codegen"
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [codegen]
+`)
+	if installInSync {
+		write("node_modules/.pnpm/lock.yaml", lockfile)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	return workdir, specs
+}
+
+// newPnpmDriftRunner wires the pnpm-local resolver and preflight checker
+// the same way the production CLI does, so the drift-detection paths get
+// exercised end to end.
+func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnly bool) *runner.Runner {
+	t.Helper()
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	pnpmRes, err := pnpmlocal.New(workdir, pnpmlocal.GitLsFiles)
+	if err != nil {
+		t.Fatalf("pnpmlocal.New: %v", err)
+	}
+	resolverReg.Register(pnpmRes)
+	preflightReg := preflight.NewRegistry()
+	preflightReg.Register(preflightpnpm.New(workdir))
+	return runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflightReg,
+		ReadOnly:  readOnly,
+		Clock:     func() time.Time { return fixedClock },
+	})
+}
+
+// TestRunner_UnreferencedBrokenToolDoesNotBlockOtherTasks guards that the
+// pre-resolve pass scopes itself to tools commands actually reference. A
+// catalog-style repo can declare tools whose dependencies are absent on the
+// current machine (a pnpm-local entry whose workspace package isn't in this
+// checkout, a script tool not installed locally); resolving them eagerly
+// would fail the run for unrelated tasks. The test installs a script tool
+// that exits non-zero — but no command references it — and expects the run
+// to succeed for the task that uses a different, healthy tool.
+func TestRunner_UnreferencedBrokenToolDoesNotBlockOtherTasks(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(`tools:
+  healthy:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  broken:
+    exec: ["sh", "-c", "exit 7"]
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [healthy]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run must succeed when broken tool is unreferenced, got: %v", err)
+	}
+}
+
+// TestRunner_DuplicateToolNameAcrossSpecsErrors guards the ADR-0008 D2
+// invariant: tool names live in a flat repo-wide namespace, so two
+// lazygen.yml files defining the same name must fail the run with both
+// definition sites named — silently picking one would diverge cache results
+// from what the user wrote.
+func TestRunner_DuplicateToolNameAcrossSpecsErrors(t *testing.T) {
+	workdir := t.TempDir()
+	for _, dir := range []string{"a", "b"} {
+		full := filepath.Join(workdir, dir)
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(full, "input.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "a", "lazygen.yml"), []byte(`tools:
+  shared:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+commands:
+  - name: a
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [shared]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "b", "lazygen.yml"), []byte(`tools:
+  shared:
+    exec: ["sh", "-c", "echo v2.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+commands:
+  - name: b
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [shared]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error on duplicate tool name across specs")
+	}
+	for _, want := range []string{"shared", "a/lazygen.yml", "b/lazygen.yml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestRunner_UndefinedToolReferenceErrors catches the case a task references
+// a tool name that no lazygen.yml declared. ADR-0008 requires this to fail
+// at validation time rather than silently produce empty contributions.
+func TestRunner_UndefinedToolReferenceErrors(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(`commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [missing-tool]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error on undefined tool reference")
+	}
+	for _, want := range []string{"missing-tool", "gen", "spec/lazygen.yml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
 // TestRunner_PartialOutputPatternsAllowed verifies that a generator that produces some
 // declared output patterns but leaves others empty (e.g. a conditional artifact) is
 // treated as a successful run. The union safeguard only fails when no declared pattern
@@ -445,14 +811,17 @@ func TestRunner_PartialOutputPatternsAllowed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	yml := `commands:
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
   - name: partial
     cmd: ["sh", "-c", "cp input.txt produced.txt"]
     inputs: ["input.txt"]
     outputs: ["produced.txt", "optional/*.txt"]
-    tools:
-      - exec: ["sh", "-c", "echo v1.0.0"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [versioner]
 `
 	if err := os.WriteFile(filepath.Join(specDir, "lazygen.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)

@@ -1,17 +1,23 @@
 # Resolver: go-local
 
-`goLocalResolver` はリポジトリ内に実装された **内製 Go CLI** (`go run ./cmd/...` 形式や repo local main package) の論理 version を解決する。
+`goLocalResolver` はリポジトリ内に実装された **内製 Go CLI** (`go run ./cmd/...` 形式や repo local main package) を扱う。 SemVer を持たないため、 ツールを構成するソース集合と外部 module の resolved version を 2 経路で task の cache key に流し込む。
 
 関連:
 - [Architecture](./architecture.md)
 - [Resolver: script](./resolver-script.md) ( 外部配布 Go ツール側は script resolver で `<bin> --version` を取る)
 - [Resolver: pnpm-local](./resolver-pnpm-local.md) ( pnpm 側の対応物 = workspace 内 内製パッケージ)
+- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) ( go-deps / pnpm-deps 表記の根拠)
 
 ## Context
 
-Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ツールを構成するソースファイル全集合の hash** を論理 version 文字列として用いる。
+Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ソースファイル + 依存 module 集合** から導出した識別子を cache key に渡す。
 
-「内製ソース ( = `local`)」という意味では [pnpm-local](./resolver-pnpm-local.md) の対応物。 「Go ecosystem の repo local main package」と「pnpm ecosystem の workspace 内 local package」が概念的に対をなす。 外部配布 ( aqua / `go tool` 経由) のツールは [script resolver](./resolver-script.md) で `<bin> --version` を直接取るアプローチに統一されている。
+「内製ソース ( = `local`)」 という意味では [pnpm-local](./resolver-pnpm-local.md) と対応物の関係。 両 resolver は同じ shape の Result を返す:
+
+- **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 これにより depgraph が「 main module 内の Go ファイルを生成する upstream codegen task」 を output overlap で自動検知し、 go-local task との依存 edge を貼る ( pnpm-local が build task を自動連鎖する仕組みと同じ)
+- **外部 Go module** は `go-deps:<path>@<version>+sum:<go.sum-hash>` 形式の **ToolVersion** として tools_hash に流れる。 module bump / go.sum drift で必ず invalidate される
+
+外部配布 ( aqua / `go tool` 経由) の OSS ツールは [script resolver](./resolver-script.md) で `<bin> --version` を取るアプローチに統一されている ( ADR-0007)。
 
 ソースファイル列挙には Resolver 内部 helper の `SourceLister` を使う。 標準実装は **`golang.org/x/tools/go/packages` の Go API を直接 import した `goPackagesLister`** で、 entry main package から transitive な依存解析で関係する `.go` ファイルのみを抽出する。
 
@@ -19,26 +25,55 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 ### 取得元
 
-1. cmd から main package の import path を判定 (`go run ./cmd/foo/...` なら `./cmd/foo/...`、 build 済み binary なら spec で明示宣言)
-2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存ファイル全集合を取得
-3. 内部コード / 外部パッケージで戦略を分けて hash ( 後述)
+1. spec の top-level `tools:` map で `go-local: <import-path>` 形式で named 定義された tool entry を取得 ( ADR-0008)。 entry は **その tool が定義された `lazygen.yml` の dir** に相対
+2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存を解析し `Listing{InternalFiles, ExternalModules}` を得る
+3. **InternalFiles → Result.ExtraInputs** に詰めて返す ( runner が task.inputs に union)
+4. **ExternalModules → 1 個ずつ Result.Versions の ToolVersion** に変換して返す
 
-### 論理 version 文字列の形式
+### Result の形式
 
+```go
+toolresolver.Result{
+    ExtraInputs: []string{
+        "cmd/foo/main.go",
+        "internal/util/util.go",
+        ...   // main module / repo-local replace の .go / 埋め込み / .s 等を含む
+    },
+    Versions: []toolresolver.ToolVersion{
+        {Name: "example.com/dep",   Source: "go-local:./cmd/foo", Version: "go-deps:example.com/dep@v1.0.0+sum:<sha>"},
+        {Name: "example.com/other", Source: "go-local:./cmd/foo", Version: "go-deps:example.com/other@v2.0.0+sum:<sha>"},
+        ...
+    },
+}
 ```
-"go-local:<main-package-path>@sha256:<hex>"
-```
 
-例: `"go-local:./cmd/protoc-gen-foo@sha256:abcd1234..."`
+`<sha>` は go.sum 行 ( `<path> <version> h1:...` 等) を SHA-256 した hex。 これにより同じ path@version でも go.sum の bytes が変われば ToolVersion が変わる ( 公式 Go 配布 + tampered mirror の食い違いを cache が検知できる)。
+
+旧版 ( PR の初期実装) は内部コード + 外部 module を 1 つの sha256 に詰めて `go-local:<entry>@sha256:<hex>` 形式の ToolVersion 1 本を返していたが、 現行は ExtraInputs / ToolVersion に分離している。 動機は [pnpm-local](./resolver-pnpm-local.md) と shape を揃えること、 および codegen → go-local の依存を depgraph に自動検知させること。
 
 ### Dispatch ( declared-only)
 
-go-local resolver は spec の `tools: [{go-local: <import-path>}]` で明示宣言された場合にのみ起動する ([ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md))。
+go-local resolver は `lazygen.yml` の top-level `tools:` で `go-local: <import-path>` 形式 named 定義され、 task の `tools: [name]` で参照された場合にのみ起動する ( [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md))。
 
-- `tools: [{go-local: ./cmd/protoc-gen-foo}]` のように entry を明示する。 entry は spec dir 相対 ( `./` / `../` 始まり、 または bare `.` / `..`)。 nested spec が parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
-- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の宣言を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
-- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に declared を併記する
-- 同じ cmd で go-local 以外の resolver も使いたい場合 ( 例: Go toolchain 自体の bump も captureしたい) は `tools:` に複数 entry を書く: `tools: [{go-local: ./cmd/protoc-gen-foo}, {exec: ["go", "version"], extract: '...'}]`
+```yaml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo   # この tool 定義を含む lazygen.yml の dir 相対
+  go:
+    exec: ["go", "version"]
+    extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
+
+commands:
+  - name: gen
+    cmd: ["go", "run", "./cmd/protoc-gen-foo"]
+    inputs: ["**/*.proto"]
+    outputs: ["**/*.pb.go"]
+    tools: [protoc-gen-foo, go]   # Go toolchain bump も併せて取りたい場合は go も並べる
+```
+
+- entry は `./` / `../` 始まり、 または bare `.` / `..`。 nested 配置で parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
+- `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の named 定義 + 参照を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
+- build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に named 参照を併記する
 
 ### Resolver 実装イメージ
 
@@ -47,6 +82,7 @@ package golocal
 
 import (
     "context"
+    "crypto/sha256"
     "encoding/hex"
     "errors"
 
@@ -54,35 +90,44 @@ import (
     "github.com/izumin5210/lazygen/internal/lazygen/toolresolver/lister"
 )
 
+const DepsPrefix = "go-deps:"
+
 type Resolver struct {
     repoRoot string
     lister   lister.SourceLister // DI: 標準は goPackagesLister
 }
 
-func New(repoRoot string, l lister.SourceLister) toolresolver.Resolver {
-    return &Resolver{repoRoot: repoRoot, lister: l}
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
+    if declared == nil || declared.Entry == "" {
+        return toolresolver.Result{}, errors.New("go-local: declared entry is required")
+    }
+    listing, err := r.lister.List(ctx, specDir, declared.Entry)
+    if err != nil {
+        return toolresolver.Result{}, err
+    }
+
+    versions := make([]toolresolver.ToolVersion, 0, len(listing.ExternalModules))
+    for _, m := range listing.ExternalModules {
+        versions = append(versions, toolresolver.ToolVersion{
+            Name:    m.Path,
+            Source:  "go-local:" + declared.Entry,
+            Version: encodeExternalVersion(m), // "go-deps:<path>@<version>+sum:<sha>"
+        })
+    }
+
+    return toolresolver.Result{
+        Versions:    versions,
+        ExtraInputs: listing.InternalFiles, // files_hash 経由で content 反映
+    }, nil
 }
 
-func (r *Resolver) Name() string { return "go-local" }
-
-func (r *Resolver) Resolve(ctx context.Context, specDir string, cmd []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
-    if declared == nil || declared.Entry == "" {
-        return nil, errors.New("go-local: declared entry is required")
+func encodeExternalVersion(m lister.ExternalModule) string {
+    label := DepsPrefix + m.Path + "@" + m.Version
+    if m.GoSumLine == "" {
+        return label
     }
-    entry := declared.Entry // spec dir 相対 ( "./cmd/foo")
-    // SourceLister は specDir を受け取り <repoRoot>/<specDir> を作業ディレクトリとして
-    // entry を評価する。 こうすることで複数 Go module を含む monorepo でも、
-    // spec の隣にある go.mod を参照して `go run ./cmd/foo` と同じ解決ができる。
-    files, err := r.lister.List(ctx, specDir, entry)
-    if err != nil {
-        return nil, err
-    }
-    sum := hashFiles(files) // 内部/外部分離戦略で計算 ( 後述)
-    return []toolresolver.ToolVersion{{
-        Name:    entry,
-        Version: "go-local:" + entry + "@sha256:" + hex.EncodeToString(sum),
-        Source:  "go-local:" + entry,
-    }}, nil
+    sum := sha256.Sum256([]byte(m.GoSumLine))
+    return label + "+sum:" + hex.EncodeToString(sum[:])
 }
 ```
 
@@ -110,11 +155,16 @@ pkgs, err := packages.Load(cfg, "./cmd/protoc-gen-foo/...")
 
 探索範囲を **per-task の対象 main package とその transitive 依存** に限定する (`./cmd/protoc-gen-foo/...` の形)。 monorepo 全体に対する解析 (`./...`) は CLI 計測で約 7.5 秒 (`3.10s user 5.38s system 112% cpu 7.526 total`) と重く、 task ごとに必要な範囲を遥かに超えるため使わない。
 
-### hash 計算は内部コードと外部パッケージで戦略を分ける
+### hash 経路は内部コードと外部パッケージで分離する
 
-transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOMODCACHE` 配下の外部 package のソース」の 2 種類が含まれる。 両者を一律にファイル本体 SHA256 すると、 外部 module の minor bump で何百ものファイルを再 hash することになり性能が悪い。 また go.mod 全体の transitive 変更 ( 例: 一般的な ライブラリ依存 module の patch bump) を「該当 module 内の全 .go ファイル」を読んで反映する必要もない ( go.sum で内容が暗号学的に保証されているため)。
+transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOMODCACHE` 配下の外部 module のソース」の 2 種類が含まれる。 両者を一律にファイル本体 SHA256 すると、 外部 module の minor bump で何百ものファイルを再 hash することになり性能が悪い。 また go.mod 全体の transitive 変更 ( 例: 一般的な ライブラリ依存 module の patch bump) を「該当 module 内の全 .go ファイル」を読んで反映する必要もない ( go.sum で内容が暗号学的に保証されているため)。
 
-そこで戦略を 2 つに分ける:
+そこで Listing から:
+
+- **InternalFiles** ( 内部コード) → ExtraInputs として task の inputs に union → files_hash 経路 ( runner が content hash)
+- **ExternalModules** ( 外部 module) → 個別 ToolVersion として tools_hash 経路 ( go.sum 行 sha256 + path@version で識別)
+
+判定戦略は以下のとおり:
 
 | 種別 | 判定 | hash 入力 |
 |---|---|---|
@@ -129,7 +179,7 @@ for each pkg in transitive(pkgs):
     if pkg.Module == nil {
         // stdlib: ファイル本体は hash しない ( $GOROOT 配下の絶対 path が
         // OS 横断キャッシュを破壊するため)。 Go toolchain bump は
-        // tools: [{exec: ["go", "version"], extract: ...}] を併記して捕捉する。
+        // tools: [go] ( go: { exec: ["go", "version"], extract: ... }) を併記して捕捉する。
     } else if pkg.Module.Main {
         // 内部コード: ファイル本体を hash。 GoFiles + EmbedFiles ( //go:embed 対象)
         // + IgnoredFiles ( 別 GOOS / build-tag のため現 build context で除外
@@ -163,7 +213,7 @@ for each pkg in transitive(pkgs):
 - go.sum で「version → 中身」が暗号学的に保証されているため、 「version + go.sum hash」が「中身全 hash」と等価な強度を持つ
 - 内部コードは細かい変更にも敏感 ( `_test.go` 除外以外は普通の hash 戦略)
 - 内部コードに `IgnoredFiles` を含めることで、 host の GOOS / GOARCH / build-tag 状態に依存せず同一 hash になる ( 別 OS の CI で計算しても同じ digest)
-- stdlib は hash から除外。 Go toolchain bump を捕捉したい場合は spec 側で `tools: [{exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'}]` のような script resolver 宣言を併記する
+- stdlib は hash から除外。 Go toolchain bump を捕捉したい場合は spec の `tools:` map に `go: { exec: ["go", "version"], extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?' }` のような script tool を併設して、 task 側で `tools: [..., go]` と並べる
 
 ### `globLister` への retreat
 
@@ -181,25 +231,35 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
 
 [Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / lazygen バイナリ単体完結等の共通機能。
 
-## Preflight Checker
+## Preflight Checker は持たない ( Go の install model に由来する構造的理由)
 
-`goLocalChecker` は `go/packages` での解析が完走するかで install 状態を間接的に検証する。
+go-local には install drift / build artefact freshness いずれの Checker も置いていない。 これは「 必要なのに省略している」 のではなく、 **Go の install model が drift を構造的に作らない** ため。
 
-### 検証内容
+### Go は別途 install ステップを持たない ( on-demand download)
 
-`go list -deps -json ./<main_package>/...` ( in-process で `packages.Load`) がエラー無く完走するかを確認する。 transitive 依存が `$GOMODCACHE` に存在しないと `packages.Load` がエラーを返すため、 これを代理シグナルにする。 script resolver は preflight を持たないため、 Go toolchain 自体の install 状態 ( e.g., `go` が `$PATH` 上に居るか) は本 Checker と script resolver 実行時のエラーで間接検出する。
+`go run ./cmd/foo` / `go build` / `go test` は default の `-mod=mod` で「 必要な module を実行時に `$GOMODCACHE` へ on-demand download」 する。 「 利用者が `git pull` で新 `go.mod` / `go.sum` を取り込んだだけで、 `go install deps` を別途走らせていない」 という pnpm 的な状態が **構造上発生しない**:
 
-### 不整合検出時
+- 利用者の cmd ( `go run ./cmd/foo`) が実行されると、 必要 module は download or 既存 cache から read される
+- lazygen の `packages.Load` ( `go/packages` 経由) も同じ auto-download 経路を共有
+- → cmd 実行時と lazygen の hash 計算時で必ず同じ install state を見る
 
-lazygen を即時 fail させ、 stderr に以下を表示:
+つまり pnpm-local が抱える「 lockfile を SSoT に取った hash」 vs 「 古い install で動く cmd」 という乖離が **Go では起こりえない**。
 
-```
-go-local: ./cmd/protoc-gen-foo の transitive 依存解析に失敗
-  no required module provides package ...
-  please run: go mod download
-```
+### エッジケース ( vendor / readonly / proxy off) も silent stale にはならない
 
-`packages.Load` を呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっており、 別途 preflight Checker を立てる必要は無い。
+- `GOFLAGS=-mod=readonly`: download 禁止モード。 必要 module 不在なら `go run` が **早期 fail**
+- `GOFLAGS=-mod=vendor` / `vendor/` ディレクトリあり: `vendor/` を SSoT に。 ただし `go mod vendor` で `go.mod` と sync する運用を破ると `go build` が「 vendor の状態が go.mod と合わない」 で **早期 fail**
+- `GOPROXY=off`: cache miss なら **早期 fail**
+
+いずれも「 fail-loudly か正しく動く」 のいずれかで、 silent stale に倒れない。 この性質は ADR-0007 で script resolver について書いた「 runtime バイナリの `--version` を取れば lockfile vs install drift が SSoT を runtime に置いた時点で構造的に発生しない」 と同じ構造で、 Go の場合は cmd ( `go run` 等) 自体が runtime SSoT として振る舞っている。
+
+### 副次的: `packages.Load` 自体が install 検証を兼ねる
+
+`packages.Load` を Resolve の中で呼ぶことそのものが実 build 経路 ( `$GOMODCACHE` 整備 + module graph 解決) の存在確認になっている。 transitive 依存が download されていなければ Resolve 段階でエラー → lazygen 全体が止まる。 別途 preflight Checker を立てる意味は無い。
+
+### pnpm-local との対比
+
+pnpm は対照的に **`pnpm install` を別途明示実行** する model なので、 lockfile を SSoT に取りつつ install state がそれと乖離する余地がある。 そのため pnpm-local は preflight に install drift Checker を持つ ( [resolver-pnpm-local.md の Install drift check 節](./resolver-pnpm-local.md#install-drift-check-pnpm-install-忘れ検出--preflight-経由))。 「 preflight Checker の有無」 は資質の差ではなく、 **language ecosystem の install model の差** に由来する。
 
 ## Open Questions
 

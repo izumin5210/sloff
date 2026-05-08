@@ -5,7 +5,7 @@
 関連:
 - [Architecture](./architecture.md)
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md)
-- [Resolver: pnpm-external](./resolver-pnpm-external.md) — npm ecosystem は別経路 ( lockfile-based)
+- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) — npm / Go OSS パッケージも script で吸収
 
 ## Context
 
@@ -22,21 +22,25 @@ prebuilt binary 配布物 (`darwin-arm64` / `linux-amd64` 等) は OS 別にバ�
 
 ### 取得元
 
-spec の `tools` 宣言に書かれた `exec` ( cmd 配列) を実行し、 stdout を捕捉する。 必要なら `extract` で正規表現を当てて version 部分を切り出す。
+spec の top-level `tools:` map で名前付き定義された `exec` ( cmd 配列) を実行し、 stdout を捕捉する。 必要なら `extract` で正規表現を当てて version 部分を切り出す ( ADR-0008 で named-tool 化)。
 
 ```yaml
 # <spec_dir>/lazygen.yml
+tools:
+  buf:
+    exec: ["buf", "--version"]
+    # 既定: stdout を trim してそのまま logical version とする
+  protoc-gen-go:
+    exec: ["protoc-gen-go", "--version"]
+    # protoc-gen-go --version → "protoc-gen-go v1.34.2"
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
 commands:
   - name: protoc-gen-go
     cmd: buf generate --template buf.gen.yaml
     inputs: ["**/*.proto", "buf.gen.yaml"]
     outputs: ["**/*.pb.go", "**/*.connect.go"]
-    tools:
-      - exec: ["buf", "--version"]
-        # 既定: stdout を trim してそのまま logical version とする
-      - exec: ["protoc-gen-go", "--version"]
-        # protoc-gen-go --version → "protoc-gen-go v1.34.2"
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [buf, protoc-gen-go]
 ```
 
 ### 論理 version 文字列の形式
@@ -73,11 +77,17 @@ cmd 文字列だけで `tools_hash` を fallback 計算するような暗黙挙�
 
 ### Dispatch (declared-only)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) により、 lazygen には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も spec の `tools:` 宣言を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により、 lazygen には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も `tools:` map での named 定義を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
 
 ```yaml
 tools:
-  - exec: ["buf", "--version"]
+  buf:
+    exec: ["buf", "--version"]
+
+commands:
+  - name: gen
+    # ...
+    tools: [buf]
 ```
 
 宣言が欠けている spec は [ADR-0004 D1](../adr/0004-spec-validation-and-output-conflict-policy.md) の `tools:` 必須化により spec validation で fail する。 「宣言なしで script resolver に落ちる」 fallback 経路は存在しない。
@@ -217,13 +227,16 @@ func makeVersion(execHead, captured string) toolresolver.ToolVersion {
 ### aqua 配布の OSS バイナリ
 
 ```yaml
+tools:
+  buf:
+    exec: ["buf", "--version"]
+
 commands:
   - name: protoc
     cmd: buf generate
     inputs: ["**/*.proto", "buf.gen.yaml"]
     outputs: ["**/*.pb.go"]
-    tools:
-      - exec: ["buf", "--version"]
+    tools: [buf]
 ```
 
 aqua install 後の `buf` バイナリは `buf --version` で `1.30.0` を出力する ( v 接頭辞無しのバージョン)。 stdout 全体をそのまま採用。
@@ -231,14 +244,17 @@ aqua install 後の `buf` バイナリは `buf --version` で `1.30.0` を出力
 ### Go `go.mod` `tool` 経由のツール
 
 ```yaml
+tools:
+  mockgen:
+    exec: ["go", "tool", "mockgen", "-version"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
 commands:
   - name: gen-mock
     cmd: ["go", "tool", "mockgen", "..."]
     inputs: ["**/*.go"]
     outputs: ["**/*_mock.go"]
-    tools:
-      - exec: ["go", "tool", "mockgen", "-version"]
-        extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    tools: [mockgen]
 ```
 
 `go tool` 経由でも `--version` (or `-version`) は通る。 出力例 `mockgen v0.5.0` から regex で取り出す。
@@ -247,18 +263,19 @@ commands:
 
 ```yaml
 tools:
-  - exec: ["go", "version"]
+  go:
+    exec: ["go", "version"]
     extract: 'go[0-9]+\.[0-9]+(?:\.[0-9]+)?'
 ```
 
-`go version go1.26.2 darwin/arm64` から `go1.26.2` だけを切り出し、 OS-arch suffix は除外する。
+`go version go1.26.2 darwin/arm64` から `go1.26.2` だけを切り出し、 OS-arch suffix は除外する。 `tools: [go]` で参照する task が、 Go toolchain bump で自動 invalidate する。
 
 ### `--version` を持たないツール
 
 このケースは script resolver では扱えない。 利用者は次のいずれかを選ぶ:
 
-- 該当 generator を [pnpm-external](./resolver-pnpm-external.md) ( npm 配布なら) や [go-local](./resolver-go-local.md) ( ソースが repo 内にあるなら) など 別 channel に振る
-- shim を書く (`tools: [{exec: ["bash", "-c", "cat .my-tool-version"]}]` のような lockfile 風文字列を返すスクリプト)。 ただし shim ファイル自体の更新が反映されるかを利用者が責任を持つ
+- 該当 generator が repo 内ソースから build される場合は [go-local](./resolver-go-local.md) / [pnpm-local](./resolver-pnpm-local.md) ( workspace package なら) に振る ( 外部公開パッケージ専用 resolver は持たない、 [ADR-0007](../adr/0007-no-external-dependency-resolver.md))
+- shim を書く ( `lazygen.yml` の `tools: my-tool: { exec: ["bash", "-c", "cat .my-tool-version"] }` のような lockfile 風文字列を返すスクリプト)。 ただし shim ファイル自体の更新が反映されるかを利用者が責任を持つ
 
 shim を許容するかは Open Question ( 後述)。
 

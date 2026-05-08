@@ -1,0 +1,16 @@
+generated_at: 2026-05-05T12:00:00Z
+input:
+  components:
+    cmd_hash: d50c9da992fa316ef7b5c3b00945323397a044df0c19523de3880ecd92a6121f
+    files_hash: b260d255809ffd3ca5cf99d954e854489361787b1a5329227cda38c995c0dfe8
+    tools_hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  hash: b52f9e7a09dff32e9b77ab835aca9c6caef7c4c4d85e818f42138aa4f4cb4f3e
+output:
+  files:
+    output.txt: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  hash: ef0fac10de73ede3bc209d4aa93c72236923f8b3406ad365e6c433c1529caaee
+schema_version: 1
+spec:
+  cmd: sh -c cp input.txt output.txt
+  dir: .
+  task_id: copy

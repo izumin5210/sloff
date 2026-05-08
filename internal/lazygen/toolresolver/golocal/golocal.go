@@ -2,21 +2,28 @@
 //
 // It applies to tools that are built from sources living inside the repository
 // (typical examples: bespoke protoc plugins, code generators wired up via
-// `go run ./cmd/...`). These tools have no SemVer to read, so the logical
-// version is the SHA256 of their transitive source contributions, computed via
-// an injectable lister.SourceLister.
+// `go run ./cmd/...`). These tools have no SemVer to read, so the cache key
+// is split across two of lazygen's hash buckets:
 //
-// Per ADR-0005 the resolver is declared-only: it is invoked when the spec wrote
-// `tools: [{go-local: ./cmd/foo}]` for the task. The same declaration form is
-// used regardless of whether the cmd is `go run ./cmd/foo` or a prebuilt
-// binary produced from those sources.
+//   - Internal source files (main module / repo-local sources) become
+//     ExtraInputs and feed files_hash via the runner's input merge. This is
+//     what lets depgraph wire upstream codegen tasks (whose outputs land
+//     inside the same source tree the tool reads) to this task automatically
+//     by the existing output-overlap rule, with no extra dependency channel.
+//   - External Go modules become individual ToolVersion entries
+//     ("go-deps:<path>@<version>+sum:<go.sum-line>") and feed tools_hash, so
+//     dep bumps invalidate without re-reading the lister-traversed source set.
 //
-// Hashing strategy follows resolver-go-local.md:
-//   - internal files (main module / repo-local sources) are SHA256'd by content
-//   - external modules are summarised by `<path>@<version>` plus their go.sum
-//     line; their files are not read (cryptographically equivalent via go.sum)
-//   - replace directives are treated as external (keeps the resolver fast even
-//     when local replace points at sibling repositories)
+// Per ADR-0005 the resolver is declared-only: invoked when the spec wrote
+// `tools: [{go-local: ./cmd/foo}]` for the task, regardless of whether the cmd
+// is `go run ./cmd/foo` or a prebuilt binary produced from those sources.
+//
+// Replace directives:
+//   - Local replace (`replace foo => ../foo` without version): lister treats
+//     replaced sources as internal — they show up in ExtraInputs.
+//   - Versioned replace (`replace foo => bar v1.0.0`): the resolver emits a
+//     go-deps ToolVersion encoding both the original path and the
+//     replacement target, so swapping replacement targets flips tools_hash.
 package golocal
 
 import (
@@ -25,9 +32,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
@@ -37,8 +41,14 @@ import (
 // Name is the resolver identifier referenced by spec tools[] entries.
 const Name = "go-local"
 
-// Resolver resolves the logical version of a Go-local tool to
-// "go-local:<entry>@sha256:<hex>".
+// DepsPrefix is the version-string prefix for external Go module entries.
+// Mirrors the pnpm-deps prefix used by pnpm-local; both are surfaced via the
+// same Result.Versions channel so consumers see a uniform "<channel>-deps"
+// shape regardless of language.
+const DepsPrefix = "go-deps:"
+
+// Resolver resolves a Go-local tool's source contributions (as ExtraInputs)
+// and external module set (as go-deps ToolVersions).
 type Resolver struct {
 	repoRoot string
 	lister   lister.SourceLister
@@ -53,15 +63,18 @@ func New(repoRoot string, l lister.SourceLister) *Resolver {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// Resolve returns one ToolVersion. declared.Entry names the main package
-// (spec-dir-relative, must start with "./"). Per ADR-0005 there is no
-// auto-dispatch path: the resolver only runs when the spec wrote
-// `tools: [{go-local: ./...}]` for this task. The returned Version is
-// OS-neutral: `go-local:<entry>@sha256:<hex>`.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+// Resolve splits the lister's output into:
+//   - ExtraInputs: every internal Go file path the lister enumerated
+//     (repo-relative slash form), folded into the task's input set so
+//     files_hash captures their content and depgraph can wire upstream
+//     producers via output overlap.
+//   - Versions: one ToolVersion per external module, encoded as
+//     "go-deps:<path>@<version>+sum:<go.sum-line>" so dep bumps and go.sum
+//     drift both invalidate tools_hash.
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
 	entry, err := r.resolveEntry(declared)
 	if err != nil {
-		return nil, err
+		return toolresolver.Result{}, err
 	}
 
 	// The lister evaluates entry inside the spec's working directory, matching
@@ -70,19 +83,36 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 	// resolve against submodule's go.mod, not the repo-root module.
 	listing, err := r.lister.List(ctx, specDir, entry)
 	if err != nil {
-		return nil, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
-	}
-	digest, err := hashListing(r.repoRoot, listing)
-	if err != nil {
-		return nil, fmt.Errorf("go-local: hash sources for %q (spec %q): %w", entry, specDir, err)
+		return toolresolver.Result{}, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
 	}
 
 	source := Name + ":" + entry
-	return []toolresolver.ToolVersion{{
-		Name:    entry,
-		Source:  source,
-		Version: source + "@sha256:" + hex.EncodeToString(digest),
-	}}, nil
+	versions := make([]toolresolver.ToolVersion, 0, len(listing.ExternalModules))
+	for _, m := range listing.ExternalModules {
+		versions = append(versions, toolresolver.ToolVersion{
+			Name:    m.Path,
+			Source:  source,
+			Version: encodeExternalVersion(m),
+		})
+	}
+
+	return toolresolver.Result{
+		Versions:    versions,
+		ExtraInputs: append([]string(nil), listing.InternalFiles...),
+	}, nil
+}
+
+// encodeExternalVersion produces the canonical hash-input string for one
+// external Go module. The go.sum line is folded in as a SHA-256 digest so the
+// version stays single-line and bounded length, while still flipping the cache
+// when go.sum drifts (Go's classic supply-chain anchor).
+func encodeExternalVersion(m lister.ExternalModule) string {
+	label := DepsPrefix + m.Path + "@" + m.Version
+	if m.GoSumLine == "" {
+		return label
+	}
+	sum := sha256.Sum256([]byte(m.GoSumLine))
+	return label + "+sum:" + hex.EncodeToString(sum[:])
 }
 
 // isRelativeEntry reports whether s is in the spec-relative entry form the
@@ -106,45 +136,4 @@ func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, er
 			"./", "../", ".", "..", declared.Entry)
 	}
 	return declared.Entry, nil
-}
-
-// hashListing folds the listing into a deterministic SHA256 by:
-//   - reading each internal file's content and writing path + content digest
-//   - writing each external module's "<path>@<version>" label + go.sum line
-//
-// All entries are NUL-separated and sorted upstream so the digest is invariant
-// to lister enumeration order.
-func hashListing(repoRoot string, l lister.Listing) ([]byte, error) {
-	h := sha256.New()
-	for _, f := range l.InternalFiles {
-		digest, err := fileSHA256(filepath.Join(repoRoot, f))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", f, err)
-		}
-		h.Write([]byte(f))
-		h.Write([]byte{0})
-		h.Write(digest)
-		h.Write([]byte{0})
-	}
-	for _, m := range l.ExternalModules {
-		label := m.Path + "@" + m.Version
-		h.Write([]byte(label))
-		h.Write([]byte{0})
-		h.Write([]byte(m.GoSumLine))
-		h.Write([]byte{0})
-	}
-	return h.Sum(nil), nil
-}
-
-func fileSHA256(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
-	}
-	return h.Sum(nil), nil
 }

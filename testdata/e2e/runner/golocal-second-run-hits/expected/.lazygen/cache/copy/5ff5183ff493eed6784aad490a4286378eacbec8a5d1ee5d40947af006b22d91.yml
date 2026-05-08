@@ -1,0 +1,16 @@
+generated_at: 2026-05-05T12:00:00Z
+input:
+  components:
+    cmd_hash: 3c15f70cffe53af130f09a4d35d7fc63cd74ce387f4e68331546986d83161869
+    files_hash: 1cc9052027d60c13850084add82f5c54523ff9ece035f93e5dcba35ac8a2d184
+    tools_hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  hash: 5ff5183ff493eed6784aad490a4286378eacbec8a5d1ee5d40947af006b22d91
+output:
+  files:
+    output.txt: 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+  hash: df1b1617ca538a3f11629cd41d614a9f96e0f03f61f022c95645e200476e5df9
+schema_version: 1
+spec:
+  cmd: go run ./cmd/copy
+  dir: .
+  task_id: copy

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -63,6 +64,38 @@ func TestGitLsFiles_HonoursTrackedFilesEvenWhenNowIgnored(t *testing.T) {
 	}
 	if !slices.Contains(got, "packages/codegen/dist/cli.js") {
 		t.Errorf("tracked dist/cli.js should still be returned despite .gitignore, got %v", got)
+	}
+}
+
+// TestGitLsFiles_DropsLazygenStateDir guards a self-invalidation foot-gun:
+// when a pnpm-local tool's importer is the repo root (importer dir = "."),
+// git ls-files would otherwise return .lazygen/cache/** alongside the
+// user's files. lazygen rewrites .lazygen/cache/ on every run, so feeding
+// those paths into ExtraInputs would flip files_hash on every subsequent
+// run and miss the cache forever. Both tracked and untracked entries
+// under .lazygen/ must be dropped — the directory is lazygen's
+// implementation detail, not user state, regardless of git status.
+func TestGitLsFiles_DropsLazygenStateDir(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "src", "cli.ts"), "x\n")
+	// Tracked record: simulate the ADR-0003 "commit cache records" workflow.
+	mustWrite(t, filepath.Join(root, ".lazygen", "cache", "spec", "task", "tracked.yml"), "{}")
+	// Untracked record: a fresh run wrote one and the user hasn't `git add`-ed yet.
+	gitInit(t, root)
+	gitRun(t, root, "add", "src/cli.ts", ".lazygen/cache/spec/task/tracked.yml")
+	mustWrite(t, filepath.Join(root, ".lazygen", "cache", "spec", "task", "untracked.yml"), "{}")
+
+	got, err := pnpmlocal.GitLsFiles(context.Background(), root, ".")
+	if err != nil {
+		t.Fatalf("GitLsFiles: %v", err)
+	}
+	for _, f := range got {
+		if strings.HasPrefix(f, ".lazygen/") {
+			t.Errorf("GitLsFiles must drop .lazygen/* entries; got %q in result %v", f, got)
+		}
+	}
+	if !slices.Contains(got, "src/cli.ts") {
+		t.Errorf("expected src/cli.ts in result %v", got)
 	}
 }
 

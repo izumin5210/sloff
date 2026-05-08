@@ -15,11 +15,20 @@ import (
 // pkgDir is repo-relative OS-native form. The implementation must respect
 // .gitignore so that build outputs (typically dist/, build/, etc.) don't
 // leak into ExtraInputs (which would tie the cache to artefacts the user
-// regenerates locally).
+// regenerates locally). Production enumerators must also exclude lazygen's
+// own state directory (lazygenStateDir) — see GitLsFiles for why.
 //
 // Callers don't memoise: the resolver wraps the enumerator with its own
 // per-tool cache so each workspace dir is enumerated exactly once per run.
 type FileEnumerator func(ctx context.Context, repoRoot, pkgDir string) ([]string, error)
+
+// lazygenStateDir is the path prefix of the directory lazygen owns inside
+// the repo (cache records, etc.). pnpm-local enumeration must drop entries
+// under this prefix because hashing them feeds lazygen's own writes back
+// into its inputs and self-invalidates the cache on every subsequent run.
+// Compared to .git/, which git itself hides from ls-files, .lazygen/ is a
+// regular tracked / untracked directory so we filter explicitly.
+const lazygenStateDir = ".lazygen/"
 
 // GitLsFiles is the default FileEnumerator: it shells out to
 //
@@ -66,11 +75,21 @@ func GitLsFiles(ctx context.Context, repoRoot, pkgDir string) ([]string, error) 
 	}
 
 	// git ls-files emits one path per line, slash-form, repo-relative.
-	// Trailing newline produces an empty final line we filter out.
+	// Trailing newline produces an empty final line we filter out. We also
+	// drop anything under lazygen's own state directory: when pkgDir is the
+	// repo-root importer, ls-files would otherwise return .lazygen/cache/**,
+	// and hashing files lazygen itself rewrites every run makes the
+	// resolver self-invalidate forever. Filtering lives here rather than in
+	// the resolver because production callers always need it; the test
+	// FileEnumerators don't go through this function and can't accidentally
+	// surface .lazygen/ paths anyway.
 	lines := strings.Split(out.String(), "\n")
 	files := make([]string, 0, len(lines))
 	for _, l := range lines {
 		if l == "" {
+			continue
+		}
+		if strings.HasPrefix(l, lazygenStateDir) {
 			continue
 		}
 		files = append(files, l)

@@ -47,40 +47,32 @@ const DepsPrefix = "pnpm-deps:"
 // Resolver resolves a pnpm workspace-local tool's contributions: source files
 // (via FileEnumerator) as ExtraInputs and transitive npm deps as
 // pnpm-deps ToolVersions. The resolver itself does NOT orchestrate the
-// workspace package's build — that's the consuming task's cmd's job.
+// workspace package's build — that's the consuming task's cmd's job. It also
+// does NOT validate that node_modules matches pnpm-lock.yaml; that lives in
+// the preflight subsystem (preflight/pnpmlocal/) so the runner can apply the
+// shared LAZYGEN_ALLOW_STALE_DEPS read-only escape hatch uniformly.
 type Resolver struct {
-	repoRoot     string
-	enumerator   FileEnumerator
-	driftChecker DriftChecker
+	repoRoot   string
+	enumerator FileEnumerator
 
 	once         sync.Once
 	workspace    *Workspace
 	workspaceErr error
 }
 
-// DriftChecker verifies that node_modules is in sync with pnpm-lock.yaml.
-// AssertInstallInSync is the production implementation; tests inject a fake
-// to keep the resolver decoupled from a real pnpm install.
-type DriftChecker func(repoRoot string) error
-
 // New constructs a Resolver. The pnpm-lock.yaml is loaded lazily on the first
 // Resolve call so lazygen runs without a pnpm workspace (Go-only repos)
 // don't pay the cost or fail at startup. Pass GitLsFiles for the production
 // enumerator; tests inject a fake to avoid a real git working tree.
 //
-// The drift checker defaults to AssertInstallInSync, which compares
-// pnpm-lock.yaml with node_modules/.pnpm/lock.yaml byte-by-byte to catch
-// "lockfile updated, pnpm install forgotten" silent drift before the
-// resolver hands a stale-install cache key downstream. Tests inject a no-op
-// or fake checker to avoid materialising a real pnpm install in fixtures.
-func New(repoRoot string, enumerator FileEnumerator, driftChecker DriftChecker) (*Resolver, error) {
+// Install-state drift detection (pnpm-lock.yaml vs node_modules/.pnpm/lock.yaml)
+// lives in preflight/pnpmlocal/, not here, so it inherits the shared
+// preflight scoping and LAZYGEN_ALLOW_STALE_DEPS escape-hatch behaviour.
+func New(repoRoot string, enumerator FileEnumerator) (*Resolver, error) {
 	if enumerator == nil {
 		return nil, errors.New("pnpm-local: file enumerator is required")
 	}
-	if driftChecker == nil {
-		return nil, errors.New("pnpm-local: drift checker is required")
-	}
-	return &Resolver{repoRoot: repoRoot, enumerator: enumerator, driftChecker: driftChecker}, nil
+	return &Resolver{repoRoot: repoRoot, enumerator: enumerator}, nil
 }
 
 // Name implements toolresolver.Resolver.
@@ -103,14 +95,6 @@ func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *
 	ws, err := r.loadWorkspace()
 	if err != nil {
 		return toolresolver.Result{}, fmt.Errorf("pnpm-local: load workspace: %w", err)
-	}
-	// Confirm node_modules tracks the current pnpm-lock.yaml before we trust
-	// the lockfile-derived versions. Without this, a stale install would let
-	// the resolver hand back fresh-lockfile versions while the cmd actually
-	// runs against an older dep graph — the silent-stale failure mode that
-	// motivated this check.
-	if err := r.driftChecker(r.repoRoot); err != nil {
-		return toolresolver.Result{}, err
 	}
 	pkg, ok := ws.Lookup(declared.PackageName)
 	if !ok {

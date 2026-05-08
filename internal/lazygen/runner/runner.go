@@ -62,12 +62,11 @@ type Options struct {
 // Runner executes all discovered specs in topological order with cache lookup and
 // output-comparison invalidation.
 type Runner struct {
-	opts     Options
-	logger   Logger
-	stdout   io.Writer
-	stderr   io.Writer
-	checkers []string            // resolver names of registered preflight checkers (run all in MVP)
-	byKey    map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
+	opts   Options
+	logger Logger
+	stdout io.Writer
+	stderr io.Writer
+	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
 
 	// producedBy maps each resolved output path to the task that produced it. Cross-task
 	// duplicate writes are spec conflicts that depgraph cannot catch on a clean checkout
@@ -93,34 +92,12 @@ func New(opts Options) *Runner {
 	if opts.Clock == nil {
 		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
-	r := &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
-
-	// PR1: run every registered checker. Future PRs will scope by used resolvers.
-	if opts.Preflight != nil {
-		for _, name := range opts.Preflight.Names() {
-			r.checkers = append(r.checkers, name)
-		}
-	}
-	return r
+	return &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
 }
 
 // Run executes preflight then every task. Errors during preflight or task execution
 // abort the run.
 func (r *Runner) Run(ctx context.Context) error {
-	if r.opts.Preflight != nil && len(r.checkers) > 0 {
-		res, err := r.opts.Preflight.Run(ctx, ".", r.checkers)
-		if err != nil {
-			return err
-		}
-		if !res.OK {
-			r.reportPreflightIssues(res.Issues)
-			if !r.opts.ReadOnly {
-				return fmt.Errorf("preflight failed (%d issues); set LAZYGEN_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
-			}
-			r.logger.Warnf("preflight issues ignored due to ReadOnly mode; cache records will not be written")
-		}
-	}
-
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
 	// references resolve to a defined tool, then resolve each *referenced*
 	// tool exactly once. Storing results by name lets collectTasks fan a
@@ -139,7 +116,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
 		return err
 	}
-	resolved, err := r.resolveReferencedTools(ctx, registry, referencedTools(r.opts.Specs))
+	referencedToolNames := referencedTools(r.opts.Specs)
+
+	// Preflight runs only the checkers whose resolver name matches a tool the
+	// current spec set actually references — same scoping discipline as
+	// resolveReferencedTools below. Catalog tools that no command pulls in
+	// stay inert; their checkers aren't invoked either.
+	if err := r.runPreflight(ctx, registry, referencedToolNames); err != nil {
+		return err
+	}
+
+	resolved, err := r.resolveReferencedTools(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
 	}
@@ -163,6 +150,63 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// runPreflight invokes only the registered Checkers whose names match a
+// resolver actually pulled in by some command in this run. Scoping by
+// referenced resolver names keeps catalog-style tool registries lean: a
+// pnpm-local Checker shouldn't run (and shouldn't fail) when no command
+// uses pnpm-local at all.
+//
+// Drift-style failures arrive as preflight.Issue entries; the runner
+// reports them and either aborts (the default) or, when ReadOnly is set
+// via LAZYGEN_ALLOW_STALE_DEPS, degrades to read-only so cache records
+// are not written for a known-suspect run. Hard errors from a checker
+// (the check itself couldn't execute) bypass the read-only fall-through
+// and fail the run regardless.
+func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) error {
+	if r.opts.Preflight == nil {
+		return nil
+	}
+	checkers := scopeCheckers(r.opts.Preflight.Names(), registry, referencedToolNames)
+	if len(checkers) == 0 {
+		return nil
+	}
+	res, err := r.opts.Preflight.Run(ctx, ".", checkers)
+	if err != nil {
+		return err
+	}
+	if !res.OK {
+		r.reportPreflightIssues(res.Issues)
+		if !r.opts.ReadOnly {
+			return fmt.Errorf("preflight failed (%d issues); set LAZYGEN_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
+		}
+		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; cache records will not be written")
+	}
+	return nil
+}
+
+// scopeCheckers intersects the registered Checker names with the resolver
+// names referenced by any command in this run. The resolver/checker pairing
+// is by Name (architecture.md), so a referenced tool whose Declared.Resolver
+// is "pnpm-local" pulls in the "pnpm-local" Checker if one exists.
+func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, referencedToolNames []string) []string {
+	if len(checkerNames) == 0 {
+		return nil
+	}
+	usedResolvers := map[string]struct{}{}
+	for _, toolName := range referencedToolNames {
+		if entry, ok := registry.Lookup(toolName); ok {
+			usedResolvers[entry.Declared.Resolver] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(checkerNames))
+	for _, name := range checkerNames {
+		if _, ok := usedResolvers[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // resolveReferencedTools invokes the toolresolver registry once per name in

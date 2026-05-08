@@ -175,16 +175,16 @@ walk := WalkDeps(lockfile, "packages/codegen")
 
 詳細は [ADR-0007](../adr/0007-no-external-dependency-resolver.md) の「外部依存の surgical 取り扱い」 節も参照。
 
-## Install drift check ( `pnpm install` 忘れ検出)
+## Install drift check ( `pnpm install` 忘れ検出) — preflight 経由
 
 pnpm-local の hash 入力は **lockfile から walk した resolved version** だが、 cmd 実行時は **node_modules に install された実体** を読み込む。 利用者が `git pull` で新 `pnpm-lock.yaml` を取り込んでから `pnpm install` を忘れると、 hash 経路は新 lockfile を、 runtime は古い install を見ることになる ( silent stale)。
 
-これを構造的に防ぐため、 Resolver は Resolve 冒頭で:
+これを構造的に防ぐため、 **`internal/lazygen/preflight/pnpmlocal`** に Checker を置いている。 runner が cmd 実行前に preflight を回す段階で:
 
 ```
 hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
   → yes: install in sync ( 続行)
-  → no:  fail-loudly ( "please run `pnpm install`")
+  → no:  preflight.Issue を返し runner が fail-loudly ( "please run `pnpm install`")
 ```
 
 `node_modules/.pnpm/lock.yaml` は pnpm が `pnpm install` 時に **`pnpm-lock.yaml` を byte-for-byte コピー** して書き出す install state snapshot。 byte 比較で:
@@ -192,7 +192,13 @@ hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
 - snapshot 不在 → `pnpm install` 未実行
 - byte mismatch → lockfile 編集後 install 忘れ ( whitespace のみの edit でも検知、 これは feature)
 
-実装は `AssertInstallInSync(repoRoot)` ( `drift.go`)。 fail 時は `ErrInstallStale` を wrap する。
+実装の本体 ( byte 比較ロジック) は `AssertInstallInSync(repoRoot)` ( `drift.go`)、 sentinel は `ErrInstallStale`。 preflight Checker (`preflight/pnpmlocal`) はこれを呼んで結果を `preflight.Issue` に詰めるだけの薄いラッパ。
+
+### preflight 経由にする利点 ( resolver 内に置かないこと)
+
+- **`LAZYGEN_ALLOW_STALE_DEPS=1` の escape hatch を継承**: 利用者が一時的に通したいケース ( experimental edit を試したい等) で warn 降格 + read-only モードで run できる。 resolver 内で fail させると、 この escape hatch 経路が効かない
+- **概念整理**: 「 preflight = state 検証」 という general subsystem として一貫させ、 「 build 用 preflight は廃止 / install drift 用 preflight は別経路」 のような暗黙の分類を作らない ( ADR-0008 D7 末尾参照)
+- **scope-by-referenced-resolver**: runner は「 spec で実際に referenced されている resolver name」 集合を作って、 一致する Checker だけ起動する。 pnpm-local 未使用の repo では Checker そのものが起動しないので、 catalog-style な repo でも余計な validation が走らない
 
 ### 設計上の補足
 

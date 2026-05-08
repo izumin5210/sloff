@@ -10,6 +10,7 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
+	preflightpnpm "github.com/izumin5210/lazygen/internal/lazygen/preflight/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
@@ -65,7 +66,7 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 		Specs:     specs,
 		Storage:   local.New(root),
 		Resolvers: resolvers,
-		Preflight: preflight.NewRegistry(), // no concrete checkers (pnpm-local rebuild detection now flows through depgraph)
+		Preflight: buildPreflight(root),
 		ReadOnly:  readOnly,
 	})
 
@@ -77,15 +78,26 @@ func runE(ctx context.Context, rawRoot, pattern string) error {
 // entries, the go-local resolver runs for `tools: [{go-local: ./cmd/foo}]`,
 // and the pnpm-local resolver runs for `tools: [{pnpm-local: '@org/pkg'}]`.
 // Both source listers are memoised so repeated tasks against the same entry
-// only pay packages.Load / esbuild.Build once per run.
+// only pay packages.Load / git ls-files once per run.
 func buildResolvers(root string) (*toolresolver.Registry, error) {
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(root))
 	reg.Register(golocal.New(root, lister.NewMemoized(lister.NewGoPackages(root))))
-	pnpmRes, err := pnpmlocal.New(root, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
+	pnpmRes, err := pnpmlocal.New(root, pnpmlocal.GitLsFiles)
 	if err != nil {
 		return nil, fmt.Errorf("build pnpm-local resolver: %w", err)
 	}
 	reg.Register(pnpmRes)
 	return reg, nil
+}
+
+// buildPreflight wires up the preflight checkers. The runner scopes them to
+// resolvers some command actually references, so registering a checker here
+// is harmless for repos that don't use the corresponding resolver. Only
+// channels that need pre-run state validation register a checker — script
+// and go-local don't.
+func buildPreflight(root string) *preflight.Registry {
+	reg := preflight.NewRegistry()
+	reg.Register(preflightpnpm.New(root))
+	return reg
 }

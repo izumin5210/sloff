@@ -2,7 +2,6 @@ package runner_test
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"io/fs"
 	"os"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/izumin5210/lazygen/internal/lazygen/cache/local"
 	"github.com/izumin5210/lazygen/internal/lazygen/preflight"
+	preflightpnpm "github.com/izumin5210/lazygen/internal/lazygen/preflight/pnpmlocal"
 	"github.com/izumin5210/lazygen/internal/lazygen/runner"
 	"github.com/izumin5210/lazygen/internal/lazygen/spec"
 	"github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
@@ -123,17 +123,19 @@ func runStep() step {
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
 		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
-		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
+		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles)
 		if err != nil {
 			t.Fatalf("pnpmlocal.New: %v", err)
 		}
 		resolverReg.Register(pnpmRes)
+		preflightReg := preflight.NewRegistry()
+		preflightReg.Register(preflightpnpm.New(h.workdir))
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
 			Storage:   local.New(h.workdir),
 			Resolvers: resolverReg,
-			Preflight: preflight.NewRegistry(),
+			Preflight: preflightReg,
 			Clock:     func() time.Time { return fixedClock },
 		})
 		if err := r.Run(context.Background()); err != nil {
@@ -512,16 +514,55 @@ commands:
 }
 
 // TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing guards the drift
-// check end to end: a task that references a pnpm-local tool must abort
-// the run when node_modules/.pnpm/lock.yaml is missing (= pnpm install
-// was never executed against this checkout). Without the abort, the
-// resolver would hand the cmd a stale-install cache key and silent stale
-// outputs would propagate.
+// preflight end to end: when a task references a pnpm-local tool but
+// node_modules/.pnpm/lock.yaml is missing (pnpm install was never run
+// against this checkout), the runner aborts before any cmd executes.
+// Without the abort, the resolver would hand the cmd a stale-install cache
+// key and silent stale outputs would propagate.
 func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */)
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when node_modules/.pnpm/lock.yaml is missing")
+	}
+	if !strings.Contains(err.Error(), "preflight failed") {
+		t.Errorf("error should mention preflight failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "LAZYGEN_ALLOW_STALE_DEPS") {
+		t.Errorf("error should mention the bypass env var, got: %v", err)
+	}
+}
+
+// TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch covers the
+// LAZYGEN_ALLOW_STALE_DEPS=1 path: drift surfaces as a preflight Issue but
+// the runner continues in read-only mode (cache records are not written).
+// This is the existing preflight escape hatch; pnpm-local's drift checker
+// inherits it by virtue of going through the preflight subsystem instead of
+// failing inside the resolver.
+func TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	r := newPnpmDriftRunner(t, workdir, specs, true /* readOnly */)
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("expected drift to degrade to read-only under LAZYGEN_ALLOW_STALE_DEPS, got: %v", err)
+	}
+	cacheDir := filepath.Join(workdir, ".lazygen", "cache")
+	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
+		t.Errorf("read-only mode must not write cache records, got: %v", entries)
+	}
+}
+
+// setupPnpmDriftFixture materialises a minimal repo that uses a pnpm-local
+// tool, with or without a matching install snapshot. installInSync=false
+// leaves node_modules/.pnpm/lock.yaml absent so AssertInstallInSync fails;
+// true mirrors pnpm-lock.yaml into it so the drift check passes.
+func setupPnpmDriftFixture(t *testing.T, installInSync bool) (string, []spec.Spec) {
+	t.Helper()
 	workdir := t.TempDir()
 	gitInitWorkdir(t, workdir)
-	mustWrite := func(rel, contents string) {
-		t.Helper()
+	write := func(rel, contents string) {
 		full := filepath.Join(workdir, rel)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)
@@ -530,14 +571,15 @@ func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mustWrite("pnpm-lock.yaml", `lockfileVersion: '9.0'
+	const lockfile = `lockfileVersion: '9.0'
 importers:
   packages/codegen: {}
-`)
-	mustWrite("package.json", `{"name":"monorepo-root","private":true}`)
-	mustWrite("packages/codegen/package.json", `{"name":"@org/codegen"}`)
-	mustWrite("input.txt", "hello")
-	mustWrite("lazygen.yml", `tools:
+`
+	write("pnpm-lock.yaml", lockfile)
+	write("package.json", `{"name":"monorepo-root","private":true}`)
+	write("packages/codegen/package.json", `{"name":"@org/codegen"}`)
+	write("input.txt", "hello")
+	write("lazygen.yml", `tools:
   codegen:
     pnpm-local: "@org/codegen"
 
@@ -548,36 +590,41 @@ commands:
     outputs: ["out.txt"]
     tools: [codegen]
 `)
-	// node_modules/.pnpm/lock.yaml intentionally absent — pnpm install was
-	// never run.
+	if installInSync {
+		write("node_modules/.pnpm/lock.yaml", lockfile)
+	}
 
 	specs, err := spec.Discover(workdir, "**/lazygen.yml")
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
+	return workdir, specs
+}
+
+// newPnpmDriftRunner wires the pnpm-local resolver and preflight checker
+// the same way the production CLI does, so the drift-detection paths get
+// exercised end to end.
+func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnly bool) *runner.Runner {
+	t.Helper()
 	resolverReg := toolresolver.NewRegistry()
 	resolverReg.Register(script.New(workdir))
 	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
-	pnpmRes, err := pnpmlocal.New(workdir, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
+	pnpmRes, err := pnpmlocal.New(workdir, pnpmlocal.GitLsFiles)
 	if err != nil {
 		t.Fatalf("pnpmlocal.New: %v", err)
 	}
 	resolverReg.Register(pnpmRes)
-	r := runner.New(runner.Options{
+	preflightReg := preflight.NewRegistry()
+	preflightReg.Register(preflightpnpm.New(workdir))
+	return runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
 		Storage:   local.New(workdir),
 		Resolvers: resolverReg,
-		Preflight: preflight.NewRegistry(),
+		Preflight: preflightReg,
+		ReadOnly:  readOnly,
 		Clock:     func() time.Time { return fixedClock },
 	})
-	err = r.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected error when node_modules/.pnpm/lock.yaml is missing")
-	}
-	if !errors.Is(err, pnpmlocal.ErrInstallStale) {
-		t.Errorf("error should wrap ErrInstallStale, got: %v", err)
-	}
 }
 
 // TestRunner_UnreferencedBrokenToolDoesNotBlockOtherTasks guards that the

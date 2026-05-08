@@ -75,7 +75,7 @@
   - **prebuilt binary** ( aqua 配布物 / `go tool <name>` / 外部 OSS パッケージの `<bin> --version` 等): script resolver が `<bin> --version` を実行し、 必要なら regex で抽出した文字列をそのまま採用 ( 「runtime のバイナリが SSoT」)。 npm 配布物も `pnpm exec <bin> --version` 等で同経路に乗せる ([ADR-0007](../adr/0007-no-external-dependency-resolver.md))
   - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
 - 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`、 ts なら esbuild。 Pants 流の dependency inference を取り込む)
-- preflight ( lockfile / build 状態と実体の照合) は **dist build が SSoT より遅れる可能性がある channel ( pnpm-local の build 必須ツール)** のみで動かす。 script resolver / go-local では runtime バイナリやソース自体が SSoT のため、 preflight は構造的に不要 ([ADR-0007](../adr/0007-no-external-dependency-resolver.md))
+- preflight ( cmd 実行前の state 検証) は **検証したい invariant が channel 別に存在するときに Checker を持つ** general subsystem。 現状の builtin は `pnpm-local` の install drift checker のみ ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認)。 script resolver / go-local では runtime バイナリやソース自体が SSoT のため Checker 不要 ( [ADR-0007](../adr/0007-no-external-dependency-resolver.md) / [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) D7)
 - record の永続化レイヤ ( Storage) も interface を切り、 初版は `LocalStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
 
 ```mermaid
@@ -314,7 +314,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 |---|---|---|---|---|
 | prebuilt binary ( aqua / `go tool` / `pnpm exec` / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
 | Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を tools_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 不要 ( build / run は cmd 責務、 ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 必要 ( install drift: `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致。 build / run は cmd 責務 — ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 `buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
@@ -378,9 +378,10 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 
 #### Lockfile と install 状態の整合性検証 (preflight)
 
-preflight が必要なのは、 `tools_hash` の取得元 ( ソース) が runtime の実体 ( build 出力など) と乖離する余地がある channel に限られる。 具体的には:
+preflight が必要なのは、 `tools_hash` の取得元 ( SSoT) が runtime の実体と乖離する余地がある channel に限られる。 具体的には:
 
-- **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため)、 `pnpm-local` ( workspace tool の rebuild 忘れは利用者が build を「通常の lazygen task」 として宣言することで depgraph + 通常の cache 無効化で構造的に解消するため、 専用 preflight は不要 — [resolver-pnpm-local.md](./resolver-pnpm-local.md))
+- **必要**: `pnpm-local` ( pnpm-lock.yaml を SSoT として外部 dep を hash する立場のため、 install drift = lockfile updated + `pnpm install` 忘れ を検出する Checker を持つ。 build / rebuild 忘れは ADR-0008 D7 で cmd 責務に倒したため別問題 — [resolver-pnpm-local.md](./resolver-pnpm-local.md))
+- **不要**: `script` resolver ( runtime バイナリの `--version` を直接取得するため、 lockfile vs install の概念がそもそも存在しない)、 `go-local` ( ソース hash を直接取るため、 lockfile drift の概念が存在しない)
 
 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md) により lazygen は専用 preflight を持たない ( pinned tag 強制 / buf.lock 整合性は buf 利用者の責務)。 外部公開 npm / Go OSS パッケージについても [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により script resolver で吸収するため preflight は不要。
 
@@ -392,7 +393,7 @@ buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight
 - **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
 - **ローカル escape hatch**: `LAZYGEN_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で lazygen を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 
-代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 必要が生じた preflight 経路でのみ補助的に使うに留める ( [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により外部公開パッケージは script resolver に統一しているため、 現状 lazygen が組み込む preflight 対象は pnpm-local の dist 整合のみ)。
+代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
 
 ### resolver / preflight の拡張性 (interface 設計)
 
@@ -482,12 +483,13 @@ type Issue struct {
 }
 ```
 
-組み込み実装: `pnpmLocalChecker`。 build 状態を SSoT として持つ channel ( pnpm-local の dist 整合) のみが Checker を持つ。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( 構造的に不要)。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージは [ADR-0007](../adr/0007-no-external-dependency-resolver.md) によりそれぞれ専用 Checker を持たない。
+組み込み実装: `pnpmLocalChecker` ( install drift = `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認)。 「 channel 別に検証したい invariant があるなら持つ」 という general subsystem で、 「 build 専用」 「 install drift 専用」 のような暗黙の分類は持たない。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( SSoT が runtime バイナリ / source 自体なので drift 概念がそもそも無い)。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージは [ADR-0007](../adr/0007-no-external-dependency-resolver.md) によりそれぞれ専用 Checker を持たない。
 
 Registry の動作:
 
 - lazygen の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 そのうち Checker を持つ channel についてだけ all-or-nothing で実行
-- いずれかが Issue を返したら lazygen は fail (前述の preflight ポリシーに従う)
+- いずれかが Issue を返したら lazygen は fail ( `LAZYGEN_ALLOW_STALE_DEPS=1` の場合は warn 降格 + read-only モード)
+- runner は registered Checker のうち「 spec で referenced されている resolver name」 と一致するものだけ起動する ( catalog-style の inert tool 定義の Checker は起動しない)
 
 #### 拡張ポイントの責務分離
 
@@ -658,13 +660,13 @@ internal/lazygen/
       #   tsc.go             (TypeScript Compiler API ベースの代替)
       #   cargo_metadata.go  (Rust 用)
       #   python_ast.go      (Python ast module ベース)
-  preflight/                                # ★ Checker interface + Registry ( 現状 built-in Checker 無し)
+  preflight/                                # ★ Checker interface + Registry
     preflight.go                            # Checker interface, Result/Issue 型
     registry.go
-    # 現在 builtin Checker は登録されていない:
-    # - script resolver / go-local: 構造的に不要 ( runtime / source 自体が SSoT)
-    # - pnpm-local: 「 build 忘れ」 は通常 lazygen task として build を宣言する
-    #   ことで depgraph 経由で構造的に解消するため、 専用 Checker を持たない
+    pnpmlocal/
+      pnpmlocal.go                          # install drift checker ( pnpm-lock.yaml vs node_modules/.pnpm/lock.yaml の byte 一致)
+    # builtin Checker を持たない channel:
+    # - script resolver / go-local: 構造的に不要 ( runtime / source 自体が SSoT で drift 概念が無い)
     # - buf: ADR-0006、 外部公開: ADR-0007 で利用者責務に倒した
 
 # 利用者リポジトリ側に作成するファイル ( lazygen 利用時)

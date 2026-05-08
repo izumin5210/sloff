@@ -142,6 +142,8 @@ source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の buil
 
 **精度トレードオフ**: 旧 esbuild walk は「 bin から transitive に import される実ファイルだけ」 を hash 入力にしていた。 git-tracked enumeration は「 package dir の全ファイル ( gitignore で除外されたものを除く)」 を入れる。 後者は **過剰 invalidate** ( 関係ない src/utils.ts 編集で gen が rerun) するが false hit にはならない。 Turborepo の default も同じアプローチで、 monorepo 規模での実用上の精度は問題にならないことが知られている。
 
+**preflight の責務との分離**: D7 で削除したのは **「 build 必須かを spec から推測 + dist/src を慣習で扱う」 旧 preflight checker** であって、 preflight subsystem 自体ではない。 preflight は依然として「 cmd 実行前の state 検証」 という general な役割を持ち、 channel 別に必要なら Checker を持つ。 例えば pnpm-local は **install drift 検出** ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認) のための Checker を `preflight/pnpmlocal/` に持っている。 これは ADR-0008 D7 の「 build / run は cmd 責務」 とは独立の話で、 「 lockfile を SSoT に取る resolver は install state が lockfile と一致していることを前提にする」 ための前段検証。 「 preflight = build 専用」 でも「 preflight = drift 専用」 でもなく、 channel ごとに validation したい invariant があるなら持つ、 という general subsystem。
+
 ## Rationale
 
 ### 案 A ( resolver-level memo cache のみ) を選ばなかった理由

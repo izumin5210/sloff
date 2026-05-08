@@ -85,6 +85,31 @@ tool 定義に含まれる path 系フィールド ( `go-local: ./cmd/foo` 等) 
 
 これにより tool 定義が「 自己完結した単位」 になる ( 別 dir の task から参照されても解釈は変わらない)。
 
+#### Cross-spec 参照時の cmd 側責任 ( foot-gun 注意)
+
+tool 定義の path は **resolver の hash 入力** ( files_hash / tools_hash 経路) に乗るだけで、 task の cmd が実行する binary 自体を lazygen が解決するわけではない。 cmd は task 自身の `specRelpath` ( 参照元 task の dir) を cwd として実行されるので、 **「 cmd 側 path が tool 定義の指す target と同じものを参照しているか」 は cmd 作者の責任**:
+
+```yaml
+# packages/codegen/lazygen.yml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo   # → packages/codegen/cmd/protoc-gen-foo
+
+# proto/lazygen.yml
+commands:
+  - name: gen
+    cmd: ["go", "run", "./cmd/protoc-gen-foo"]   # ⚠ proto/cmd/protoc-gen-foo に解決される (別物)
+    tools: [protoc-gen-foo]
+```
+
+上記は **cache key は packages/codegen 側の source を hash するが、 cmd は proto/cmd/protoc-gen-foo を実行する** という乖離が生じる ( 双方が存在すれば silent stale、 後者が不在なら早期 fail)。 別 dir の cwd-sensitive な tool ( `go run` / 相対 binary path 等) を参照するときは、 cmd 側で:
+
+- full Go import path を書く: `cmd: ["go", "run", "github.com/org/repo/packages/codegen/cmd/protoc-gen-foo"]`
+- task dir 基準の相対 path を書く: `cmd: ["go", "run", "../../packages/codegen/cmd/protoc-gen-foo"]`
+- 事前 build した binary を PATH 経由で呼ぶ: `cmd: ["protoc-gen-foo"]`
+
+など、 cwd 依存しない方法で同じ target を参照する。 lazygen は cmd 文字列の中身を validate しない方針 ( cmd_hash に乗るだけ) のため、 ここはユーザ規律で担保する。 cwd-independent な resolver ( pnpm-local、 PATH 経由 binary を呼ぶ script tool 等) ではこの問題は起きない。
+
 ### D4. **slug-style な命名規約**: tool 名は `[a-z0-9_-]+` のみ許容
 
 YAML 表記揺れや shell-like 解釈の事故を避けるため、 lower-case + 数字 + ハイフン / アンダースコアに限定。 violation は load 時 error。

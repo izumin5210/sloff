@@ -10,7 +10,7 @@
 - [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
 - 各 Resolver の詳細設計:
-  - [Resolver: script](./resolver-script.md) — prebuilt binary ( aqua 配布物 / go.mod tool / 外部 OSS パッケージの `<bin> --version` も含む)
+  - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
   - [Resolver: pnpm-local](./resolver-pnpm-local.md) — pnpm workspace 内 内製パッケージ
 
@@ -45,7 +45,7 @@
 ### Non-Goals
 
 - artifact (生成物本体) のキャッシュ / 配信 (output は git 管理されている前提)
-- generator 自体の高速化 ( buf / xo / sqlc 等の処理時間短縮)
+- generator 自体の高速化 ( generator 本体の処理時間短縮)
 - Windows 対応
 - watch モード ( 初版では非対応)
 - record の `schema_version` 移行戦略 ( 初版は schema_version 1 固定、 将来 schema を変える必要が生じた段階で別途検討)
@@ -72,9 +72,9 @@
 - record は **input hash → output hash + output ファイル一覧** の mapping のみ ( artifact は含まない)
 - cache hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
 - ツール invalidate は **OS 非依存な論理 version 文字列** を入力源別に取得して実現:
-  - **prebuilt binary** ( aqua 配布物 / `go tool <name>` / 外部 OSS パッケージの `<bin> --version` 等): script resolver が `<bin> --version` を実行し、 必要なら regex で抽出した文字列をそのまま採用 ( 「runtime のバイナリが SSoT」)。 npm 配布物も `pnpm exec <bin> --version` 等で同経路に乗せる ([ADR-0007](../adr/0007-no-external-dependency-resolver.md))
+  - **prebuilt binary** ( nix / mise / aqua 等で配布されるもの / `go tool <name>` 経由 / `pnpm exec` 経由 等): script resolver が `<bin> --version` を実行し、 必要なら regex で抽出した文字列をそのまま採用 ( 「runtime のバイナリが SSoT」)。 npm 配布物も `pnpm exec <bin> --version` 等で同経路に乗せる ([ADR-0007](../adr/0007-no-external-dependency-resolver.md))
   - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
-- 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`、 ts なら esbuild。 Pants 流の dependency inference を取り込む)
+- 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`)。 Pants 流の dependency inference は Go 側で部分的に取り込む
 - preflight ( cmd 実行前の state 検証) は **検証したい invariant が channel 別に存在するときに Checker を持つ** general subsystem。 現状の builtin は `pnpm-local` の install drift checker のみ ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認)。 script resolver / go-local では runtime バイナリやソース自体が SSoT のため Checker 不要 ( [ADR-0007](../adr/0007-no-external-dependency-resolver.md) / [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) D7)
 - record の永続化レイヤ ( Storage) も interface を切り、 初版は `LocalStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
 
@@ -293,7 +293,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 直感的には `cmd[0]` のバイナリ本体を SHA256 して hash 入力に混ぜれば良さそうだが、 OS 横断キャッシュ共有を破壊する:
 
-- aqua 配布バイナリは `darwin-arm64` / `linux-amd64` / `linux-arm64` でファイル本体が異なる
+- 外部配布の prebuilt binary ( nix / mise / aqua 等経由) は `darwin-arm64` / `linux-amd64` / `linux-arm64` でファイル本体が異なる
 - `go tool` ディレクティブで build される Go ツールも `GOOS` / `GOARCH` 別バイナリ
 - pnpm の binary cache (`~/.pnpm-store`) も同様
 
@@ -312,7 +312,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 
 | Channel | Resolver Name | 取得元 | preflight | 詳細 doc |
 |---|---|---|---|---|
-| prebuilt binary ( aqua / `go tool` / `pnpm exec` / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
+| prebuilt binary ( nix / mise / aqua 等の version manager 配布物 / `go tool` 経由 / `pnpm exec` 経由 / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
 | Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を tools_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
 | pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 必要 ( install drift: `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致。 build / run は cmd 責務 — ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
@@ -323,7 +323,7 @@ LAZYGEN_CACHE_BACKEND=s3 LAZYGEN_S3_BUCKET=lazygen-cache-prod lazygen run ...
 flowchart LR
     YAML["**/lazygen.yml<br/>(tools: + commands:)"] --> REG["spec.ToolRegistry<br/>name → DeclaredTool<br/>( repo-wide flat namespace,<br/>ADR-0008)"]
     REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Resolver.Resolve 1 回)"]
-    PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(buf / xo / sqlc / protoc-gen-go /<br/>pnpm exec ... 等)"]
+    PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(protoc-gen-go / buf /<br/>pnpm exec / go tool ... 等)"]
     PRE -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
     PRE -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: git ls-files<br/>(ExtraInputs + pnpm-deps versions)"]
     SCRIPT --> CACHE["resolved cache<br/>name → toolresolver.Result"]
@@ -353,13 +353,13 @@ declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / 
 
 内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は内部で `SourceLister` を選択するが、 これは **Resolver 内部の実装詳細** であって lazygen のトップレベル拡張ポイントには数えない。 詳細は各 Resolver doc ([go-local](./resolver-go-local.md), [pnpm-local](./resolver-pnpm-local.md)) を参照。
 
-`SourceLister` は実装にかかわらず ( `globLister` / `goPackagesLister` / `esbuildLister` のいずれでも) 以下を共通とする:
+`SourceLister` は実装にかかわらず ( `globLister` / `goPackagesLister` のいずれでも) 以下を共通とする:
 
 - **OS 非依存** ( build 成果物ではなくソーステキストの hash)
 - **lazygen バイナリ単体で完結** ( go API 直接 import、 外部 CLI ツールへの依存ゼロ、 subprocess spawn なし)
 - ソース変更には敏感に反応する
 - **lazygen 1 run 内のメモ化**: 同一 entry ( 例: 同じ内製 protoc-gen-foo を多数の proto task が使う) を複数 task が参照する場合、 `SourceLister.List(ctx, entry)` の結果を `entry` をキーに run 内でキャッシュして 1 回だけ評価する。 これは Resolver / SourceLister の単純な最適化で、 cache 健全性に影響しない ( 同一入力に対する純粋関数の結果メモ化)
-- **Resolver 単位で `SourceLister` を切替可能**: 標準実装で対応できないケース ( esbuild が静的解析できない eval / 動的 require を使う内製ツール、 `go/packages` で正しく取れない構造の Go プロジェクト等) では、 該当 Resolver の `SourceLister` を `globLister` に切り替える。 「精度は下がるが死角ゼロ」を選ぶ retreat path として常に提供する。 切替単位は Resolver なので、 影響範囲が局所化される
+- **Resolver 単位で `SourceLister` を切替可能**: 標準実装で対応できないケース ( `go/packages` で正しく取れない構造の Go プロジェクト等) では、 該当 Resolver の `SourceLister` を `globLister` に切り替える。 「精度は下がるが死角ゼロ」を選ぶ retreat path として常に提供する。 切替単位は Resolver なので、 影響範囲が局所化される
 
 ##### 性能上の優位性は別途 benchmark で検証が必要
 
@@ -374,7 +374,7 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 - invalidate 削減効果 ( 不要ファイル除外による false miss 削減 / cache hit 率向上)
 - 全体としてのビルド時間トレードオフ ( hash 計算オーバーヘッド × task 数 vs 不要再生成回避時間)
 
-検証結果次第で、 内製ツールのソース hash 抽出を **愚直 glob に retreat する** 選択肢もありうる ( Resolver の構造はそのまま、 内部の `SourceLister` を `goPackagesLister` / `esbuildLister` から `globLister` に差し替えるだけで対応可能)。 性能評価は Open Question として記録する ( 後述)。
+検証結果次第で、 内製ツールのソース hash 抽出を **愚直 glob に retreat する** 選択肢もありうる ( Resolver の構造はそのまま、 内部の `SourceLister` を `goPackagesLister` から `globLister` に差し替えるだけで対応可能)。 性能評価は Open Question として記録する ( 後述)。
 
 #### Preflight ( cmd 実行前の state 検証)
 
@@ -442,7 +442,7 @@ type Result struct {
 type ToolVersion struct {
     Name    string // 表示用 (例: "buf")
     Version string // 論理 version 文字列 (例: "v1.30.0", "sha256:abcd...")
-    Source  string // 取得元 (例: "aqua.yaml", "go.mod", "pnpm-local:@org/my-codegen")
+    Source  string // 取得元 (例: "<bin> --version", "go.mod", "pnpm-local:@org/my-codegen")
 }
 ```
 
@@ -515,20 +515,20 @@ Registry の動作:
 
 ##### Resolver 内部の `SourceLister` ( 言及)
 
-内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は、 内部で「ソースファイル列挙戦略」を選ぶ ( 標準 `globLister`、 言語別 `goPackagesLister` / `esbuildLister` 等)。 これは **Resolver 内部の実装詳細** であり、 トップレベルの拡張ポイントには数えない。 詳細は [resolver-go-local.md](./resolver-go-local.md) / [resolver-pnpm-local.md](./resolver-pnpm-local.md) を参照。
+内製ツール ( SemVer を持たないリポジトリ内ソース) を扱う Resolver は、 内部で「ソースファイル列挙戦略」を選ぶ ( 標準 `globLister`、 言語別 `goPackagesLister` 等)。 これは **Resolver 内部の実装詳細** であり、 トップレベルの拡張ポイントには数えない。 詳細は [resolver-go-local.md](./resolver-go-local.md) / [resolver-pnpm-local.md](./resolver-pnpm-local.md) を参照。
 
 新しい言語 ( Python / Rust 等) の内製ツールに対応する場合、 該当する Resolver 実装の中で `SourceLister` を新規実装するか、 既存 `globLister` で済ませるかを選ぶ。 `SourceLister` は Resolver 単位で完結するため、 lazygen 全体の拡張ポイントを増やさない。
 
 #### Future channel candidates ( 拡張想定)
 
-prebuilt binary 系 ( `mise` / `asdf` 等で配布される CLI、 自前 download スクリプトで取り回す binary 等) は **基本 `scriptResolver` で吸収できる** ため、 個別 Resolver を追加する必要は無い。 ユーザーは `tools: [{exec: ["<bin>", "--version"], extract: "..."}]` を書くだけ。
+prebuilt binary 系 ( `nix` / `mise` / `aqua` 等で配布される CLI 等) は **基本 `scriptResolver` で吸収できる** ため、 個別 Resolver を追加する必要は無い。 ユーザーは `tools: [{exec: ["<bin>", "--version"], extract: "..."}]` を書くだけ。
 
 専用 Resolver / Preflight Checker の追加が必要になるのは、 lockfile-based または ソース hash 戦略を新規に必要とするケース:
 
 | 想定 channel | 取得元 | Preflight の検証内容 | 内製ツール対応時の `SourceLister` |
 |---|---|---|---|
 | `nix` | `flake.lock` | `nix flake check` | — |
-| `bun` | `bun.lockb` | `node_modules/` 整合性 (pnpm と類似) | `esbuildLister` ( 既存) を流用 |
+| `bun` | `bun.lockb` | `node_modules/` 整合性 (pnpm と類似) | pnpm-local の git-tracked enumeration を流用 |
 | `deno` | `deno.lock` | `deno cache --reload` の成功 | TypeScript Compiler API based の代替 lister を検討 |
 | `cargo` | `Cargo.lock` | `cargo metadata` | `cargo metadata --format-version 1` 経由の rust 用 lister を検討 |
 | Python ( 仮) | `*.lock` ( poetry / uv) | install 状態確認 | ast module ベースの python 用 lister を検討 |
@@ -625,7 +625,7 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 - **Q1**: 同 input hash で複数 OS が独立に走った時、 output hash が真に一致するか。 一致しない generator (例: 行末コード差、 絶対パス埋込、 time.Now embed) が出た場合の対処方針。 cross-OS double-run 検証 CI を入れて早期発見するか
 - **Q2**: 開発者が手元で `.lazygen/cache/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
 - **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 lazygen は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと cache が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
-- **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister` / `esbuildLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
+- **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
 
 各 Resolver 固有の Open Questions は対応する Resolver doc を参照。
 
@@ -661,14 +661,13 @@ internal/lazygen/
     golocal/
       golocal.go                            # package golocal / internal: goPackagesLister (詳細は resolver-go-local.md)
     pnpmlocal/
-      pnpmlocal.go                          # package pnpmlocal / internal: esbuildLister (詳細は resolver-pnpm-local.md)
+      pnpmlocal.go                          # package pnpmlocal / internal: git-tracked enumeration (詳細は resolver-pnpm-local.md)
     # buf 専用 resolver は持たない ( ADR-0006)。 buf を使う task は script + spec.inputs で表現する
     # 外部公開パッケージ専用 resolver も持たない ( ADR-0007)。 npm / Go OSS は script で吸収する
     lister/                                 # Resolver 内部 helper (トップレベル拡張点ではない、 1 package で十分)
       lister.go                             # SourceLister interface
       glob.go                               # globLister (標準実装、 ディレクトリ配下を glob 列挙)
       gopackages.go                         # goPackagesLister (golang.org/x/tools/go/packages を直接 import)
-      esbuild.go                            # esbuildLister (github.com/evanw/esbuild/pkg/api を直接 import)
       # 将来追加候補 ( 初版では実装しない):
       #   tsc.go             (TypeScript Compiler API ベースの代替)
       #   cargo_metadata.go  (Rust 用)
@@ -699,4 +698,4 @@ internal/lazygen/
 
 トップレベル package ( `toolresolver` / `preflight` / `cache`) には interface 定義と Registry のみを置き、 各実装 package は interface を import して `Resolver` / `Checker` / `Storage` を返す factory を export する。 Registry には `main.go` 等の起動側で必要な実装を組み立てて register する ( DI コンテナ的な使い方)。
 
-`SourceLister` ( Resolver 内部 helper) は **トップレベル拡張ポイントではないため 1 package** で十分とする ( `lister.go` / `glob.go` / `gopackages.go` / `esbuild.go` を同じ package に同居)。 ここを細かく分けすぎると過剰設計になる。
+`SourceLister` ( Resolver 内部 helper) は **トップレベル拡張ポイントではないため 1 package** で十分とする ( `lister.go` / `glob.go` / `gopackages.go` を同じ package に同居)。 ここを細かく分けすぎると過剰設計になる。

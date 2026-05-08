@@ -14,7 +14,7 @@
 
 - Go ツールチェーン (`go.mod` 1.24 `tool` ディレクティブ、 `go run`、 内製 Go CLI) と整合すること
 - Node ツールチェーン ( pnpm workspace、 `pnpm exec`、 workspace 内自作ツール) と整合すること
-- 外部配布の prebuilt binary ( aqua / mise / asdf / `pnpm exec` 経由の bin / `go tool` 経由 / 自前 download スクリプト 等の配布チャネル全般) と整合すること
+- 外部配布の prebuilt binary ( nix / mise / aqua 等の version manager で配布される CLI、 `pnpm exec` 経由の npm bin、 `go tool` 経由の Go ツール 等) と整合すること
 - 既存 monorepo 構造 ( Go module、 pnpm workspace 等) を大きく変えないこと
 - 全エンジニアに課す日常メンテコストが許容範囲に収まること
 
@@ -29,7 +29,7 @@
 
 防御線 (1) は channel 別に取得方法を変えて達成する:
 
-- **外部配布の prebuilt binary** ( aqua / mise / asdf / `pnpm exec` 経由 / `go tool` 経由 / 自前 download スクリプト 等の配布チャネル全般): 「実 install されているバイナリの `--version` 出力」を直接捕捉する。 lockfile vs install のズレが構造的に存在しないため preflight 不要 ( script resolver)
+- **外部配布の prebuilt binary** ( nix / mise / aqua 等の version manager で配布されるもの、 `pnpm exec` 経由の npm bin、 `go tool` 経由の Go ツール 等): 「実 install されているバイナリの `--version` 出力」を直接捕捉する。 lockfile vs install のズレが構造的に存在しないため preflight 不要 ( script resolver)
 - **workspace 内 npm package**: lockfile を SSoT とし、 lockfile vs `node_modules` の整合は preflight で検証 ( pnpm-local resolver + checker)
 - **内製ソース**: ソース hash を直接取るので runtime とのズレは起こらない ( go-local / pnpm-local)
 
@@ -55,7 +55,7 @@
 | Go ツールチェーン対応 | × ( shell 起動) | △ ( community plugin `@nx-go/nx-go`) | ◎ ( rules_go) | ○ ( v2.1+ で `go list --deps`) | ○ ( `go_mod`) | ◎ |
 | JS/TS ツールチェーン対応 | ◎ | ◎ | ○ ( rules_js) | ◎ | △ | ○ ( pnpm workspace) |
 | 依存自動導出 ( Go) | × | △ ( plugin 依存) | △ ( `gazelle` パッケージ粒度) | ○ ( `go list --deps` / パッケージ粒度) | ◎ ( import 静的解析 / ファイル粒度) | ○ ( task 粒度: glob 交差 / 内製 CLI 内部: `go/packages`) |
-| 依存自動導出 ( JS/TS) | × ( 手動 `dependsOn`) | ◎ ( import 解析 / ファイル粒度) | △ ( 手動 srcs) | △ ( 手動 `dependsOn` + workspace dep) | ○ ( import 解析) | ○ ( task 粒度: glob 交差 / 内製ツール内部: esbuild API) |
+| 依存自動導出 ( JS/TS) | × ( 手動 `dependsOn`) | ◎ ( import 解析 / ファイル粒度) | △ ( 手動 srcs) | △ ( 手動 `dependsOn` + workspace dep) | ○ ( import 解析) | ○ ( task 粒度: glob 交差 / 内製ツール内部: pnpm workspace の git-tracked enumeration) |
 | **(1) OS 中立 logical version が runtime と整合** | × ( machine 別 hash) | × | × ( ツールバイナリが action input / REAPI 由来で OS 別) | △ ( proto 管理ランタイムのみ / install 検証なし) | × ( REAPI 由来で OS 別) | ◎ ( prebuilt = `--version` 直取り、 lockfile-based = lockfile + preflight、 内製 = ソース hash) |
 | **(2) output-comparison 判定** | × | × | × ( `bazelbuild/bazel#14543` 未解決) | × | × | ◎ |
 | 外部配布 prebuilt binary 群との SSoT 直読み | × | × | × ( Bazel が toolchain を所有) | × ( proto 管理外は対象外) | × | ◎ |
@@ -82,7 +82,7 @@ JS/TS 中心の monorepo タスクオーケストレータ。 Vercel が開発�
 - task 間依存は `turbo.json` の `dependsOn` で **手動宣言**、 inputs はデフォルト「非 gitignored 全ファイル」と粗い
 - (1) OS 中立 version: 公式 discussion `vercel/turborepo#9004` で「machine 間で hash がズレる」事例多数報告。 globalHash に lockfile を含むだけで OS バイナリ hash の問題は未解決
 - (2) output-comparison: input-only 判定、 output は検証しない
-- 外部配布の prebuilt binary ( aqua / mise / `go tool` 等) は SSoT として認識されない
+- 外部配布の prebuilt binary ( nix / mise / aqua / `go tool` 等) は SSoT として認識されない
 
 2 防御線すべてを満たさない。 「JS 単言語で素早く incremental」という設計目標が本 ADR の問題設定 ( polyglot codegen / 共有 cache の健全性) と合わない。
 
@@ -146,7 +146,7 @@ Rust 製の polyglot タスクランナー。 `v1.38` (2025-06) で Go toolchain
 
 👎 **Cons**
 
-- (1) OS 中立 version: proto 管理外のツール ( aqua の xo / sqlc / tbls など) は対象外、 別途 lockfile / バイナリ hash で OS 別分裂
+- (1) OS 中立 version: proto 管理外のツール ( nix / aqua 等で配布される prebuilt binary 全般) は対象外、 別途 lockfile / バイナリ hash で OS 別分裂
 - install drift 検出は持たない: lockfile から resolved version を hash に組み込むだけで、 「lockfile 更新したが install してない」状態は検出しない
 - (2) output-comparison: input-only + outputs を tarball 化して archive する hydration モデル。 output drift は検出しない
 - 外部配布の prebuilt binary ( proto 管理外) との直接統合は無し ( install したバイナリを `~/.local/bin` 経由で叩く形になり、 論理 version は別途 spec で明示する必要)
@@ -172,7 +172,7 @@ Pantsbuild 製の polyglot ビルダー (2.31 が 2026-02 リリース)。 「**
 - (1) OS 中立 version: REAPI 由来でツールバイナリが action input → OS / CPU 別 hash 分岐 ( Bazel と同様の問題)
 - install drift 検出: Python の lockfile (`*.lock`) では実行前拒否の仕組みがあるが、 Go では `go.sum` を読むだけで install 状態は検証しない
 - (2) output-comparison: input-only ( REAPI モデル)
-- 外部配布の prebuilt binary ( aqua / mise 等) との直接統合は無し、 pnpm 対応は薄い
+- 外部配布の prebuilt binary ( nix / mise / aqua 等) との直接統合は無し、 pnpm 対応は薄い
 
 依存自動導出は lazygen の参考にすべき優れた設計だが、 2 防御線のうち (1) ( OS 別 hash) と (2) output-comparison を欠き、 外部配布 prebuilt binary 群との直接統合も持たないため、 本 ADR の問題設定では ROI が見合わない。
 
@@ -185,7 +185,7 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
 - **2 防御線すべてを設計レベルで強制できる**:
   - (1) channel 別の取得経路で OS 中立な logical version を必ず runtime と整合させる ( prebuilt = `--version` 直取り、 workspace 内 npm = lockfile + preflight、 内製 = ソース hash)
   - (2) output-comparison 二段判定で drift を fail-fast に検出
-- 外部配布の prebuilt binary 群 ( aqua / mise / asdf / `pnpm exec` / `go tool` 経由 / 自前 download 等) を均等に SSoT として読みにいく resolver を組める
+- 外部配布の prebuilt binary 群 ( nix / mise / aqua 等で配布されるもの、 `pnpm exec` / `go tool` 経由のもの 等) を均等に SSoT として読みにいく resolver を組める
 - 既存 monorepo 構造 ( Go module、 pnpm workspace、 lockfile 群) を変更不要
 - 内製ゆえ全エンジニアに新しい既製ツールの学習コストを課さない
 - Pants 流の import 解析 ( ファイル粒度の依存導出) を内製ソース hash に取り込める ( Design Doc 参照)

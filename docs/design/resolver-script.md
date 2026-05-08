@@ -1,6 +1,6 @@
 # Resolver: script
 
-`scriptResolver` は **任意の prebuilt binary ツール** の論理 version を、 そのバイナリ自身に問い合わせて取得する汎用 resolver。 aqua で配布される OSS バイナリ ( `buf` / `xo` / `sqlc` / `tbls` 等) や、 Go の `go.mod` `tool` ディレクティブ経由で得られる ツール ( `protoc-gen-go` / `mockgen` 等) を一律に扱う。
+`scriptResolver` は **任意の prebuilt binary ツール** の論理 version を、 そのバイナリ自身に問い合わせて取得する汎用 resolver。 nix / mise / aqua 等の version manager で配布される OSS バイナリ や、 Go の `go.mod` `tool` ディレクティブ経由で得られるツール、 `pnpm exec` 経由で起動する npm bin 等を一律に扱う。
 
 関連:
 - [Architecture](./architecture.md)

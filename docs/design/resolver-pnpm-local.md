@@ -175,6 +175,32 @@ walk := WalkDeps(lockfile, "packages/codegen")
 
 詳細は [ADR-0007](../adr/0007-no-external-dependency-resolver.md) の「外部依存の surgical 取り扱い」 節も参照。
 
+## Install drift check ( `pnpm install` 忘れ検出)
+
+pnpm-local の hash 入力は **lockfile から walk した resolved version** だが、 cmd 実行時は **node_modules に install された実体** を読み込む。 利用者が `git pull` で新 `pnpm-lock.yaml` を取り込んでから `pnpm install` を忘れると、 hash 経路は新 lockfile を、 runtime は古い install を見ることになる ( silent stale)。
+
+これを構造的に防ぐため、 Resolver は Resolve 冒頭で:
+
+```
+hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
+  → yes: install in sync ( 続行)
+  → no:  fail-loudly ( "please run `pnpm install`")
+```
+
+`node_modules/.pnpm/lock.yaml` は pnpm が `pnpm install` 時に **`pnpm-lock.yaml` を byte-for-byte コピー** して書き出す install state snapshot。 byte 比較で:
+
+- snapshot 不在 → `pnpm install` 未実行
+- byte mismatch → lockfile 編集後 install 忘れ ( whitespace のみの edit でも検知、 これは feature)
+
+実装は `AssertInstallInSync(repoRoot)` ( `drift.go`)。 fail 時は `ErrInstallStale` を wrap する。
+
+### 設計上の補足
+
+- pnpm の hash アルゴリズム ( `getLockfileHash`) を replicate せず、 「 pnpm が書いた snapshot をそのまま比較」 で済ませている。 アルゴリズム drift / pnpm version 互換の risk なし
+- subprocess なし ( `pnpm install --frozen-lockfile` のような外部 invocation を使わない)
+- pnpm-lock.yaml が SSoT であることは変わらない ( ADR-0007 の責務境界そのまま)。 install state は **drift detection のみ** に使い、 hash 入力には混ぜない ( drift 通過時は両者一致しているので冗長)
+- 検討した代替案: `.modules.yaml.rootProject.lockfile.checksum` field を読む案、 アルゴリズムを Go で replicate する案、 `pnpm install --frozen-lockfile --offline` を subprocess する案。 いずれも .pnpm/lock.yaml の byte 比較より複雑 / 脆い ( 実検証で `.modules.yaml` には期待していた checksum field が無いことも判明)
+
 ## Preflight Checker は持たない
 
 旧設計では「`bin` が `dist/` を指していれば build 必須、 `dist/` が存在 / src より新しいかで判定」 という preflight checker を持っていたが、 ADR-0008 D7 で「 build / run は cmd 責務」 と決めた時点で構造的に不要になった:
@@ -182,6 +208,8 @@ walk := WalkDeps(lockfile, "packages/codegen")
 - `dist/` `src/` は pnpm / npm 標準ではなくコミュニティ慣習にすぎず、 lazygen が前提にすると別 layout の repo で破綻する
 - 「 rebuild 忘れ」 は cmd 内に `pnpm build && exec` を書いてもらうことで構造的に消える ( source 編集 → files_hash 変化 → cmd 再実行 → cmd 内 build → 最新 binary で実行)
 - pnpm-local 自身は「 利用者が repo に置いているファイルを inputs に乗せる」 input contributor だけを担う
+
+`pnpm install` 忘れの「 install drift」 は別で検出する ( 上記 「 Install drift check」)。
 
 ## Open Questions
 

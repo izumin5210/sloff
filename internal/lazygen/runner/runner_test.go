@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io/fs"
 	"os"
@@ -122,7 +123,7 @@ func runStep() step {
 		resolverReg := toolresolver.NewRegistry()
 		resolverReg.Register(script.New(h.workdir))
 		resolverReg.Register(golocal.New(h.workdir, lister.NewMemoized(lister.NewGoPackages(h.workdir))))
-		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles)
+		pnpmRes, err := pnpmlocal.New(h.workdir, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
 		if err != nil {
 			t.Fatalf("pnpmlocal.New: %v", err)
 		}
@@ -507,6 +508,75 @@ commands:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should mention %q, got: %v", want, err)
 		}
+	}
+}
+
+// TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing guards the drift
+// check end to end: a task that references a pnpm-local tool must abort
+// the run when node_modules/.pnpm/lock.yaml is missing (= pnpm install
+// was never executed against this checkout). Without the abort, the
+// resolver would hand the cmd a stale-install cache key and silent stale
+// outputs would propagate.
+func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
+	workdir := t.TempDir()
+	gitInitWorkdir(t, workdir)
+	mustWrite := func(rel, contents string) {
+		t.Helper()
+		full := filepath.Join(workdir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("pnpm-lock.yaml", `lockfileVersion: '9.0'
+importers:
+  packages/codegen: {}
+`)
+	mustWrite("package.json", `{"name":"monorepo-root","private":true}`)
+	mustWrite("packages/codegen/package.json", `{"name":"@org/codegen"}`)
+	mustWrite("input.txt", "hello")
+	mustWrite("lazygen.yml", `tools:
+  codegen:
+    pnpm-local: "@org/codegen"
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [codegen]
+`)
+	// node_modules/.pnpm/lock.yaml intentionally absent — pnpm install was
+	// never run.
+
+	specs, err := spec.Discover(workdir, "**/lazygen.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	pnpmRes, err := pnpmlocal.New(workdir, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
+	if err != nil {
+		t.Fatalf("pnpmlocal.New: %v", err)
+	}
+	resolverReg.Register(pnpmRes)
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+		Clock:     func() time.Time { return fixedClock },
+	})
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when node_modules/.pnpm/lock.yaml is missing")
+	}
+	if !errors.Is(err, pnpmlocal.ErrInstallStale) {
+		t.Errorf("error should wrap ErrInstallStale, got: %v", err)
 	}
 }
 

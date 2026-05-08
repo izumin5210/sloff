@@ -82,7 +82,7 @@ func buildResolvers(root string) (*toolresolver.Registry, error) {
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(root))
 	reg.Register(golocal.New(root, lister.NewMemoized(lister.NewGoPackages(root))))
-	pnpmRes, err := pnpmlocal.New(root, pnpmlocal.GitLsFiles)
+	pnpmRes, err := pnpmlocal.New(root, pnpmlocal.GitLsFiles, pnpmlocal.AssertInstallInSync)
 	if err != nil {
 		return nil, fmt.Errorf("build pnpm-local resolver: %w", err)
 	}

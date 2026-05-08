@@ -281,9 +281,15 @@ func mustWriteFile(t *testing.T, full, contents string) {
 
 func mustNewResolver(t *testing.T, root string, stub *fakeEnumerator) *pnpmlocal.Resolver {
 	t.Helper()
-	r, err := pnpmlocal.New(root, stub.enumerate)
+	r, err := pnpmlocal.New(root, stub.enumerate, noopDriftChecker)
 	if err != nil {
 		t.Fatalf("pnpmlocal.New: %v", err)
 	}
 	return r
 }
+
+// noopDriftChecker accepts any repo state. Resolver tests inject this so the
+// in-test workspace fixtures don't need to materialise a real
+// node_modules/.pnpm/lock.yaml; the drift-check behaviour itself is exercised
+// in drift_test.go.
+func noopDriftChecker(_ string) error { return nil }

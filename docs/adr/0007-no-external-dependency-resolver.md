@@ -52,6 +52,8 @@ tools:
 
 外部公開パッケージで lockfile-based ( pnpm-external 想定) を選ぶと preflight ( lockfile vs install 整合) が必須になる。 一方 runtime `--version` を取れば preflight 不要 ( runtime バイナリそのものが SSoT なので構造的にズレない、 architecture.md の preflight 要否表を参照)。 lazygen の責務は **cache 健全性** であって **依存管理ツール ( pnpm) の運用 lint** ではない、 という ADR-0006 の責務境界に従えば、 後者を選ぶのが一貫する。
 
+なお内製ソース resolver ( `pnpm-local`) は lockfile を SSoT として外部 dep を hash に取り込む立場のため、 「 lockfile updated だが `pnpm install` 忘れ」 の install drift だけは別途検出する必要がある ( 検出しないと silent stale 実行が起きる)。 lazygen はこれを最小コストで処理する: pnpm が `pnpm install` 時に書く `node_modules/.pnpm/lock.yaml` は `pnpm-lock.yaml` の byte-for-byte コピーなので、 両者の byte 比較で drift detection できる ( 詳細は resolver-pnpm-local.md の「 Install drift check」 節)。 これは「 install 状態を SSoT にする」 ものではなく「 SSoT である lockfile と pnpm が書いた install snapshot の一致確認」 で、 ADR-0007 の責務境界とは矛盾しない。
+
 **O4. 内製ソース resolver は別の責務を持つので残す**
 
 `go-local` / `pnpm-local` は SemVer を持たない repo 内ソースを「ソースファイル集合の hash」で表現するためのもの。 これは prebuilt binary の `--version` では代替できない ( binary が存在しない / build 必須 / 開発中で日々 source が動く)。 つまり内製ソース resolver は script で吸収できず、 独立 channel として残す必要がある。 本 ADR が削るのはあくまで「**外部公開パッケージ専用**」 resolver。

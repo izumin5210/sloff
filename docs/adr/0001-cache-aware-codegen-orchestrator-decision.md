@@ -37,7 +37,7 @@
 
 > **Updated 2026-05-05**: 旧版では (1) OS 中立 logical version、 (2) lockfile vs install preflight、 (3) output-comparison の 3 防御線 と整理していた。 設計を進める中で、 prebuilt binary については「実 install バイナリの `--version` 出力」 を直接 hash 入力にする方式 ( script resolver) で (1) と旧 (2) が同時自動成立することが分かったため、 防御線を 2 つに統合し、 preflight は lockfile-based channel 固有の実装詳細に格下げした。
 
-> **Updated 2026-05-08**: 比較対象に Nx と Buck2 を追加し、 各既製品の Pros を明記してフェアな評価に整理し直した。 また「 aqua」 等の固有ツール名は「 外部配布の prebuilt binary 」 という抽象に統一し、 lazygen の Cons に scope ( codegen 専用 / artifact 非対応 / remote cache 初版未実装 / 実績ゼロ 等) を明示した。
+> **Updated 2026-05-08**: 比較対象に Nx を追加し、 各既製品の Pros を明記してフェアな評価に整理し直した。 また「 aqua」 等の固有ツール名は「 外部配布の prebuilt binary 」 という抽象に統一し、 lazygen の Cons に scope ( codegen 専用 / artifact 非対応 / remote cache 初版未実装 / 実績ゼロ 等) を明示した。 Buck2 は Bazel と評価軸がほぼ同じため独立 Option としては立てず、 Bazel 節内で簡潔に言及する扱いに留めた。
 
 ### References
 
@@ -49,21 +49,21 @@
 
 ### Comparison Table
 
-| | A: Turborepo | B: Nx | C: Bazel | D: Buck2 | E: moonrepo | F: Pants | **G: 自作 lazygen (採用)** |
-|---|---|---|---|---|---|---|---|
-| 一般機能の成熟度 | ◎ | ◎ | ◎ | ○ | ○ | ○ | × ( 自作する) |
-| Go ツールチェーン対応 | × ( shell 起動) | △ ( community plugin `@nx-go/nx-go`) | ◎ ( rules_go) | ○ ( rules) | ○ ( v2.1+ で `go list --deps`) | ○ ( `go_mod`) | ◎ |
-| JS/TS ツールチェーン対応 | ◎ | ◎ | ○ ( rules_js) | ○ | ◎ | △ | ○ ( pnpm workspace) |
-| 依存自動導出 ( Go) | × | △ ( plugin 依存) | △ ( `gazelle` パッケージ粒度) | △ ( rules / 手動寄り) | ○ ( `go list --deps` / パッケージ粒度) | ◎ ( import 静的解析 / ファイル粒度) | ○ ( task 粒度: glob 交差 / 内製 CLI 内部: `go/packages`) |
-| 依存自動導出 ( JS/TS) | × ( 手動 `dependsOn`) | ◎ ( import 解析 / ファイル粒度) | △ ( 手動 srcs) | △ | △ ( 手動 `dependsOn` + workspace dep) | ○ ( import 解析) | ○ ( task 粒度: glob 交差 / 内製ツール内部: esbuild API) |
-| **(1) OS 中立 logical version が runtime と整合** | × ( machine 別 hash) | × | × ( ツールバイナリが action input) | × ( REAPI 由来で OS 別) | △ ( proto 管理ランタイムのみ / install 検証なし) | × ( REAPI 由来で OS 別) | ◎ ( prebuilt = `--version` 直取り、 lockfile-based = lockfile + preflight、 内製 = ソース hash) |
-| **(2) output-comparison 判定** | × | × | × ( `bazelbuild/bazel#14543` 未解決) | × | × | × | ◎ |
-| 外部配布 prebuilt binary 群との SSoT 直読み | × | × | × ( Bazel が toolchain を所有) | × | × ( proto 管理外は対象外) | × | ◎ |
-| 既存 monorepo 構造への影響 | △ ( `turbo.json` + `dependsOn` 整備) | △ ( workspace への寄せ替え推奨) | × ( `BUILD.bazel` 全展開) | × ( `BUCK` ファイル全展開) | △ ( `workspace.yml` + `moon.yml`) | × ( `BUILD` ファイル) | ○ ( spec dir ごとに `lazygen.yml` 必要だが既存設定は変更不要) |
-| Remote cache ( 既製) | ◎ | ◎ ( Nx Cloud) | ◎ ( REAPI) | ◎ ( REAPI) | ◎ ( moonbase) | ◎ ( REAPI) | × ( 初版未実装) |
-| Artifact cache | ◎ | ◎ | ◎ | ◎ | ◎ | ◎ | × ( Non-Goal) |
-| 初期実装コスト | 低 | 低 | 中〜高 | 中〜高 | 低 | 中 | 高 |
-| 継続メンテコスト | △ | △ | × | △ | △ | △ | ○ ( 内製 / スコープを狭く絞ったぶん小さい) |
+| | A: Turborepo | B: Nx | C: Bazel ( Buck2 含む) | D: moonrepo | E: Pants | **F: 自作 lazygen (採用)** |
+|---|---|---|---|---|---|---|
+| 一般機能の成熟度 | ◎ | ◎ | ◎ | ○ | ○ | × ( 自作する) |
+| Go ツールチェーン対応 | × ( shell 起動) | △ ( community plugin `@nx-go/nx-go`) | ◎ ( rules_go) | ○ ( v2.1+ で `go list --deps`) | ○ ( `go_mod`) | ◎ |
+| JS/TS ツールチェーン対応 | ◎ | ◎ | ○ ( rules_js) | ◎ | △ | ○ ( pnpm workspace) |
+| 依存自動導出 ( Go) | × | △ ( plugin 依存) | △ ( `gazelle` パッケージ粒度) | ○ ( `go list --deps` / パッケージ粒度) | ◎ ( import 静的解析 / ファイル粒度) | ○ ( task 粒度: glob 交差 / 内製 CLI 内部: `go/packages`) |
+| 依存自動導出 ( JS/TS) | × ( 手動 `dependsOn`) | ◎ ( import 解析 / ファイル粒度) | △ ( 手動 srcs) | △ ( 手動 `dependsOn` + workspace dep) | ○ ( import 解析) | ○ ( task 粒度: glob 交差 / 内製ツール内部: esbuild API) |
+| **(1) OS 中立 logical version が runtime と整合** | × ( machine 別 hash) | × | × ( ツールバイナリが action input / REAPI 由来で OS 別) | △ ( proto 管理ランタイムのみ / install 検証なし) | × ( REAPI 由来で OS 別) | ◎ ( prebuilt = `--version` 直取り、 lockfile-based = lockfile + preflight、 内製 = ソース hash) |
+| **(2) output-comparison 判定** | × | × | × ( `bazelbuild/bazel#14543` 未解決) | × | × | ◎ |
+| 外部配布 prebuilt binary 群との SSoT 直読み | × | × | × ( Bazel が toolchain を所有) | × ( proto 管理外は対象外) | × | ◎ |
+| 既存 monorepo 構造への影響 | △ ( `turbo.json` + `dependsOn` 整備) | △ ( workspace への寄せ替え推奨) | × ( `BUILD.bazel` / `BUCK` 全展開) | △ ( `workspace.yml` + `moon.yml`) | × ( `BUILD` ファイル) | ○ ( spec dir ごとに `lazygen.yml` 必要だが既存設定は変更不要) |
+| Remote cache ( 既製) | ◎ | ◎ ( Nx Cloud) | ◎ ( REAPI) | ◎ ( moonbase) | ◎ ( REAPI) | × ( 初版未実装) |
+| Artifact cache | ◎ | ◎ | ◎ | ◎ | ◎ | × ( Non-Goal) |
+| 初期実装コスト | 低 | 低 | 中〜高 | 低 | 中 | 高 |
+| 継続メンテコスト | △ | △ | × | △ | △ | ○ ( 内製 / スコープを狭く絞ったぶん小さい) |
 
 ### Option A: Turborepo
 
@@ -130,28 +130,9 @@ Google が開発する大規模 monorepo 向け業界標準ビルダー。 `rule
 
 機能面ではどのツールよりも強力で、 「 artifact / コンパイル結果まで cache 共有したい」 「 巨大 monorepo を分散実行で回したい」 ニーズには第一選択。 ただし本 ADR の問題設定 ( 既存パッケージマネージャ群を温存しつつ codegen の cache 健全性を上げる) では、 移行コストと 2 防御線を欠く構造的な問題で ROI が見合わない。
 
-### Option D: Buck2
+> Meta の **Buck2** ( Bazel 系の Rust 実装、 dynamic deps / incremental 性能改善 / REAPI 互換) も hermetic build 系の現代的選択肢として存在するが、 本 ADR の評価軸 ( 2 防御線 / 既存 package manager 温存 / 外部配布 prebuilt binary との連携) では Bazel とほぼ同じ評価になるため、 独立 Option としては立てず本節に内包する。 新規導入で hermetic を選ぶ場合は Bazel と Buck2 を別途比較する価値があるが、 lazygen との対比文脈では区別不要と判断した。
 
-Meta が内製していた Buck の後継として 2023 年にオープン化された Rust 製の hermetic ビルダー。 Bazel ライクの思想を引き継ぎつつ、 性能と incremental 性で改善している。
-
-👍 **Pros**
-
-- Bazel と同等の hermetic / artifact cache / REAPI 連携を、 Rust 実装で性能改善。 incremental build が高速
-- Dynamic dependencies ( Bazel にない概念) でコード生成を含む複雑な build graph をより自然に表現できる
-- Starlark + 独自プリミティブで、 既存 Bazel rules を移植しやすい設計
-- Meta 社内の巨大 monorepo で運用された実績
-
-👎 **Cons**
-
-- `BUCK` ファイルを全パッケージに撒く点は Bazel と同様、 初期 / 継続コストが大きい
-- (1) OS 中立 version: REAPI ベースゆえ Bazel と同様 toolchain が action input に入り、 cross-OS record 共有は構造的に困難
-- (2) output-comparison: input-only
-- 外部配布の prebuilt binary を SSoT として読みに行く設計は不向き ( hermetic 思想と衝突)
-- エコシステム / 商用サポート / 周辺ツール群は Bazel に比べてまだ薄い ( Rust / OCaml の rules は強い)
-
-Bazel 系の現代的な代替として有力で、 特に新規に hermetic build を導入するなら Bazel より Buck2 が現実解になることもある。 ただし本 ADR の問題設定での評価は Bazel と同様。
-
-### Option E: moonrepo
+### Option D: moonrepo
 
 Rust 製の polyglot タスクランナー。 `v1.38` (2025-06) で Go toolchain を公式追加、 `v2.1` (2026-03) で `go list --deps` を呼ぶ project graph 拡張が入った。
 
@@ -173,14 +154,14 @@ Rust 製の polyglot タスクランナー。 `v1.38` (2025-06) で Go toolchain
 
 2 防御線のうち (1) を部分的に満たす ( proto 管理ランタイム以外 / install 検証なし) が (2) output-comparison は欠ける。 「moonrepo + 妥協」で実用上は回せる選択肢として真剣な対抗馬になる。
 
-### Option F: Pants
+### Option E: Pants
 
 Pantsbuild 製の polyglot ビルダー (2.31 が 2026-02 リリース)。 「**dependency inference is special sauce**」を明確に掲げる。
 
 👍 **Pros**
 
 - ファイル粒度の import 静的解析で `BUILD` ファイルの `dependencies` を完全自動推論 ( **依存自動導出は業界最強**)
-- `./pants tailor` で `BUILD` 雛形も自動生成 ( メンテ負担は Bazel/Buck2 より軽い)
+- `./pants tailor` で `BUILD` 雛形も自動生成 ( メンテ負担は Bazel より軽い)
 - Python / Go / JS / JVM / Shell など複数言語の lockfile を SSoT として読みにいく設計の徹底度は高い
 - REAPI 準拠の remote cache
 - Python monorepo での実績が厚い
@@ -195,7 +176,7 @@ Pantsbuild 製の polyglot ビルダー (2.31 が 2026-02 リリース)。 「**
 
 依存自動導出は lazygen の参考にすべき優れた設計だが、 2 防御線のうち (1) ( OS 別 hash) と (2) output-comparison を欠き、 外部配布 prebuilt binary 群との直接統合も持たないため、 本 ADR の問題設定では ROI が見合わない。
 
-### Option G: 自作 lazygen ( 採用)
+### Option F: 自作 lazygen ( 採用)
 
 monorepo の実情に合わせた専用オーケストレーターを実装する。
 
@@ -225,11 +206,11 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
 
 ## Decision
 
-**Option G: 自作 ( lazygen) を採用する。**
+**Option F: 自作 ( lazygen) を採用する。**
 
 採用根拠:
 
-1. **既製品 6 ツールのいずれも「キャッシュ健全性の 2 防御線」を満たさない**
+1. **既製品 5 ツール ( Bazel に Buck2 を含めて 6 製品) のいずれも「キャッシュ健全性の 2 防御線」を満たさない**
    - (1) OS 中立な logical version が runtime と整合: moonrepo が proto 管理ランタイムのみ部分対応 ( かつ install 検証なし)、 他は OS 別バイナリ hash で分裂。 外部配布の prebuilt binary 群との直接統合はどのツールにも無し。 lockfile と install 状態の整合検証 ( workspace 内 npm package で必要) も既製品では仕組みが無い
    - (2) output-comparison: 全ツール input-only、 Bazel `bazelbuild/bazel#14543` のように「empty output でも cache」が業界共通の既知問題
 2. **中〜大規模 monorepo の規模では、 偽 cache が共有された場合の影響範囲が大きい**。 「cache を信じきれず `--no-cache` を打つ習慣」が現場に残ると共有 cache の存在意義そのものが失われる。 2 防御線を構造で強制する価値は高い

@@ -1,4 +1,4 @@
-// Minimal repo-local generator nested under spec/. The lazygen.yml in spec/
+// Minimal repo-local generator nested under spec/. The sloff.yml in spec/
 // references it via `go run ./cmd/copy`, so the resolver must rebase the entry
 // to repo-relative form before handing it to packages.Load.
 package main

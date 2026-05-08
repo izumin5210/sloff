@@ -5,7 +5,7 @@
 関連:
 - [Architecture](./architecture.md)
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md)
-- [ADR-0007: lazygen は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) — npm / Go OSS パッケージも script で吸収
+- [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) — npm / Go OSS パッケージも script で吸収
 
 ## Context
 
@@ -25,7 +25,7 @@ prebuilt binary 配布物 (`darwin-arm64` / `linux-amd64` 等) は OS 別にバ�
 spec の top-level `tools:` map で名前付き定義された `exec` ( cmd 配列) を実行し、 stdout を捕捉する。 必要なら `extract` で正規表現を当てて version 部分を切り出す ( ADR-0008 で named-tool 化)。
 
 ```yaml
-# <spec_dir>/lazygen.yml
+# <spec_dir>/sloff.yml
 tools:
   buf:
     exec: ["buf", "--version"]
@@ -77,7 +77,7 @@ cmd 文字列だけで `tools_hash` を fallback 計算するような暗黙挙�
 
 ### Dispatch (declared-only)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により、 lazygen には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も `tools:` map での named 定義を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により、 sloff には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も `tools:` map での named 定義を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
 
 ```yaml
 tools:
@@ -108,7 +108,7 @@ import (
     "strings"
     "sync"
 
-    "github.com/izumin5210/lazygen/internal/lazygen/toolresolver"
+    "github.com/izumin5210/sloff/internal/sloff/toolresolver"
 )
 
 const Name = "script"
@@ -208,13 +208,13 @@ func makeVersion(execHead, captured string) toolresolver.ToolVersion {
 
 ### 1 run 内のメモ化
 
-同一の `(exec, extract)` 組は lazygen 1 run 内で **1 度だけ実行** し、 結果を memoize する。 数十 task が同じ `buf --version` を要求しても subprocess は 1 回しか起動しない。
+同一の `(exec, extract)` 組は sloff 1 run 内で **1 度だけ実行** し、 結果を memoize する。 数十 task が同じ `buf --version` を要求しても subprocess は 1 回しか起動しない。
 
 ## Preflight Checker
 
 **不要**。 script resolver は「実際に install されているバイナリ」を直接呼ぶため、 lockfile と install 状態のズレが構造的に生じない。 旧 aqua / go-external 系で必要だった `aqua-checksums.json` 検証 / `go list -m` 検証は廃止。
 
-利用者が「aqua.yaml と install 状態の整合性を CI で強制したい」場合は、 lazygen の責務外として `aqua install --update-checksum` 等の事前 check を CI step で別途回す運用に分離する。
+利用者が「aqua.yaml と install 状態の整合性を CI で強制したい」場合は、 sloff の責務外として `aqua install --update-checksum` 等の事前 check を CI step で別途回す運用に分離する。
 
 ## SourceLister
 
@@ -275,7 +275,7 @@ tools:
 このケースは script resolver では扱えない。 利用者は次のいずれかを選ぶ:
 
 - 該当 generator が repo 内ソースから build される場合は [go-local](./resolver-go-local.md) / [pnpm-local](./resolver-pnpm-local.md) ( workspace package なら) に振る ( 外部公開パッケージ専用 resolver は持たない、 [ADR-0007](../adr/0007-no-external-dependency-resolver.md))
-- shim を書く ( `lazygen.yml` の `tools: my-tool: { exec: ["bash", "-c", "cat .my-tool-version"] }` のような lockfile 風文字列を返すスクリプト)。 ただし shim ファイル自体の更新が反映されるかを利用者が責任を持つ
+- shim を書く ( `sloff.yml` の `tools: my-tool: { exec: ["bash", "-c", "cat .my-tool-version"] }` のような lockfile 風文字列を返すスクリプト)。 ただし shim ファイル自体の更新が反映されるかを利用者が責任を持つ
 
 shim を許容するかは Open Question ( 後述)。
 
@@ -283,5 +283,5 @@ shim を許容するかは Open Question ( 後述)。
 
 - **`extract` regex の caputure group 位置**: group 1 を採用するか、 名前付き group ( `(?P<v>...)`) を強制するか。 初版は group 1 採用 / 無ければマッチ全体、 で良さそう
 - **stderr 取得**: 一部ツール ( 古い Python など) は `--version` を stderr に出す。 spec で `capture: stderr` のような切替えを追加するか、 ユーザーが `bash -c "tool --version 2>&1"` でラップするか。 初版は後者で十分
-- **メモ化のスコープ**: 現案は lazygen 1 run 単位。 daemon 化した場合の TTL ( 5 分?) は後で検討
+- **メモ化のスコープ**: 現案は sloff 1 run 単位。 daemon 化した場合の TTL ( 5 分?) は後で検討
 - **shim 経由でツール非サポート tool に対応する範囲**: 「lockfile 風文字列を出すスクリプトが書ける = 任意の channel に拡張できる」 が、 shim 自体の更新が反映されないリスクがある。 推奨パターンを doc で示すか、 むしろ非推奨にして専用 resolver を増やす方を選ぶか

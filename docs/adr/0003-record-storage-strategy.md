@@ -22,7 +22,7 @@
 
 - [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
 - [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
-- [Design Doc: lazygen Architecture](../design/architecture.md)
+- [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
 
@@ -40,7 +40,7 @@
 
 ### Option A: git に per-task per-input ファイル (採用)
 
-`.lazygen/cache/<spec_relpath>/<task_id>/<input_hash>.yml` の 1 ファイル / 1 record で git 管理する。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
+`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` の 1 ファイル / 1 record で git 管理する。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
 
 👍 **Pros**
 
@@ -57,7 +57,7 @@
 
 ### Option B: 単一 hash ファイル
 
-単一 YAML / JSON ファイル ( 例: `.lazygen.hash.yml`) に全 task の hash を配列で記録する。
+単一 YAML / JSON ファイル ( 例: `.sloff.hash.yml`) に全 task の hash を配列で記録する。
 
 👍 **Pros**
 
@@ -89,7 +89,7 @@ record を S3 / R2 等に put / get する。 turbo Remote Cache や bazel Build
 
 ### Option D: hash をファイル名に artifact 直コミット
 
-input_hash をファイル名にして、 生成物本体を `.lazygen/cache/` 配下にそのまま git commit する。
+input_hash をファイル名にして、 生成物本体を `.sloff/cache/` 配下にそのまま git commit する。
 
 👍 **Pros**
 
@@ -136,8 +136,8 @@ git に小さな mapping (record) を持ち、 artifact を S3 に置く。
 
 PR ノイズの懸念 (A の Cons) については、
 
-- `.lazygen/cache/**` を `.gitattributes` で `linguist-generated` 指定し、 GitHub PR diff の default collapsed にする
-- PR template に「`.lazygen/cache/` 配下の差分は人間レビュー対象外」と明記する
+- `.sloff/cache/**` を `.gitattributes` で `linguist-generated` 指定し、 GitHub PR diff の default collapsed にする
+- PR template に「`.sloff/cache/` 配下の差分は人間レビュー対象外」と明記する
 
 で運用上緩和する。
 
@@ -154,7 +154,7 @@ PR ノイズの懸念 (A の Cons) については、
 
 - record が累積するため GC 機構の実装が必要:
   - CI nightly sweep で古い record の削除 PR を bot 投稿
-  - `lazygen cache gc` サブコマンドで同一 task 配下の record を mtime 古い順に削除
+  - `sloff cache gc` サブコマンドで同一 task 配下の record を mtime 古い順に削除
   - lefthook / pre-commit hook で task rename / 削除コミット時に対応 record も削除
 - record 差分が PR diff に現れるため、 `linguist-generated` 等のノイズ抑制設定が必要
 - record ファイル数の増加に伴う git operations のスループットは将来的に再評価

@@ -35,7 +35,7 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 
 ### D1: `tools:` 必須化
 
-- lazygen はコード生成 orchestrator であり、 何らかの generator binary を呼び出すことが前提。 spec に対応する tool が **存在しない** ケースは構造的に想定しづらい
+- sloff はコード生成 orchestrator であり、 何らかの generator binary を呼び出すことが前提。 spec に対応する tool が **存在しない** ケースは構造的に想定しづらい
 - tools_hash が空のまま cache key に混ざると、 binary 更新が cache invalidate に効かず、 stale な generation 結果が serve され続ける。 これは ADR-0002 で確定した output-comparison の前提を破る
 - 「警告だけ出して cache を保存する」フォールバック経路は、 安全機構として機能しない (record はそのまま残り、 次回 cache hit する) ため撤去
 - pre-1.0 でユーザー spec の互換性ブレイクは許容範囲
@@ -50,7 +50,7 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 ### D3: 事後検知優先
 
 - 静的解析の理想形は「2 つの output pattern が overlap しうるか」を spec から判定すること。 ただし両方 glob のケース (例: `**/*.go` と `*/*.go`) の包含判定は半解決問題に近く、 完全実装は過剰投資
-- 一方、 lazygen の典型ユースで何が問題になるかを場合分けすると以下のとおり:
+- 一方、 sloff の典型ユースで何が問題になるかを場合分けすると以下のとおり:
   - 生成物を git commit するスタイル: 既存の `depgraph.Build` (実ファイル展開後の重複検出) で初回から検出可能
   - 生成物を gitignore するスタイル / 削除後の再生成: 実ファイルが空なので静的検出は機能しないが、 **実行時に 2 つ目の task が produce した瞬間に runner で集計検出可能**
 - 事後検知は silent corruption を防ぐ (= 必ずエラーで止まり、 メッセージで両 task 名を提示する) ため、 ユーザーは spec を修正できる

@@ -1,4 +1,4 @@
-// Minimal repo-local generator used by the lazygen golocal e2e fixtures.
+// Minimal repo-local generator used by the sloff golocal e2e fixtures.
 // It copies input.txt to output.txt; any code change invalidates the cache.
 package main
 

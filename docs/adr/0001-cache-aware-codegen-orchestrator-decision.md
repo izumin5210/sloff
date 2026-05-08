@@ -37,19 +37,19 @@
 
 > **Updated 2026-05-05**: 旧版では (1) OS 中立 logical version、 (2) lockfile vs install preflight、 (3) output-comparison の 3 防御線 と整理していた。 設計を進める中で、 prebuilt binary については「実 install バイナリの `--version` 出力」 を直接 hash 入力にする方式 ( script resolver) で (1) と旧 (2) が同時自動成立することが分かったため、 防御線を 2 つに統合し、 preflight は lockfile-based channel 固有の実装詳細に格下げした。
 
-> **Updated 2026-05-08**: 比較対象に Nx を追加し、 各既製品の Pros を明記してフェアな評価に整理し直した。 また「 aqua」 等の固有ツール名は「 外部配布の prebuilt binary 」 という抽象に統一し、 lazygen の Cons に scope ( codegen 専用 / artifact 非対応 / remote cache 初版未実装 / 実績ゼロ 等) を明示した。 Buck2 は Bazel と評価軸がほぼ同じため独立 Option としては立てず、 Bazel 節内で簡潔に言及する扱いに留めた。
+> **Updated 2026-05-08**: 比較対象に Nx を追加し、 各既製品の Pros を明記してフェアな評価に整理し直した。 また「 aqua」 等の固有ツール名は「 外部配布の prebuilt binary 」 という抽象に統一し、 sloff の Cons に scope ( codegen 専用 / artifact 非対応 / remote cache 初版未実装 / 実績ゼロ 等) を明示した。 Buck2 は Bazel と評価軸がほぼ同じため独立 Option としては立てず、 Bazel 節内で簡潔に言及する扱いに留めた。
 
 ### References
 
 - [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
 - [ADR-0003: キャッシュレコードのストレージ方式](./0003-record-storage-strategy.md)
-- [Design Doc: lazygen Architecture](../design/architecture.md)
+- [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
 
 ### Comparison Table
 
-| | A: Turborepo | B: Nx | C: Bazel ( Buck2 含む) | D: moonrepo | E: Pants | **F: 自作 lazygen (採用)** |
+| | A: Turborepo | B: Nx | C: Bazel ( Buck2 含む) | D: moonrepo | E: Pants | **F: 自作 sloff (採用)** |
 |---|---|---|---|---|---|---|
 | 一般機能の成熟度 | ◎ | ◎ | ◎ | ○ | ○ | × ( 自作する) |
 | Go ツールチェーン対応 | × ( shell 起動) | △ ( community plugin `@nx-go/nx-go`) | ◎ ( rules_go) | ○ ( v2.1+ で `go list --deps`) | ○ ( `go_mod`) | ◎ |
@@ -59,7 +59,7 @@
 | **(1) OS 中立 logical version が runtime と整合** | × ( machine 別 hash) | × | × ( ツールバイナリが action input / REAPI 由来で OS 別) | △ ( proto 管理ランタイムのみ / install 検証なし) | × ( REAPI 由来で OS 別) | ◎ ( prebuilt = `--version` 直取り、 lockfile-based = lockfile + preflight、 内製 = ソース hash) |
 | **(2) output-comparison 判定** | × | × | × ( `bazelbuild/bazel#14543` 未解決) | × | × | ◎ |
 | 外部配布 prebuilt binary 群との SSoT 直読み | × | × | × ( Bazel が toolchain を所有) | × ( proto 管理外は対象外) | × | ◎ |
-| 既存 monorepo 構造への影響 | △ ( `turbo.json` + `dependsOn` 整備) | △ ( workspace への寄せ替え推奨) | × ( `BUILD.bazel` / `BUCK` 全展開) | △ ( `workspace.yml` + `moon.yml`) | × ( `BUILD` ファイル) | ○ ( spec dir ごとに `lazygen.yml` 必要だが既存設定は変更不要) |
+| 既存 monorepo 構造への影響 | △ ( `turbo.json` + `dependsOn` 整備) | △ ( workspace への寄せ替え推奨) | × ( `BUILD.bazel` / `BUCK` 全展開) | △ ( `workspace.yml` + `moon.yml`) | × ( `BUILD` ファイル) | ○ ( spec dir ごとに `sloff.yml` 必要だが既存設定は変更不要) |
 | Remote cache ( 既製) | ◎ | ◎ ( Nx Cloud) | ◎ ( REAPI) | ◎ ( moonbase) | ◎ ( REAPI) | × ( 初版未実装) |
 | Artifact cache | ◎ | ◎ | ◎ | ◎ | ◎ | × ( Non-Goal) |
 | 初期実装コスト | 低 | 低 | 中〜高 | 低 | 中 | 高 |
@@ -130,7 +130,7 @@ Google が開発する大規模 monorepo 向け業界標準ビルダー。 `rule
 
 機能面ではどのツールよりも強力で、 「 artifact / コンパイル結果まで cache 共有したい」 「 巨大 monorepo を分散実行で回したい」 ニーズには第一選択。 ただし本 ADR の問題設定 ( 既存パッケージマネージャ群を温存しつつ codegen の cache 健全性を上げる) では、 移行コストと 2 防御線を欠く構造的な問題で ROI が見合わない。
 
-> Meta の **Buck2** ( Bazel 系の Rust 実装、 dynamic deps / incremental 性能改善 / REAPI 互換) も hermetic build 系の現代的選択肢として存在するが、 本 ADR の評価軸 ( 2 防御線 / 既存 package manager 温存 / 外部配布 prebuilt binary との連携) では Bazel とほぼ同じ評価になるため、 独立 Option としては立てず本節に内包する。 新規導入で hermetic を選ぶ場合は Bazel と Buck2 を別途比較する価値があるが、 lazygen との対比文脈では区別不要と判断した。
+> Meta の **Buck2** ( Bazel 系の Rust 実装、 dynamic deps / incremental 性能改善 / REAPI 互換) も hermetic build 系の現代的選択肢として存在するが、 本 ADR の評価軸 ( 2 防御線 / 既存 package manager 温存 / 外部配布 prebuilt binary との連携) では Bazel とほぼ同じ評価になるため、 独立 Option としては立てず本節に内包する。 新規導入で hermetic を選ぶ場合は Bazel と Buck2 を別途比較する価値があるが、 sloff との対比文脈では区別不要と判断した。
 
 ### Option D: moonrepo
 
@@ -138,7 +138,7 @@ Rust 製の polyglot タスクランナー。 `v1.38` (2025-06) で Go toolchain
 
 👍 **Pros**
 
-- 既製品の中で lazygen の問題設定に最も近い ( polyglot 一級対応、 proto による論理 version 管理)
+- 既製品の中で sloff の問題設定に最も近い ( polyglot 一級対応、 proto による論理 version 管理)
 - proto 経由でランタイムを管理しているため、 proto 管理下のツールに限り OS 中立 hash が成立 ( **(1) を部分的に満たす**)
 - pnpm / npm / yarn / cargo / go.mod ネイティブ統合
 - `workspace.yml` + `moon.yml` だけ追加すればよく、 `BUILD.bazel` ほど侵襲的ではない
@@ -174,9 +174,9 @@ Pantsbuild 製の polyglot ビルダー (2.31 が 2026-02 リリース)。 「**
 - (2) output-comparison: input-only ( REAPI モデル)
 - 外部配布の prebuilt binary ( nix / mise / aqua 等) との直接統合は無し、 pnpm 対応は薄い
 
-依存自動導出は lazygen の参考にすべき優れた設計だが、 2 防御線のうち (1) ( OS 別 hash) と (2) output-comparison を欠き、 外部配布 prebuilt binary 群との直接統合も持たないため、 本 ADR の問題設定では ROI が見合わない。
+依存自動導出は sloff の参考にすべき優れた設計だが、 2 防御線のうち (1) ( OS 別 hash) と (2) output-comparison を欠き、 外部配布 prebuilt binary 群との直接統合も持たないため、 本 ADR の問題設定では ROI が見合わない。
 
-### Option F: 自作 lazygen ( 採用)
+### Option F: 自作 sloff ( 採用)
 
 monorepo の実情に合わせた専用オーケストレーターを実装する。
 
@@ -199,14 +199,14 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
 - **スコープが codegen 専用** で一般のタスクランナーではない。 build / test / lint / dev server をまとめて orchestrate したいニーズには別ツール ( moonrepo / Nx / Turborepo / Make 等) を併用する想定
 - **artifact cache 非対応** ( Non-Goal)。 generator output が git 管理されている前提。 大きい binary / 画像 / 動画を生成する monorepo には不向き
 - **remote cache 初版未実装** ( interface は切るが LocalStorage のみ)。 record の git 管理で「実質的な remote cache」になる設計だが、 git に乗らない大きい record や organization 横断の cache 共有は対象外
-- 設定ファイル数は Bazel / Pants ほどではないが少なくない: spec dir ごとに `lazygen.yml` が必要 ( 数百タスクなら数十ファイル)
+- 設定ファイル数は Bazel / Pants ほどではないが少なくない: spec dir ごとに `sloff.yml` が必要 ( 数百タスクなら数十ファイル)
 - watch モード / Windows 非対応 ( Non-Goal)
 - 実績ゼロ。 既製品のような巨大 monorepo での battle-tested さは持たない
 - 依存自動導出の精度は Pants ほど厳密ではない ( task 間は inputs / outputs glob の交差で導出するため、 glob を雑に書くと精度が落ちる)
 
 ## Decision
 
-**Option F: 自作 ( lazygen) を採用する。**
+**Option F: 自作 ( sloff) を採用する。**
 
 採用根拠:
 
@@ -215,28 +215,28 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
    - (2) output-comparison: 全ツール input-only、 Bazel `bazelbuild/bazel#14543` のように「empty output でも cache」が業界共通の既知問題
 2. **中〜大規模 monorepo の規模では、 偽 cache が共有された場合の影響範囲が大きい**。 「cache を信じきれず `--no-cache` を打つ習慣」が現場に残ると共有 cache の存在意義そのものが失われる。 2 防御線を構造で強制する価値は高い
 3. **既製品を採用すると 2 防御線を欠いたまま運用することになる**。 偶発的に cache が嘘をついたとき「うちの cache は信じきれない」という不信感が継続する。 これは技術的負債というより組織的負債で、 後から取り戻すのが難しい
-4. **依存自動導出 / Go ツールチェーン対応 / lockfile hash 化など、 既製品に追いついている既存技術は積極的に取り込む**。 Pants の import 解析手法は lazygen の依存自動導出 / pnpm workspace 内 内製ツール hash に取り込む ([Design Doc 参照](../design/architecture.md))
+4. **依存自動導出 / Go ツールチェーン対応 / lockfile hash 化など、 既製品に追いついている既存技術は積極的に取り込む**。 Pants の import 解析手法は sloff の依存自動導出 / pnpm workspace 内 内製ツール hash に取り込む ([Design Doc 参照](../design/architecture.md))
 
 ただし、 採用には以下のスコープ制約が伴う ( Cons の再強調):
 
-- lazygen は **codegen 専用** ( 一般タスクランナーではない)、 **artifact cache 非対応**、 **remote cache 初版未実装**、 **実績ゼロ**
+- sloff は **codegen 専用** ( 一般タスクランナーではない)、 **artifact cache 非対応**、 **remote cache 初版未実装**、 **実績ゼロ**
 - 上記が許容できない問題設定 ( artifact / コンパイル結果まで cache 共有したい / build / test まで全部一括で orchestrate したい / 巨大 binary を生成する monorepo / battle-tested さを最優先したい) では、 既製品 ( Bazel / Buck2 / Pants / moonrepo / Nx) のいずれかが現実解になる
 
 ### 反論への応答
 
 #### moonrepo 採用案について
 
-moonrepo は既製品中、 最も lazygen 設計に近く、 「moonrepo + 妥協」での運用は技術的には可能。 ただし以下のトレードオフがある:
+moonrepo は既製品中、 最も sloff 設計に近く、 「moonrepo + 妥協」での運用は技術的には可能。 ただし以下のトレードオフがある:
 
 - (1) は proto 管理ランタイム以外で OS 別 hash 分裂が残り、 install 検証も無いため「lockfile 更新したが install してない」の嘘 record が混入しうる
 - (2) output-comparison は欠けたまま
-- 外部配布の prebuilt binary 群との連携は spec 側で論理 version を明示する形になり、 lazygen の script resolver と比べて記述粒度の自由度が低い
+- 外部配布の prebuilt binary 群との連携は spec 側で論理 version を明示する形になり、 sloff の script resolver と比べて記述粒度の自由度が低い
 
 「2 防御線への投資は過剰、 偶発的事故は手動で回す」と判断するなら moonrepo は現実解。 中〜大規模 monorepo で「事故が起きたとき発覚するまでの調査コスト」「不信感の組織的影響」を考慮すると、 自作のコストが上回ると判断した。
 
 #### Nx 採用案について
 
-JS/TS 比率が高い monorepo なら Nx は強力な対抗馬。 ただし lazygen の問題設定 ( polyglot codegen の cache 健全性) では:
+JS/TS 比率が高い monorepo なら Nx は強力な対抗馬。 ただし sloff の問題設定 ( polyglot codegen の cache 健全性) では:
 
 - (1) cache key が plugin 依存で host 由来入力が混入しやすく、 cross-OS record 共有を構造で保証できない
 - (2) output-comparison は持たない

@@ -1,0 +1,7 @@
+digraph sloff {
+    rankdir=TB;
+    node [shape=box];
+    "spec:consumer";
+    "spec:producer";
+    "spec:producer" -> "spec:consumer" [label="spec/produced.txt"];
+}

@@ -1,0 +1,16 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: producer
+    cmd: ["sh", "-c", "true"]
+    inputs: ["source.txt"]
+    outputs: ["a.gen.txt", "b.gen.txt", "c.gen.txt"]
+    tools: [versioner]
+  - name: consumer
+    cmd: ["sh", "-c", "true"]
+    inputs: ["a.gen.txt", "b.gen.txt", "c.gen.txt"]
+    outputs: ["final.txt"]
+    tools: [versioner]

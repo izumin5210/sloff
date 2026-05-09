@@ -21,10 +21,12 @@ type TaskRef struct {
 }
 
 // Label returns the human-readable task identifier used in graph captions and
-// renderer node labels. SpecRelpath is omitted only when empty, which today
-// only happens in depgraph's own unit tests.
+// renderer node labels. SpecRelpath is dropped when empty (depgraph's own
+// unit tests) or "." (a sloff.yml at the discovery root, which the cache
+// layer also collapses to no prefix in `pathFor`); both forms describe the
+// same logical "no qualifier needed" state.
 func (r TaskRef) Label() string {
-	if r.SpecRelpath == "" {
+	if r.SpecRelpath == "" || r.SpecRelpath == "." {
 		return r.Name
 	}
 	return r.SpecRelpath + ":" + r.Name

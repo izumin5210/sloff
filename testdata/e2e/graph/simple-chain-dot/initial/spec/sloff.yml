@@ -1,0 +1,16 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: producer
+    cmd: ["sh", "-c", "cp input.txt produced.txt"]
+    inputs: ["input.txt"]
+    outputs: ["produced.txt"]
+    tools: [versioner]
+  - name: consumer
+    cmd: ["sh", "-c", "cp produced.txt final.txt"]
+    inputs: ["produced.txt"]
+    outputs: ["final.txt"]
+    tools: [versioner]

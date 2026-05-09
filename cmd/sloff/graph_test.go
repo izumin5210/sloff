@@ -108,3 +108,36 @@ func TestGraph_SimpleChain_Mermaid(t *testing.T) {
 	got := runGraphCmd(t, h, "--format", "mermaid")
 	assertGraphGolden(t, h, got)
 }
+
+// TestGraph_SimpleChain_DOT covers the same producer/consumer fixture as the
+// mermaid case but rendered through --format dot, locking the contract that
+// swapping formats does not reorder nodes/edges.
+func TestGraph_SimpleChain_DOT(t *testing.T) {
+	h := setupGraphHarness(t, "simple-chain-dot")
+	got := runGraphCmd(t, h, "--format", "dot")
+	assertGraphGolden(t, h, got)
+}
+
+// TestGraph_MultiDeps_Mermaid exercises the "+N more" edge caption: when the
+// producer's outputs intersect the consumer's inputs in three files, the
+// rendered edge label samples the first one and annotates the rest, per
+// IZU-7's "サンプル併記" wording.
+func TestGraph_MultiDeps_Mermaid(t *testing.T) {
+	h := setupGraphHarness(t, "multi-deps-mermaid")
+	got := runGraphCmd(t, h, "--format", "mermaid")
+	assertGraphGolden(t, h, got)
+}
+
+// TestGraph_PnpmLocal_BuildChain_Mermaid validates that resolver-contributed
+// ExtraInputs (architecture.md:449) are visible to the graph subcommand:
+// the gen task pulls @org/codegen via pnpm-local, the build-codegen task
+// produces the workspace tool's dist files, and the auto-detected edge
+// connecting them must surface even though gen's spec doesn't name the dist
+// files directly. The fixture deliberately omits node_modules/.pnpm/lock.yaml
+// to cover the "graph remains usable when install state is drifted" claim
+// from runner.Plan's docstring.
+func TestGraph_PnpmLocal_BuildChain_Mermaid(t *testing.T) {
+	h := setupGraphHarness(t, "pnpmlocal-build-chain-mermaid")
+	got := runGraphCmd(t, h, "--format", "mermaid")
+	assertGraphGolden(t, h, got)
+}

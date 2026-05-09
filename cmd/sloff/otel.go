@@ -212,6 +212,19 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	)
 }
 
+// sloffSupportsTracesExporter reports whether the given OTEL_TRACES_EXPORTER
+// value names an exporter sloff implements. "" defaults to otlp per the OTel
+// spec. Used by setupTracing's spec-compliant noop fallback for unknown
+// values; see the buildSpanExporter switch for the matching dispatch.
+func sloffSupportsTracesExporter(value string) bool {
+	switch strings.ToLower(value) {
+	case "", "otlp", "console":
+		return true
+	default:
+		return false
+	}
+}
+
 // buildSpanExporter dispatches to otlptracehttp / otlptracegrpc / stdouttrace
 // based on effective env, replacing autoexport so that endpoint / headers /
 // protocol come in via explicit options rather than via os.Setenv-driven env.
@@ -333,6 +346,19 @@ func setupTracing(ctx context.Context) (trace.TracerProvider, func(context.Conte
 		// Both the explicit-disable and passive-disable paths land here.
 		// Return a noop sloff-local provider; tracers derived from it emit
 		// nothing, so sloff is silent regardless of any host TracerProvider.
+		return noop.NewTracerProvider(), func(context.Context) error { return nil }, nil
+	}
+
+	// Spec compliance: OTEL_TRACES_EXPORTER values sloff doesn't implement
+	// (zipkin, jaeger, comma-separated multi-export, ...) MUST warn and fall
+	// back to noop, not fail. Otherwise a shell that exports a non-OTLP
+	// exporter for other tools would brick `sloff run` / `graph` for the same
+	// user. SLOFF_OTEL_TRACES_EXPORTER is the escape hatch when the user
+	// wants sloff to export OTLP regardless of the shell-wide value.
+	if exp := effectiveEnv("OTEL_TRACES_EXPORTER"); !sloffSupportsTracesExporter(exp) {
+		fmt.Fprintf(os.Stderr,
+			"sloff: OTEL_TRACES_EXPORTER=%q is not implemented by sloff (supported: otlp, console); sloff tracing disabled. Set SLOFF_OTEL_TRACES_EXPORTER=otlp (or =console) to override.\n",
+			exp)
 		return noop.NewTracerProvider(), func(context.Context) error { return nil }, nil
 	}
 

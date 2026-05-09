@@ -572,6 +572,42 @@ func TestSetupTracing_EnabledReturnsRecordingProvider(t *testing.T) {
 	span.End()
 }
 
+// TestSetupTracing_UnsupportedExporterFallsBackToNoop covers the case where a
+// shell exports `OTEL_TRACES_EXPORTER` to a value sloff doesn't implement
+// (zipkin / jaeger / a comma-separated multi-export list). The OTel SDK spec
+// mandates "warn and use the noop tracer" for this, and a hard failure here
+// would brick `sloff run` / `graph` for any user whose shell already exports
+// trace config for other tools.
+func TestSetupTracing_UnsupportedExporterFallsBackToNoop(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+	}{
+		{name: "zipkin (other tool's exporter)", env: "zipkin"},
+		{name: "jaeger (other tool's exporter)", env: "jaeger"},
+		{name: "comma-separated multi-export", env: "otlp,zipkin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearOTelEnv(t)
+			t.Setenv("OTEL_TRACES_EXPORTER", tc.env)
+			ctx := context.Background()
+
+			tp, shutdown, err := setupTracing(ctx)
+			if err != nil {
+				t.Fatalf("setupTracing err = %v, want nil (unsupported exporter must fall back to noop, not fail)", err)
+			}
+			t.Cleanup(func() { _ = shutdown(ctx) })
+
+			_, span := tp.Tracer("test").Start(ctx, "noop-check")
+			if span.IsRecording() {
+				t.Errorf("got recording span for OTEL_TRACES_EXPORTER=%q; want noop fallback", tc.env)
+			}
+			span.End()
+		})
+	}
+}
+
 // TestConsoleSpanWriter_DefaultsToStderr guards the contract that the
 // console exporter does not corrupt stdout-driven subcommands such as
 // `sloff graph`. If consoleSpanWriter is ever flipped back to os.Stdout

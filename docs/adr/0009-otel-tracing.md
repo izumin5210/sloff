@@ -95,6 +95,12 @@ OTLP の protocol は `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` > `OTEL_EXPORTER_OTLP
 
 OTel spec に書かれているが本実装が **直接サポートしていない** OTEL_ 変数 ( `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, TLS 関連等) は exporter が env を直接読むので shell 設定はそのまま効く。 ただし SLOFF_ prefix の override は届かない。 必要になれば options 経由のサポートを足す。
 
+**Unsupported な `OTEL_TRACES_EXPORTER` は warn + noop fallback** ( fail-fast しない) :
+
+shell が他ツール用に `OTEL_TRACES_EXPORTER=zipkin` / `jaeger` / `otlp,zipkin` ( カンマ区切り multi-export) を export しているケースで、 sloff は OTel spec [SDK Configuration] の規定 ( 「 If a configured exporter is not implemented, the SDK MUST issue a warning and use the noop tracer」) に従い stderr に 1 行 warn を出して noop TP に fallback する。 sloff のコマンド自身は fail させない。 user が sloff だけ OTLP を使いたければ `SLOFF_OTEL_TRACES_EXPORTER=otlp` で override 可能。
+
+これに対し **`OTEL_EXPORTER_OTLP_PROTOCOL` の unknown 値は fail-fast** を維持する: protocol は user が `otlp` を明示的に選んだあとの sub-config であり、 そこが壊れているのは user 自身の OTLP 設定の誤り、 silently noop に落とす方が診断を困難にする。 `http/json` の reject 理由 ( D3 既述) と同じ判断軸。
+
 **Console exporter の出力先は stderr 固定**: `stdouttrace.New()` のデフォルトは `os.Stdout` だが、 sloff は `stdouttrace.WithWriter(os.Stderr)` を渡して **stderr に振り向ける**。 理由は `sloff graph` のような machine-readable な出力 ( Mermaid / DOT) を吐くサブコマンドが stdout を持つため、 trace JSON が stdout に混ざるとパイプライン下流のパーサが壊れる。 `OTEL_TRACES_EXPORTER=console` での local 検証は便利機能なので、 「 trace 有効化が通常コマンド出力を汚さない」 ことを CLI コントラクトとして守る。
 
 **Header / attribute の percent-decode は `url.PathUnescape` を使う**: `url.QueryUnescape` を使うとクエリ文字列流の `+` → space 変換が走り、 `Authorization: Bearer <base64>` のように `+` を含む値が黙って壊れる。 PathUnescape は `%XX` のみをデコードし `+` をリテラルとして残すので、 OTel spec が要求する percent-encoding の意味論と OTLP header 系の実用 ( base64 auth) の双方に合致する。

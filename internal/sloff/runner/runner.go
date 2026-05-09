@@ -11,9 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
@@ -71,8 +75,11 @@ type Runner struct {
 	// producedBy maps each resolved output path to the task that produced it. Cross-task
 	// duplicate writes are spec conflicts that depgraph cannot catch on a clean checkout
 	// (pre-execution globs are empty), so the runner records writers as runs progress and
-	// fails the run if a later task lands on a path another task already produced.
-	producedBy map[string]string
+	// fails the run if a later task lands on a path another task already produced. Guarded
+	// by producedByMu so independent tasks running in parallel via runTasks don't race on
+	// the shared map.
+	producedByMu sync.Mutex
+	producedBy   map[string]string
 }
 
 // New constructs a Runner.
@@ -141,15 +148,113 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	r.producedBy = map[string]string{}
-	for _, t := range ordered {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := r.runTask(ctx, t); err != nil {
-			return err
+	return r.runTasks(ctx, ordered)
+}
+
+// runTasks executes the topologically-ordered task list with bounded
+// concurrency. A task starts as soon as every task that produces one of its
+// inputs has finished — depgraph already sorted them, so we only need to
+// re-derive each task's predecessor set from the same output→producer mapping
+// it used. Independent tasks (the common case for cache-hit runs across
+// service-local gen-db, where each spec's outputs sit in its own service dir)
+// fan out across NumCPU workers; tasks with real producer→consumer chains
+// (buf-default → buf-custom, build-protoc-plugins → buf-custom, …) still
+// serialise inside the chain.
+//
+// First failure short-circuits the run: dependents of a failed task are not
+// scheduled and the first non-context error is returned. Cancellation is
+// observed before each task starts so a Ctrl-C drops in-flight tasks at the
+// next scheduling boundary rather than waiting for the whole queue to drain.
+func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) error {
+	if len(ordered) == 0 {
+		return nil
+	}
+
+	predecessors := taskPredecessorIndices(ordered)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(taskConcurrency(len(ordered)))
+
+	done := make([]chan struct{}, len(ordered))
+	failed := make([]bool, len(ordered))
+	for i := range done {
+		done[i] = make(chan struct{})
+	}
+
+	for i, t := range ordered {
+		g.Go(func() error {
+			defer close(done[i])
+			for _, d := range predecessors[i] {
+				select {
+				case <-done[d]:
+				case <-gctx.Done():
+					failed[i] = true
+					return nil
+				}
+				if failed[d] {
+					failed[i] = true
+					return nil
+				}
+			}
+			if err := gctx.Err(); err != nil {
+				failed[i] = true
+				return nil
+			}
+			if err := r.runTask(gctx, t); err != nil {
+				failed[i] = true
+				return err
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+// taskPredecessorIndices returns, for each task index in ordered, the set of
+// indices whose Outputs produce one of this task's Inputs. Same intersection
+// rule depgraph.Build uses internally; we recompute it here so the runner
+// stays decoupled from depgraph's internal edge representation.
+func taskPredecessorIndices(ordered []depgraph.Task) [][]int {
+	producer := map[string]int{}
+	for i, t := range ordered {
+		for _, out := range t.Outputs {
+			producer[out] = i
 		}
 	}
-	return nil
+	preds := make([][]int, len(ordered))
+	for i, t := range ordered {
+		seen := map[int]struct{}{}
+		for _, in := range t.Inputs {
+			p, ok := producer[in]
+			if !ok || p == i {
+				continue
+			}
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			preds[i] = append(preds[i], p)
+		}
+	}
+	return preds
+}
+
+// taskConcurrency caps how many tasks runTasks executes in parallel.
+// Cache-hit tasks are I/O-bound (re-reading every input + every output to
+// re-hash); cache-miss tasks spawn a child generator. NumCPU is the same
+// budget the resolver fan-out uses, mostly because most tasks block on file
+// reads and a few on subprocess wait. Values much higher than NumCPU on
+// SSD-backed APFS show diminishing returns and risk blowing past the
+// per-process file descriptor limit.
+func taskConcurrency(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	cpu := max(runtime.NumCPU(), 1)
+	if n < cpu {
+		return n
+	}
+	return cpu
 }
 
 // Plan resolves all discovered specs into a topologically-ordered task list
@@ -268,18 +373,30 @@ func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, reference
 // structure (`sloff graph` / future `--explain`-style read-only debug
 // surfaces) skip the Versions path entirely; see IZU-16.
 func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]string, error) {
-	out := make(map[string][]string, len(referenced))
-	for _, name := range referenced {
+	results := make([][]string, len(referenced))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(resolverConcurrency(len(referenced)))
+	for i, name := range referenced {
 		entry, ok := registry.Lookup(name)
 		if !ok {
 			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		ins, err := r.opts.Resolvers.Inputs(ctx, entry.SpecDir, declared)
-		if err != nil {
-			return nil, fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
-		}
-		out[entry.Name] = ins
+		g.Go(func() error {
+			ins, err := r.opts.Resolvers.Inputs(gctx, entry.SpecDir, declared)
+			if err != nil {
+				return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+			}
+			results[i] = ins
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(referenced))
+	for i, name := range referenced {
+		out[name] = results[i]
 	}
 	return out, nil
 }
@@ -287,20 +404,49 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 // resolveVersionContribs invokes Registry.Versions once per referenced tool
 // name. Same scoping discipline as resolveInputContribs.
 func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]toolresolver.ToolVersion, error) {
-	out := make(map[string][]toolresolver.ToolVersion, len(referenced))
-	for _, name := range referenced {
+	results := make([][]toolresolver.ToolVersion, len(referenced))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(resolverConcurrency(len(referenced)))
+	for i, name := range referenced {
 		entry, ok := registry.Lookup(name)
 		if !ok {
 			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		vs, err := r.opts.Resolvers.Versions(ctx, entry.SpecDir, declared)
-		if err != nil {
-			return nil, fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
-		}
-		out[entry.Name] = vs
+		g.Go(func() error {
+			vs, err := r.opts.Resolvers.Versions(gctx, entry.SpecDir, declared)
+			if err != nil {
+				return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+			}
+			results[i] = vs
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]toolresolver.ToolVersion, len(referenced))
+	for i, name := range referenced {
+		out[name] = results[i]
 	}
 	return out, nil
+}
+
+// resolverConcurrency caps how many resolver goroutines run in parallel.
+// `packages.Load` ultimately spawns `go list` (which itself parallelises across
+// GOMAXPROCS), so letting dozens of go-local resolvers fan out unbounded would
+// stampede the file system and the Go toolchain's own internal parallelism.
+// `runtime.NumCPU()` keeps each box loaded but bounded; it comfortably hosts
+// the script / go-local / pnpm-local fan-out a typical polyglot monorepo has.
+func resolverConcurrency(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	cpu := max(runtime.NumCPU(), 1)
+	if n < cpu {
+		return n
+	}
+	return cpu
 }
 
 // referencedTools collects the deduplicated, sorted set of tool names any
@@ -503,7 +649,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return nil
 	}
 
-	rec := &cache.Record{
+	newRec := &cache.Record{
 		GeneratedAt:              r.opts.Clock(),
 		GeneratorVersionSnapshot: snapshotFromVersions(versions),
 		Input: cache.Input{
@@ -525,7 +671,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 			TaskID: info.command.Name,
 		},
 	}
-	if err := r.opts.Storage.Save(ctx, key, rec); err != nil {
+	if err := r.opts.Storage.Save(ctx, key, newRec); err != nil {
 		return fmt.Errorf("%s: save record: %w", t.Name, err)
 	}
 	return nil
@@ -534,8 +680,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 // recordProducedPaths registers the resolved output paths of a task and fails when one
 // of those paths was already produced by a different task in this run. This catches spec
 // conflicts that depgraph cannot see at planning time on a clean checkout, where the
-// pre-run glob expansion of generated files comes back empty.
+// pre-run glob expansion of generated files comes back empty. Protected by producedByMu
+// so concurrent runTask goroutines don't race on the shared map.
 func (r *Runner) recordProducedPaths(taskLabel string, paths []string) error {
+	r.producedByMu.Lock()
+	defer r.producedByMu.Unlock()
 	for _, p := range paths {
 		if existing, exists := r.producedBy[p]; exists && existing != taskLabel {
 			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing, taskLabel)

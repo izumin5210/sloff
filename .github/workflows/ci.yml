@@ -77,7 +77,7 @@ jobs:
         with:
           version: ${{ steps.buf-version.outputs.version }}
           push: false
-          exclude_paths: testdata
+          paths: proto
 
   status-check:
     runs-on: ubuntu-latest

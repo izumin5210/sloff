@@ -162,6 +162,66 @@ func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	}
 }
 
+// TestMarshalJSONCanonicalisesUnsortedInput guards that MarshalJSON returns
+// canonical output even when the caller hands in a record whose repeated
+// fields are not pre-sorted (e.g. a hand-crafted .pb file decoded directly
+// via proto.Unmarshal). Without the internal Sort, `sloff cache show` and
+// the E2E harness would surface incidental ordering as JSON diff noise.
+func TestMarshalJSONCanonicalisesUnsortedInput(t *testing.T) {
+	rec := sampleRecord()
+	// Force non-canonical order: reverse-sort by name + by path.
+	rec.Input.ResolvedVersions = []*cachev1.ResolvedVersion{
+		{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
+		{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
+	}
+	rec.Output.Files = []*cachev1.FileEntry{
+		{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
+		{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
+	}
+
+	got, err := cache.MarshalJSON(rec)
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	// Canonical order is name asc / path asc — buf precedes protoc-gen-go,
+	// bar.pb.go precedes foo.pb.go. Verify by index of name/path strings.
+	gotStr := string(got)
+	if i, j := index(gotStr, `"name": "buf"`), index(gotStr, `"name": "protoc-gen-go"`); i < 0 || j < 0 || i > j {
+		t.Errorf("expected buf before protoc-gen-go in JSON output:\n%s", gotStr)
+	}
+	if i, j := index(gotStr, "bar.pb.go"), index(gotStr, "foo.pb.go"); i < 0 || j < 0 || i > j {
+		t.Errorf("expected bar.pb.go before foo.pb.go in JSON output:\n%s", gotStr)
+	}
+}
+
+// TestMarshalJSONDoesNotMutateInput documents that callers can hand a record
+// to MarshalJSON without losing their preferred slice order. The canonical
+// sort happens on a clone.
+func TestMarshalJSONDoesNotMutateInput(t *testing.T) {
+	rec := sampleRecord()
+	originalFirstVersion := rec.Input.ResolvedVersions[0].GetName()
+	originalFirstFile := rec.Output.Files[0].GetPath()
+
+	if _, err := cache.MarshalJSON(rec); err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	if got := rec.Input.ResolvedVersions[0].GetName(); got != originalFirstVersion {
+		t.Errorf("MarshalJSON mutated input.resolved_versions order: first[name] = %q, want %q", got, originalFirstVersion)
+	}
+	if got := rec.Output.Files[0].GetPath(); got != originalFirstFile {
+		t.Errorf("MarshalJSON mutated output.files order: first[path] = %q, want %q", got, originalFirstFile)
+	}
+}
+
+func index(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder guards against
 // name-only sort ambiguity. ResolvedVersion.Name is not guaranteed unique
 // (the script resolver derives it from filepath.Base of exec[0]) so two

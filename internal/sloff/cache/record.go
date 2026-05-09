@@ -116,16 +116,23 @@ func FilePaths(files []*cachev1.FileEntry) []string {
 // Shared by `sloff cache show` and the runner E2E harness so the human-readable
 // view of a record is produced from a single set of options.
 //
+// The output is canonical: repeated fields are sorted via Sort before
+// marshalling so a hand-crafted or non-canonical .pb file decodes to the same
+// JSON as a runner-written one. Sort works in place on a clone so callers
+// that hold a reference to rec don't see their slice order shift.
+//
 // protojson intentionally randomises the whitespace after every `:` to
 // discourage byte-stable comparisons; we re-flow the bytes through
 // json.Compact + json.Indent so the output is reproducible across calls
 // while still preserving the proto declaration order of keys (encoding/json
 // keeps the original token order when transforming a raw JSON byte slice).
 func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
+	canonical := proto.Clone(rec).(*cachev1.Record)
+	Sort(canonical)
 	raw, err := protojson.MarshalOptions{
 		UseProtoNames:   true,
 		EmitUnpopulated: false,
-	}.Marshal(rec)
+	}.Marshal(canonical)
 	if err != nil {
 		return nil, err
 	}

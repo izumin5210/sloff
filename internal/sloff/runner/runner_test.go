@@ -393,6 +393,17 @@ func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
 	)
 }
 
+// TestRunner_CrossDirOutputsRoundTrip exercises the IZU-17 cross-dir glob
+// support end to end: the spec lives at proto/spec/sloff.yml but the generator
+// writes outputs into ../../gen/go/. The first run must materialise the
+// outputs and persist a record; the second run must locate the same record,
+// re-hash the cross-dir output, and SKIP without re-executing the cmd. The
+// marker.txt counter (incremented on every cmd execution) detects any
+// regression where the runner stops recognising cross-dir outputs as cacheable.
+func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
+	runE2E(t, "cross-dir-outputs", runStep(), runStep())
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and

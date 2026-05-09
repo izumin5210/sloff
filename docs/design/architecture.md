@@ -124,6 +124,7 @@ commands:
 - `tools` ブロックは **任意**。 同じ `sloff.yml` 内で `commands:` と共存可、 別 `sloff.yml` で定義された tool を参照することも可 ( namespace は repo-wide で flat、 ADR-0008)
 - `commands[*].tools` は **tool 名の文字列リスト** ( inline 宣言は不可)。 prebuilt binary は script resolver、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
 - tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `sloff.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
+- `inputs` / `outputs` の glob pattern は **spec dir 相対**。 `..` を含む pattern も許容され、 monorepo 典型の cross-dir codegen ( e.g. `proto/<svc>/sloff.yml` から `../../gen/go/**/*.pb.go` を出力) を spec の置き場所と関心事のスコープを揃えたまま表現できる。 ただし正規化後に repoRoot を抜ける pattern ( e.g. `../../../etc/passwd`) は load 時 error として弾く ( spec が repo 外を hash しないことを構造的に担保)
 - `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
 
 ### キャッシュレコード schema

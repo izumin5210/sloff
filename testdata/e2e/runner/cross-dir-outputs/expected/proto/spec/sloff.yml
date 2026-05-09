@@ -1,0 +1,11 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: codegen
+    cmd: ["sh", "-c", "mkdir -p ../../gen && cp a.proto ../../gen/a.txt && printf x >> ../../marker.txt"]
+    inputs: ["*.proto"]
+    outputs: ["../../gen/**/*.txt"]
+    tools: [versioner]

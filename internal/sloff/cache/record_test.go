@@ -222,6 +222,49 @@ func index(s, sub string) int {
 	return -1
 }
 
+// TestFilePaths exercises the small helper used by runner cache hit logic.
+// It only lives in package cache, so direct callers in the runner do not
+// register coverage here.
+func TestFilePaths(t *testing.T) {
+	got := cache.FilePaths([]*cachev1.FileEntry{
+		{Path: "a/x.txt", Hash: "h1"},
+		{Path: "b/y.txt", Hash: "h2"},
+	})
+	want := []string{"a/x.txt", "b/y.txt"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("FilePaths mismatch (-want +got):\n%s", diff)
+	}
+	if got := cache.FilePaths(nil); len(got) != 0 {
+		t.Errorf("FilePaths(nil) should yield empty slice, got %v", got)
+	}
+}
+
+// TestMarshalRejectsNilRecord guards the explicit nil guard at the top of
+// Marshal so a buggy caller surfaces as an error rather than a panic.
+func TestMarshalRejectsNilRecord(t *testing.T) {
+	if _, err := cache.Marshal(nil); err == nil {
+		t.Error("Marshal(nil): expected error")
+	}
+}
+
+// TestUnmarshalRejectsCorruptBytes covers the proto.Unmarshal error branch
+// of cache.Unmarshal — schema_version validation only kicks in once the
+// wire bytes parse, so malformed bytes must still surface as an error.
+func TestUnmarshalRejectsCorruptBytes(t *testing.T) {
+	// Bytes that don't form a valid proto message.
+	if _, err := cache.Unmarshal([]byte{0xff, 0xff, 0xff, 0xff}); err == nil {
+		t.Error("Unmarshal(corrupt bytes): expected error")
+	}
+}
+
+// TestSortHandlesEmptyRecord covers the Sort branches that early-return when
+// Input or Output is unset, so callers can pass partially-built records
+// without nil-dereferencing.
+func TestSortHandlesEmptyRecord(t *testing.T) {
+	rec := &cachev1.Record{SchemaVersion: cache.SchemaVersion}
+	cache.Sort(rec) // must not panic when Input / Output are nil
+}
+
 // TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder guards against
 // name-only sort ambiguity. ResolvedVersion.Name is not guaranteed unique
 // (the script resolver derives it from filepath.Base of exec[0]) so two

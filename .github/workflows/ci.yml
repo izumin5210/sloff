@@ -57,6 +57,10 @@ jobs:
         with:
           go-version: '1.26'
       - run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Strip generated proto code from coverage profile
+        run: |
+          grep -v '^github.com/izumin5210/sloff/internal/proto/' coverage.out > coverage.filtered
+          mv coverage.filtered coverage.out
       - uses: k1LoW/octocov-action@v1
 
   status-check:

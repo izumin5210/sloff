@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -537,31 +538,41 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 	return tasks, nil
 }
 
-// detectOutputPatternConflicts fails fast when two tasks declare the same
-// raw output glob string (e.g. both list `shared.txt` or both list
-// `pkg/**/*.go`). It complements depgraph.Build's expanded-path conflict
-// detector: that one operates on the post-glob file set, which is empty on
-// a clean checkout and therefore can't see two tasks aimed at the same path
-// before either has run. The pattern-string check works regardless of
-// checkout state, and matters more under the parallel scheduler where the
-// runtime recordProducedPaths trip races against OS-level cmd errors when
-// two cmds try to create the same file simultaneously.
+// detectOutputPatternConflicts fails fast when two tasks declare output globs that, once
+// resolved against their respective spec dirs, point at the same path (e.g. both list
+// `shared.txt` from the same sloff.yml, or both list `../gen/foo.go` whose `..` paths
+// land on the same absolute file). It complements depgraph.Build's expanded-path
+// conflict detector: that one operates on the post-glob file set, which is empty on a
+// clean checkout and therefore can't see two tasks aimed at the same path before either
+// has run. The pattern-string check works regardless of checkout state, and matters more
+// under the parallel scheduler where the runtime recordProducedPaths trip races against
+// OS-level cmd errors when two cmds try to create the same file simultaneously.
 //
-// Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`)
-// are not detected here; they still surface via the runtime
-// recordProducedPaths check after both cmds finish writing.
+// Outputs are interpreted relative to the declaring spec's dir (ADR-0008 / IZU-17), so
+// the conflict map is keyed by `path.Clean(path.Join(specDir, pattern))` rather than the
+// raw pattern string. Without that, two service-local specs each declaring
+// `outputs: ["internal/foo.gen.go"]` would be flagged as duplicates even though they
+// resolve to distinct files (services/a/internal/foo.gen.go vs services/b/...). Using
+// the resolved repo-relative path keys also makes the error message point at the
+// concrete file the user must disambiguate, not the ambiguous source pattern.
+//
+// Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`) are not
+// detected here; they still surface via the runtime recordProducedPaths check after
+// both cmds finish writing.
 func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[string]taskInfo) error {
 	patternProducers := map[string][]string{}
 	for _, t := range tasks {
 		info := byKey[depgraphKey(t)]
 		label := taskLabel(t)
+		specDir := filepath.ToSlash(t.SpecRelpath)
 		seen := map[string]struct{}{}
 		for _, p := range info.outputPatterns {
-			if _, dup := seen[p]; dup {
+			key := path.Clean(path.Join(specDir, p))
+			if _, dup := seen[key]; dup {
 				continue
 			}
-			seen[p] = struct{}{}
-			patternProducers[p] = append(patternProducers[p], label)
+			seen[key] = struct{}{}
+			patternProducers[key] = append(patternProducers[key], label)
 		}
 	}
 	var parts []string

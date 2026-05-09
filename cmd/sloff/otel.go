@@ -125,7 +125,7 @@ func parseOTLPHeaders(s string) (map[string]string, error) {
 		return nil, nil
 	}
 	out := make(map[string]string)
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) != 2 {
 			return nil, fmt.Errorf("invalid OTLP header pair %q (expected key=value)", part)
@@ -153,7 +153,7 @@ func parseResourceAttributes(s string) []attribute.KeyValue {
 		return nil
 	}
 	var out []attribute.KeyValue
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) != 2 {
 			continue

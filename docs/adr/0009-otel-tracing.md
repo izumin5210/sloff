@@ -30,7 +30,7 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 
 ### D2. 環境変数で auto-detect する ( CLI フラグ追加なし)
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 未設定なら `noop.NewTracerProvider()` で短絡する ( SDK もエクスポーターも組まない)。
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 未設定なら **global provider をそのまま** にする ( `setupTracing` が disabled パスで何もしない、 SDK もエクスポーターも組まない)。 in-process な host が既に独自 TracerProvider を設定済みなら、 sloff の span はその host の provider を経由して host のバックエンドに届く ( 「 disable は exporter 設定をしない」 という意味であって、 「 sloff の spans を絶対に送らない」 とは扱わない)。
 
 理由:
 
@@ -49,6 +49,8 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 - 逆に他ツールには触らせず sloff だけに trace を有効化したい ( `SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT=...` のみ set)
 
 実装上は `os.Setenv` で in-process 適用する。 sloff から起動される child process ( task の cmd) には伝搬しない ( child は元の `OTEL_*` を見るか、 sloff が `os.Setenv` で書き換えた値を `os.Environ()` 経由で継承するかは Go runtime の挙動に従う)。 child の trace は sloff の関心外。
+
+**Restore 規律**: `applySloffPrefixOverrides` は touch した key のスナップショット ( `wasSet` / `prevValue`) を取り、 `restore func()` を返す。 `setupTracing` が返す shutdown は最後に必ずこの restore を呼ぶ。 これにより、 同一 process で `newRootCmd().Execute()` を複数回呼ぶ ( テスト・ embedding host) ケースで、 1 回目の `SLOFF_*` 設定が 2 回目以降の `OTEL_*` を汚染しない。
 
 ### D3. Exporter は `autoexport` で動的選択する
 
@@ -104,11 +106,13 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 - **cache `Storage` interface は無変更**。 `Storage.Load` / `Storage.Save` の呼び出し箇所を span で囲む ( これも runner 側責任)。
 - **`spec.Discover` は cmd/sloff 側でラップ**。 spec パッケージに otel 依存を持たせない。 phase span として cmd / runner の境界に span 開始 / 終了が分散するが、 trace tree としては parent-child で正しく繋がる。
 
-### D6. Shutdown 規律
+### D6. Shutdown 規律 ( global state restore も含む)
 
 - `sdktrace.WithBatcher` ( BatchSpanProcessor) を採用。 短命 CLI なので `Shutdown` で必ず flush する。
 - 各 subcommand の `RunE` ( `runE` / `graphE`) で `defer shutdown(ctx)` する。 shutdown 失敗時は stderr に warn を 1 行出すだけで **exit code には影響させない**。 exporter 障害が CLI の primary 機能 ( codegen 実行成否) を壊さない原則。
 - shutdown は `context.Background()` ベースの短い deadline を持たせる ( 親 ctx が cancel された後でも flush が走るようにするため)。
+- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻し、 `applySloffPrefixOverrides` が返した env restore も呼ぶ。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。
+- **disabled パスは global provider に一切触らない**。 host の provider をそのまま尊重し、 shutdown では env restore のみを行う ( SDK は組まない)。
 
 ### D7. Propagator は TraceContext + Baggage のみ
 

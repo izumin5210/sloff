@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -25,6 +26,14 @@ import (
 // the global provider lazily, so creating it at package init is safe even though
 // setupTracing replaces the provider later.
 var cmdTracer = otel.Tracer("github.com/izumin5210/sloff/cmd/sloff")
+
+// consoleSpanWriter is the destination stdouttrace writes to when
+// OTEL_TRACES_EXPORTER=console. It must be os.Stderr (not os.Stdout) so
+// trace JSON does not interleave with machine-readable subcommand output —
+// `sloff graph` writes Mermaid/DOT to stdout and would be unparseable if
+// span records were mixed in. Kept as a package-level var so the contract
+// is grep-able and test-assertable.
+var consoleSpanWriter io.Writer = os.Stderr
 
 // endSpan finishes span with error status when *errp is non-nil. The pointer
 // indirection lets callers tie span outcome to a named return value:
@@ -115,8 +124,13 @@ func envOTelEnabled() bool {
 }
 
 // parseOTLPHeaders parses the OTel OTLP headers env value
-// ("k1=v1,k2=v2") into a map. Values are URL-decoded per the OTel spec so
-// users can encode commas or equals in header values via percent-escapes.
+// ("k1=v1,k2=v2") into a map. Values are percent-decoded per the OTel spec so
+// users can embed commas or equals in header values via percent-escapes.
+//
+// url.PathUnescape (rather than url.QueryUnescape) is mandatory: query-style
+// decoding rewrites '+' to space, which silently corrupts base64-encoded auth
+// tokens (the common case for `Authorization: Bearer <base64>` headers).
+//
 // Malformed pairs return an error rather than being silently dropped, since
 // "wrong auth header" tends to be the kind of misconfiguration users want to
 // see immediately.
@@ -134,7 +148,7 @@ func parseOTLPHeaders(s string) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("empty key in OTLP header pair %q", part)
 		}
-		val, err := url.QueryUnescape(strings.TrimSpace(kv[1]))
+		val, err := url.PathUnescape(strings.TrimSpace(kv[1]))
 		if err != nil {
 			return nil, fmt.Errorf("decode OTLP header value for %q: %w", key, err)
 		}
@@ -144,7 +158,10 @@ func parseOTLPHeaders(s string) (map[string]string, error) {
 }
 
 // parseResourceAttributes parses OTEL_RESOURCE_ATTRIBUTES
-// ("k1=v1,k2=v2") into attribute.KeyValue list. Values are URL-decoded.
+// ("k1=v1,k2=v2") into attribute.KeyValue list. Values are percent-decoded
+// via url.PathUnescape so '+' stays literal (deployment ids, version
+// qualifiers like "1.0+local", and similar values commonly carry it).
+//
 // Malformed pairs are skipped silently to mirror the leniency of the OTel
 // SDK's resource.WithFromEnv (resource attributes are diagnostic metadata,
 // not auth-critical, so partial success is preferable to startup failure).
@@ -162,7 +179,7 @@ func parseResourceAttributes(s string) []attribute.KeyValue {
 		if key == "" {
 			continue
 		}
-		val, err := url.QueryUnescape(strings.TrimSpace(kv[1]))
+		val, err := url.PathUnescape(strings.TrimSpace(kv[1]))
 		if err != nil {
 			continue
 		}
@@ -205,7 +222,7 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 func buildSpanExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
 	switch strings.ToLower(effectiveEnv("OTEL_TRACES_EXPORTER")) {
 	case "console":
-		return stdouttrace.New()
+		return stdouttrace.New(stdouttrace.WithWriter(consoleSpanWriter))
 	case "", "otlp":
 		return buildOTLPSpanExporter(ctx)
 	default:

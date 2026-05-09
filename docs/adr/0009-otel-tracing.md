@@ -63,7 +63,7 @@ autoexport (`go.opentelemetry.io/contrib/exporters/autoexport`) は env だけ�
 
 | OTEL_TRACES_EXPORTER | dispatch 先 | options |
 |---|---|---|
-| `console` | `stdouttrace.New()` | なし ( stdout 固定) |
+| `console` | `stdouttrace.New(stdouttrace.WithWriter(stderr))` | **stderr 固定** ( 後述) |
 | `""` / `otlp` ( default) | OTLP HTTP/gRPC を protocol で振り分け | `WithEndpointURL` / `WithHeaders` |
 | `none` | -- ( `envOTelEnabled` が false を返すので到達しない) | -- |
 | その他 | 起動エラー ( unsupported) | -- |
@@ -71,6 +71,10 @@ autoexport (`go.opentelemetry.io/contrib/exporters/autoexport`) は env だけ�
 OTLP の protocol は `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` > `OTEL_EXPORTER_OTLP_PROTOCOL` > default `http/protobuf` の順に解決し、 `grpc` / `http/protobuf` / `http/json` を受け付ける。 endpoint と headers は signal-specific ( `_TRACES_`) を generic より優先 ( OTel spec 準拠) し、 effective 値が非空なら `WithEndpointURL` / `WithHeaders` で渡す ( exporter 内部の env 読みは options で必ず上書きされる)。
 
 OTel spec に書かれているが本実装が **直接サポートしていない** OTEL_ 変数 ( `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, TLS 関連等) は exporter が env を直接読むので shell 設定はそのまま効く。 ただし SLOFF_ prefix の override は届かない。 必要になれば options 経由のサポートを足す。
+
+**Console exporter の出力先は stderr 固定**: `stdouttrace.New()` のデフォルトは `os.Stdout` だが、 sloff は `stdouttrace.WithWriter(os.Stderr)` を渡して **stderr に振り向ける**。 理由は `sloff graph` のような machine-readable な出力 ( Mermaid / DOT) を吐くサブコマンドが stdout を持つため、 trace JSON が stdout に混ざるとパイプライン下流のパーサが壊れる。 `OTEL_TRACES_EXPORTER=console` での local 検証は便利機能なので、 「 trace 有効化が通常コマンド出力を汚さない」 ことを CLI コントラクトとして守る。
+
+**Header / attribute の percent-decode は `url.PathUnescape` を使う**: `url.QueryUnescape` を使うとクエリ文字列流の `+` → space 変換が走り、 `Authorization: Bearer <base64>` のように `+` を含む値が黙って壊れる。 PathUnescape は `%XX` のみをデコードし `+` をリテラルとして残すので、 OTel spec が要求する percent-encoding の意味論と OTLP header 系の実用 ( base64 auth) の双方に合致する。
 
 ### D4. Resource は SLOFF_ 値を attribute で組み立てる
 

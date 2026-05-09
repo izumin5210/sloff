@@ -142,7 +142,11 @@ func TestParseOTLPHeaders(t *testing.T) {
 		{name: "single pair", in: "x-api-key=abc123", want: map[string]string{"x-api-key": "abc123"}},
 		{name: "multiple pairs", in: "k1=v1,k2=v2", want: map[string]string{"k1": "v1", "k2": "v2"}},
 		{name: "trims whitespace", in: " k1 = v1 , k2=v2 ", want: map[string]string{"k1": "v1", "k2": "v2"}},
-		{name: "url-decoded value", in: "auth=Bearer%20token", want: map[string]string{"auth": "Bearer token"}},
+		{name: "percent-decoded value", in: "auth=Bearer%20token", want: map[string]string{"auth": "Bearer token"}},
+		// Regression: url.QueryUnescape rewrites '+' to space, which silently
+		// corrupts base64-encoded auth tokens (e.g. Bearer "abc+def==" → "abc def==").
+		// The header parser must use path-style decoding so '+' stays literal.
+		{name: "literal plus preserved (base64-style auth)", in: "Authorization=Bearer abc+def/==", want: map[string]string{"Authorization": "Bearer abc+def/=="}},
 		{name: "value containing equals", in: "k1=a=b", want: map[string]string{"k1": "a=b"}},
 		{name: "missing equals errors", in: "lone-key", wantErr: true},
 		{name: "empty key errors", in: "=value", wantErr: true},
@@ -186,10 +190,20 @@ func TestParseResourceAttributes(t *testing.T) {
 		}
 	})
 
-	t.Run("url-decoded values", func(t *testing.T) {
+	t.Run("percent-decoded values", func(t *testing.T) {
 		got := parseResourceAttributes("desc=hello%20world")
 		if len(got) != 1 || got[0].Value.AsString() != "hello world" {
 			t.Fatalf("url decoding broken: %v", got)
+		}
+	})
+
+	// Regression: url.QueryUnescape rewrites '+' to space, which would corrupt
+	// resource attribute values that legitimately carry '+' (commit hashes,
+	// version qualifiers like "1.0+local", base64-derived deployment ids, etc).
+	t.Run("literal plus preserved", func(t *testing.T) {
+		got := parseResourceAttributes("deployment.id=v1+local")
+		if len(got) != 1 || got[0].Value.AsString() != "v1+local" {
+			t.Fatalf("got %v, want literal '+' preserved", got)
 		}
 	})
 
@@ -416,6 +430,17 @@ func TestSetupTracing_EnabledRestoresProviderAndPropagator(t *testing.T) {
 	}
 	if got := otel.GetTextMapPropagator(); got != prevPropagator {
 		t.Fatal("post-shutdown propagator not restored")
+	}
+}
+
+// TestConsoleSpanWriter_DefaultsToStderr guards the contract that the
+// console exporter does not corrupt stdout-driven subcommands such as
+// `sloff graph`. If consoleSpanWriter is ever flipped back to os.Stdout
+// (or to anything other than os.Stderr), trace JSON would interleave with
+// the rendered graph DSL and downstream parsers would break.
+func TestConsoleSpanWriter_DefaultsToStderr(t *testing.T) {
+	if consoleSpanWriter != os.Stderr {
+		t.Fatalf("consoleSpanWriter = %v, want os.Stderr (stdout would corrupt `sloff graph` output)", consoleSpanWriter)
 	}
 }
 

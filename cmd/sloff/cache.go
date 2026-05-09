@@ -86,6 +86,13 @@ func runCacheDiff(w io.Writer, pathA, pathB string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", pathB, err)
 	}
+	// Records the runner writes are already sorted by cache.Marshal, but a
+	// caller could hand `cache diff` a record that was constructed by hand or
+	// by a sloff build with a different sort discipline. Normalise both sides
+	// so order-only differences in repeated fields don't surface as semantic
+	// diffs (matches the "semantic diff" wording in the help text).
+	cache.Sort(a)
+	cache.Sort(b)
 	if proto.Equal(a, b) {
 		return nil
 	}

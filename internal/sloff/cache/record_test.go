@@ -133,3 +133,31 @@ func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 		t.Fatal("Marshal: expected error for unknown schema version, got nil")
 	}
 }
+
+// TestUnmarshalRejectsZeroBytes guards against silently treating a zero-byte
+// or otherwise default-valued record as a usable cache entry. proto.Unmarshal
+// happily turns empty input into a Record with SCHEMA_VERSION_UNSPECIFIED;
+// the runner would then evaluate it as an existing record and either claim a
+// false hit or silently overwrite valid bytes. Surface the corruption instead.
+func TestUnmarshalRejectsZeroBytes(t *testing.T) {
+	if _, err := cache.Unmarshal(nil); err == nil {
+		t.Error("Unmarshal: expected error for empty bytes (decodes to SCHEMA_VERSION_UNSPECIFIED)")
+	}
+}
+
+// TestUnmarshalRejectsUnknownSchemaVersion is the read-side counterpart of
+// TestMarshalRejectsUnknownSchemaVersion: a future binary that emits a newer
+// schema_version must not be silently downgraded by an older binary. We
+// build the bytes via raw proto.Marshal to bypass cache.Marshal's writer-side
+// validation and verify the load path catches it.
+func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
+	rec := sampleRecord()
+	rec.SchemaVersion = cachev1.SchemaVersion(999)
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	if _, err := cache.Unmarshal(b); err == nil {
+		t.Error("Unmarshal: expected error for unknown schema version")
+	}
+}

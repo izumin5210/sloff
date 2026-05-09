@@ -7,6 +7,8 @@
 package cache
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -34,20 +36,37 @@ func Marshal(rec *cachev1.Record) ([]byte, error) {
 	if rec == nil {
 		return nil, fmt.Errorf("cache: nil record")
 	}
-	if _, ok := cachev1.SchemaVersion_name[int32(rec.GetSchemaVersion())]; !ok {
-		return nil, fmt.Errorf("cache: unknown schema version %d", rec.GetSchemaVersion())
+	if err := validateSchemaVersion(rec.GetSchemaVersion()); err != nil {
+		return nil, err
 	}
 	Sort(rec)
 	return proto.MarshalOptions{Deterministic: true}.Marshal(rec)
 }
 
-// Unmarshal parses a proto-encoded cache record.
+// Unmarshal parses a proto-encoded cache record. ADR-0009 treats records with
+// an unknown or unspecified schema_version as runtime errors rather than
+// best-effort decodes, so the validation runs symmetrically on the read path
+// — including against zero-byte files, which proto.Unmarshal otherwise turns
+// into a default-valued Record.
 func Unmarshal(b []byte) (*cachev1.Record, error) {
 	rec := &cachev1.Record{}
 	if err := proto.Unmarshal(b, rec); err != nil {
 		return nil, err
 	}
+	if err := validateSchemaVersion(rec.GetSchemaVersion()); err != nil {
+		return nil, err
+	}
 	return rec, nil
+}
+
+func validateSchemaVersion(v cachev1.SchemaVersion) error {
+	if v == cachev1.SchemaVersion_SCHEMA_VERSION_UNSPECIFIED {
+		return fmt.Errorf("cache: schema version is unspecified (likely a corrupt or empty record file)")
+	}
+	if _, ok := cachev1.SchemaVersion_name[int32(v)]; !ok {
+		return fmt.Errorf("cache: unknown schema version %d", v)
+	}
+	return nil
 }
 
 // Sort normalises the order of repeated fields whose schema requires
@@ -80,12 +99,27 @@ func FilePaths(files []*cachev1.FileEntry) []string {
 // MarshalJSON returns the canonical protojson representation of rec.
 // Shared by `sloff cache show` and the runner E2E harness so the human-readable
 // view of a record is produced from a single set of options.
+//
+// protojson intentionally randomises the whitespace after every `:` to
+// discourage byte-stable comparisons; we re-flow the bytes through
+// json.Compact + json.Indent so the output is reproducible across calls
+// while still preserving the proto declaration order of keys (encoding/json
+// keeps the original token order when transforming a raw JSON byte slice).
 func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
-	opts := protojson.MarshalOptions{
-		Multiline:       true,
-		Indent:          "  ",
+	raw, err := protojson.MarshalOptions{
 		UseProtoNames:   true,
 		EmitUnpopulated: false,
+	}.Marshal(rec)
+	if err != nil {
+		return nil, err
 	}
-	return opts.Marshal(rec)
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return nil, fmt.Errorf("cache: compact protojson output: %w", err)
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, compact.Bytes(), "", "  "); err != nil {
+		return nil, fmt.Errorf("cache: re-indent protojson output: %w", err)
+	}
+	return indented.Bytes(), nil
 }

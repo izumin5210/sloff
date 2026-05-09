@@ -4,6 +4,8 @@ pre-commit:
   commands:
     format:
       glob: "*.go"
+      exclude:
+        - "*.pb.go"
       run: |
         go tool gofumpt -w -- {staged_files}
       stage_fixed: true

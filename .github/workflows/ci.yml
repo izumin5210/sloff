@@ -24,7 +24,7 @@ jobs:
           - name: tidy
             run: go mod tidy
           - name: gen
-            run: go tool buf generate && go tool gofumpt -l -w -- .
+            run: go tool buf generate
       fail-fast: false
     permissions:
       contents: read

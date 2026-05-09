@@ -21,13 +21,12 @@
 package cachev1
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -536,20 +535,18 @@ func file_sloff_cache_v1_cache_proto_rawDescGZIP() []byte {
 	return file_sloff_cache_v1_cache_proto_rawDescData
 }
 
-var (
-	file_sloff_cache_v1_cache_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-	file_sloff_cache_v1_cache_proto_msgTypes  = make([]protoimpl.MessageInfo, 6)
-	file_sloff_cache_v1_cache_proto_goTypes   = []any{
-		SchemaVersion(0),              // 0: sloff.cache.v1.SchemaVersion
-		(*Record)(nil),                // 1: sloff.cache.v1.Record
-		(*Spec)(nil),                  // 2: sloff.cache.v1.Spec
-		(*Input)(nil),                 // 3: sloff.cache.v1.Input
-		(*Output)(nil),                // 4: sloff.cache.v1.Output
-		(*FileEntry)(nil),             // 5: sloff.cache.v1.FileEntry
-		(*ResolvedVersion)(nil),       // 6: sloff.cache.v1.ResolvedVersion
-		(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
-	}
-)
+var file_sloff_cache_v1_cache_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_sloff_cache_v1_cache_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_sloff_cache_v1_cache_proto_goTypes = []any{
+	(SchemaVersion)(0),            // 0: sloff.cache.v1.SchemaVersion
+	(*Record)(nil),                // 1: sloff.cache.v1.Record
+	(*Spec)(nil),                  // 2: sloff.cache.v1.Spec
+	(*Input)(nil),                 // 3: sloff.cache.v1.Input
+	(*Output)(nil),                // 4: sloff.cache.v1.Output
+	(*FileEntry)(nil),             // 5: sloff.cache.v1.FileEntry
+	(*ResolvedVersion)(nil),       // 6: sloff.cache.v1.ResolvedVersion
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+}
 var file_sloff_cache_v1_cache_proto_depIdxs = []int32{
 	0, // 0: sloff.cache.v1.Record.schema_version:type_name -> sloff.cache.v1.SchemaVersion
 	2, // 1: sloff.cache.v1.Record.spec:type_name -> sloff.cache.v1.Spec

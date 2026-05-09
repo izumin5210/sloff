@@ -63,29 +63,29 @@ func New(repoRoot string, l lister.SourceLister) *Resolver {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// Resolve splits the lister's output into:
-//   - ExtraInputs: every internal Go file path the lister enumerated
-//     (repo-relative slash form), folded into the task's input set so
-//     files_hash captures their content and depgraph can wire upstream
-//     producers via output overlap.
-//   - Versions: one ToolVersion per external module, encoded as
-//     "go-deps:<path>@<version>+sum:<go.sum-line>" so dep bumps and go.sum
-//     drift both invalidate tools_hash.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
-	entry, err := r.resolveEntry(declared)
+// Inputs returns every internal Go file path the lister enumerated for this
+// declared tool (repo-relative slash form). The runner folds these into the
+// task's input set so files_hash captures their content and depgraph can
+// wire upstream producers via output overlap.
+//
+// Inputs and Versions both consult the (memoised) lister — paying for a
+// single packages.Load per (specDir, entry) per run, see ADR-0008.
+func (r *Resolver) Inputs(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]string, error) {
+	listing, _, err := r.list(ctx, specDir, declared)
 	if err != nil {
-		return toolresolver.Result{}, err
+		return nil, err
 	}
+	return append([]string(nil), listing.InternalFiles...), nil
+}
 
-	// The lister evaluates entry inside the spec's working directory, matching
-	// where `go run ./cmd/foo` actually executes. This is what makes monorepos
-	// with multiple Go modules work: a spec under submodule/ asks the lister to
-	// resolve against submodule's go.mod, not the repo-root module.
-	listing, err := r.lister.List(ctx, specDir, entry)
+// Versions returns one ToolVersion per external module reachable from the
+// declared entry, encoded as "go-deps:<path>@<version>+sum:<go.sum-line>" so
+// dep bumps and go.sum drift both invalidate tools_hash.
+func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+	listing, entry, err := r.list(ctx, specDir, declared)
 	if err != nil {
-		return toolresolver.Result{}, fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
+		return nil, err
 	}
-
 	source := Name + ":" + entry
 	versions := make([]toolresolver.ToolVersion, 0, len(listing.ExternalModules))
 	for _, m := range listing.ExternalModules {
@@ -95,11 +95,25 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 			Version: encodeExternalVersion(m),
 		})
 	}
+	return versions, nil
+}
 
-	return toolresolver.Result{
-		Versions:    versions,
-		ExtraInputs: append([]string(nil), listing.InternalFiles...),
-	}, nil
+// list resolves declared into a (listing, entry) pair via the memoised
+// SourceLister. The lister evaluates entry inside the spec's working
+// directory, matching where `go run ./cmd/foo` actually executes — this is
+// what makes monorepos with multiple Go modules work: a spec under
+// submodule/ asks the lister to resolve against submodule's go.mod, not the
+// repo-root module.
+func (r *Resolver) list(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) (lister.Listing, string, error) {
+	entry, err := r.resolveEntry(declared)
+	if err != nil {
+		return lister.Listing{}, "", err
+	}
+	listing, err := r.lister.List(ctx, specDir, entry)
+	if err != nil {
+		return lister.Listing{}, "", fmt.Errorf("go-local: list sources for %q (spec %q): %w", entry, specDir, err)
+	}
+	return listing, entry, nil
 }
 
 // encodeExternalVersion produces the canonical hash-input string for one

@@ -6,9 +6,9 @@ import (
 )
 
 // Registry holds resolvers keyed by Name. Per ADR-0005 sloff has no cmd-shape
-// auto-dispatch: every Resolve call is driven by the spec's tools[] declarations,
-// each of which names a Resolver explicitly. The registry is therefore a pure
-// name → Resolver lookup.
+// auto-dispatch: every Inputs / Versions call is driven by the spec's tools[]
+// declarations, each of which names a Resolver explicitly. The registry is
+// therefore a pure name → Resolver lookup.
 type Registry struct {
 	byName map[string]Resolver
 }
@@ -24,29 +24,48 @@ func (r *Registry) Register(resolver Resolver) {
 	r.byName[resolver.Name()] = resolver
 }
 
-// Resolve concatenates every declared tool's contribution in the order the spec
-// wrote them. Versions feed tools_hash; ExtraInputs are merged into the task's
-// input set by the runner before depgraph computes ordering. An empty declared
-// slice is rejected because spec validation (ADR-0004 D1) already requires
-// tools[]; reaching this code with no declarations indicates a programmer error
-// elsewhere.
-func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, declared []DeclaredTool) (Result, error) {
+// Inputs concatenates every declared tool's ExtraInputs contribution in the
+// order they appear in declared. An empty declared slice is rejected because
+// spec validation (ADR-0004 D1) already requires tools[]; reaching this code
+// with no declarations indicates a programmer error elsewhere.
+func (r *Registry) Inputs(ctx context.Context, specDir string, declared []DeclaredTool) ([]string, error) {
 	if len(declared) == 0 {
-		return Result{}, fmt.Errorf("toolresolver: empty tools[] declaration (spec validation should have caught this)")
+		return nil, fmt.Errorf("toolresolver: empty tools[] declaration (spec validation should have caught this)")
 	}
-	var combined Result
+	var out []string
 	for i := range declared {
 		d := &declared[i]
 		res, ok := r.byName[d.Resolver]
 		if !ok {
-			return Result{}, fmt.Errorf("unknown resolver %q in tools declaration", d.Resolver)
+			return nil, fmt.Errorf("unknown resolver %q in tools declaration", d.Resolver)
 		}
-		one, err := res.Resolve(ctx, specDir, cmd, d)
+		ins, err := res.Inputs(ctx, specDir, d)
 		if err != nil {
-			return Result{}, fmt.Errorf("resolver %s: %w", d.Resolver, err)
+			return nil, fmt.Errorf("resolver %s: %w", d.Resolver, err)
 		}
-		combined.Versions = append(combined.Versions, one.Versions...)
-		combined.ExtraInputs = append(combined.ExtraInputs, one.ExtraInputs...)
+		out = append(out, ins...)
 	}
-	return combined, nil
+	return out, nil
+}
+
+// Versions concatenates every declared tool's ToolVersion contribution in the
+// order they appear in declared. Same empty-slice contract as Inputs.
+func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ToolVersion, error) {
+	if len(declared) == 0 {
+		return nil, fmt.Errorf("toolresolver: empty tools[] declaration (spec validation should have caught this)")
+	}
+	var out []ToolVersion
+	for i := range declared {
+		d := &declared[i]
+		res, ok := r.byName[d.Resolver]
+		if !ok {
+			return nil, fmt.Errorf("unknown resolver %q in tools declaration", d.Resolver)
+		}
+		vs, err := res.Versions(ctx, specDir, d)
+		if err != nil {
+			return nil, fmt.Errorf("resolver %s: %w", d.Resolver, err)
+		}
+		out = append(out, vs...)
+	}
+	return out, nil
 }

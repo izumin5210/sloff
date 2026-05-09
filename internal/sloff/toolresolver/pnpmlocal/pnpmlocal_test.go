@@ -45,18 +45,23 @@ func TestResolver_Name(t *testing.T) {
 func TestResolver_RejectsNilDeclaration(t *testing.T) {
 	root := setupWorkspace(t, nil, nil, "")
 	r := mustNewResolver(t, root, &fakeEnumerator{})
-	if _, err := r.Resolve(context.Background(), ".", nil, nil); err == nil {
-		t.Fatal("expected error when declared is nil (ADR-0005)")
+	if _, err := r.Inputs(context.Background(), ".", nil); err == nil {
+		t.Error("Inputs: expected error when declared is nil (ADR-0005)")
+	}
+	if _, err := r.Versions(context.Background(), ".", nil); err == nil {
+		t.Error("Versions: expected error when declared is nil (ADR-0005)")
 	}
 }
 
 func TestResolver_RejectsEmptyPackageName(t *testing.T) {
 	root := setupWorkspace(t, nil, nil, "")
 	r := mustNewResolver(t, root, &fakeEnumerator{})
-	_, err := r.Resolve(context.Background(), ".", nil,
-		&toolresolver.DeclaredTool{Resolver: "pnpm-local"})
-	if err == nil {
-		t.Fatal("expected error when PackageName is empty")
+	declared := &toolresolver.DeclaredTool{Resolver: "pnpm-local"}
+	if _, err := r.Inputs(context.Background(), ".", declared); err == nil {
+		t.Error("Inputs: expected error when PackageName is empty")
+	}
+	if _, err := r.Versions(context.Background(), ".", declared); err == nil {
+		t.Error("Versions: expected error when PackageName is empty")
 	}
 }
 
@@ -73,7 +78,7 @@ func TestResolver_RejectsNonWorkspacePackage(t *testing.T) {
 	)
 	r := mustNewResolver(t, root, &fakeEnumerator{})
 
-	_, err := r.Resolve(context.Background(), ".", nil,
+	_, err := r.Inputs(context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@external/foo"})
 	if err == nil {
 		t.Fatal("expected error for non-workspace package")
@@ -103,18 +108,18 @@ func TestResolver_EnumeratesPackageDirAsExtraInputs(t *testing.T) {
 	}}
 	r := mustNewResolver(t, root, stub)
 
-	got, err := r.Resolve(context.Background(), ".", nil,
+	got, err := r.Inputs(context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Inputs: %v", err)
 	}
 	want := []string{
 		"packages/codegen/package.json",
 		"packages/codegen/src/cli.ts",
 		"packages/codegen/src/lib.ts",
 	}
-	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
-		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Inputs (-want +got):\n%s", diff)
 	}
 }
 
@@ -145,14 +150,14 @@ importers:
 		filepath.Join("packages", "util"):    {"packages/util/src/lib.ts"},
 	}}
 
-	got, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+	got, err := mustNewResolver(t, root, stub).Inputs(context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Inputs: %v", err)
 	}
 	want := []string{"packages/codegen/src/cli.ts", "packages/util/src/lib.ts"}
-	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
-		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Inputs (-want +got):\n%s", diff)
 	}
 }
 
@@ -193,13 +198,13 @@ snapshots:
 		filepath.Join("packages", "util"):    {"packages/util/src/lib.ts"},
 	}}
 
-	got, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+	got, err := mustNewResolver(t, root, stub).Versions(context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Versions: %v", err)
 	}
-	versionStrs := make([]string, len(got.Versions))
-	for i, v := range got.Versions {
+	versionStrs := make([]string, len(got))
+	for i, v := range got {
 		versionStrs[i] = v.Version
 	}
 	sort.Strings(versionStrs)
@@ -224,10 +229,39 @@ func TestResolver_PassesThroughEnumeratorError(t *testing.T) {
 	)
 	stub := &fakeEnumerator{err: errors.New("git ls-files boom")}
 
-	_, err := mustNewResolver(t, root, stub).Resolve(context.Background(), ".", nil,
+	_, err := mustNewResolver(t, root, stub).Inputs(context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"})
 	if err == nil || !strings.Contains(err.Error(), "git ls-files boom") {
 		t.Errorf("err = %v, want wrap of enumerator error", err)
+	}
+}
+
+// TestResolver_InputsAndVersionsShareWalk locks the IZU-16 caching contract:
+// when both methods are called for the same declared package, the resolver
+// only walks the lockfile and invokes the FileEnumerator once. Without the
+// per-package memoisation, splitting the methods would double the discovery
+// cost in production runs.
+func TestResolver_InputsAndVersionsShareWalk(t *testing.T) {
+	root := setupWorkspace(
+		t,
+		[]importerSpec{{path: "packages/codegen", pkgJSON: `{"name": "@org/codegen"}`}},
+		nil,
+		"",
+	)
+	stub := &fakeEnumerator{files: map[string][]string{
+		filepath.Join("packages", "codegen"): {"packages/codegen/src/cli.ts"},
+	}}
+	r := mustNewResolver(t, root, stub)
+	declared := &toolresolver.DeclaredTool{Resolver: "pnpm-local", PackageName: "@org/codegen"}
+
+	if _, err := r.Inputs(context.Background(), ".", declared); err != nil {
+		t.Fatalf("Inputs: %v", err)
+	}
+	if _, err := r.Versions(context.Background(), ".", declared); err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Errorf("FileEnumerator should be invoked once across Inputs+Versions, got %d (calls=%v)", len(stub.calls), stub.calls)
 	}
 }
 

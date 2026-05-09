@@ -14,10 +14,10 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/lister"
 )
 
-// fakeLister stubs SourceLister with a fixed Listing per call. Tests use it to
-// keep the resolver decoupled from packages.Load while still exercising both
-// contribution channels (ExtraInputs from internal files, Versions from
-// external modules).
+// fakeLister stubs SourceLister with a fixed Listing per call. Tests use it
+// to keep the resolver decoupled from packages.Load while still exercising
+// both contribution channels (ExtraInputs from internal files, Versions
+// from external modules).
 type fakeLister struct {
 	gotSpecDir string
 	gotEntry   string
@@ -49,12 +49,11 @@ func TestResolver_Name(t *testing.T) {
 func TestResolver_PassesEntryToLister(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/bar/main.go"}}}
 
-	_, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", []string{"bin/protoc-gen-bar"},
+	if _, err := golocal.New(t.TempDir(), stub).Inputs(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/bar"},
-	)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	); err != nil {
+		t.Fatalf("Inputs: %v", err)
 	}
 	if stub.gotEntry != "./cmd/bar" {
 		t.Errorf("lister received entry %q, want ./cmd/bar", stub.gotEntry)
@@ -64,29 +63,35 @@ func TestResolver_PassesEntryToLister(t *testing.T) {
 func TestResolver_FailsWithoutDeclaration(t *testing.T) {
 	r := golocal.New(t.TempDir(), &fakeLister{})
 
-	_, err := r.Resolve(context.Background(), ".", []string{"go", "run", "./cmd/foo"}, nil)
-	if err == nil {
-		t.Fatal("expected error when called without a declared tool (ADR-0005: no auto-dispatch)")
+	if _, err := r.Inputs(context.Background(), ".", nil); err == nil {
+		t.Error("Inputs: expected error when called without a declared tool (ADR-0005: no auto-dispatch)")
+	}
+	if _, err := r.Versions(context.Background(), ".", nil); err == nil {
+		t.Error("Versions: expected error when called without a declared tool (ADR-0005: no auto-dispatch)")
 	}
 }
 
 func TestResolver_FailsOnDeclarationWithoutEntry(t *testing.T) {
 	r := golocal.New(t.TempDir(), &fakeLister{})
+	declared := &toolresolver.DeclaredTool{Resolver: "go-local"}
 
-	_, err := r.Resolve(context.Background(), ".", []string{"bin/foo"},
-		&toolresolver.DeclaredTool{Resolver: "go-local"})
-	if err == nil {
-		t.Fatal("expected error when declared.Entry is empty")
+	if _, err := r.Inputs(context.Background(), ".", declared); err == nil {
+		t.Error("Inputs: expected error when declared.Entry is empty")
+	}
+	if _, err := r.Versions(context.Background(), ".", declared); err == nil {
+		t.Error("Versions: expected error when declared.Entry is empty")
 	}
 }
 
 func TestResolver_FailsOnDeclaredEntryWithoutLeadingDotSlash(t *testing.T) {
 	r := golocal.New(t.TempDir(), &fakeLister{})
+	declared := &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "cmd/foo"}
 
-	_, err := r.Resolve(context.Background(), ".", []string{"bin/foo"},
-		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "cmd/foo"})
-	if err == nil {
-		t.Fatal("expected error when declared.Entry lacks ./ prefix")
+	if _, err := r.Inputs(context.Background(), ".", declared); err == nil {
+		t.Error("Inputs: expected error when declared.Entry lacks ./ prefix")
+	}
+	if _, err := r.Versions(context.Background(), ".", declared); err == nil {
+		t.Error("Versions: expected error when declared.Entry lacks ./ prefix")
 	}
 }
 
@@ -96,18 +101,18 @@ func TestResolver_FailsOnDeclaredEntryWithoutLeadingDotSlash(t *testing.T) {
 func TestResolver_AcceptsDotEntry(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"main.go"}}}
 
-	got, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", nil,
+	got, err := golocal.New(t.TempDir(), stub).Inputs(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "."},
 	)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Inputs: %v", err)
 	}
 	if stub.gotEntry != "." {
 		t.Errorf("lister received entry %q, want %q", stub.gotEntry, ".")
 	}
-	if diff := cmp.Diff([]string{"main.go"}, got.ExtraInputs); diff != "" {
-		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]string{"main.go"}, got); diff != "" {
+		t.Errorf("Inputs (-want +got):\n%s", diff)
 	}
 }
 
@@ -118,12 +123,11 @@ func TestResolver_AcceptsDotEntry(t *testing.T) {
 func TestResolver_AcceptsParentRelativeEntry(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"cmd/gen/main.go"}}}
 
-	_, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), filepath.Join("specs", "sub"), nil,
+	if _, err := golocal.New(t.TempDir(), stub).Inputs(
+		context.Background(), filepath.Join("specs", "sub"),
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "../../cmd/gen"},
-	)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	); err != nil {
+		t.Fatalf("Inputs: %v", err)
 	}
 	if stub.gotSpecDir != filepath.Join("specs", "sub") {
 		t.Errorf("lister received specDir %q, want %q", stub.gotSpecDir, filepath.Join("specs", "sub"))
@@ -139,11 +143,11 @@ func TestResolver_AcceptsParentRelativeEntry(t *testing.T) {
 func TestResolver_PropagatesNestedSpecDir(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{InternalFiles: []string{"a/b/cmd/tool/main.go"}}}
 
-	if _, err := golocal.New(t.TempDir(), stub).Resolve(
+	if _, err := golocal.New(t.TempDir(), stub).Inputs(
 		context.Background(), filepath.Join("a", "b"),
-		nil, &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool/..."},
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/tool/..."},
 	); err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Inputs: %v", err)
 	}
 	if stub.gotSpecDir != filepath.Join("a", "b") {
 		t.Errorf("lister received specDir %q, want %q", stub.gotSpecDir, filepath.Join("a", "b"))
@@ -157,40 +161,50 @@ func TestResolver_PropagatesListerError(t *testing.T) {
 	wantErr := errors.New("transitive load failed")
 	stub := &fakeLister{err: wantErr}
 
-	_, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", nil,
+	if _, err := golocal.New(t.TempDir(), stub).Inputs(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
-	)
-	if err == nil {
-		t.Fatal("expected lister error to propagate")
+	); err == nil || !strings.Contains(err.Error(), "transitive load failed") {
+		t.Errorf("expected lister error to propagate via Inputs, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "transitive load failed") {
-		t.Errorf("error %q should wrap lister error", err)
+	if _, err := golocal.New(t.TempDir(), stub).Versions(
+		context.Background(), ".",
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
+	); err == nil || !strings.Contains(err.Error(), "transitive load failed") {
+		t.Errorf("expected lister error to propagate via Versions, got: %v", err)
 	}
 }
 
 // TestResolver_InternalFilesBecomeExtraInputs is the contract test for the
 // input-contributor side: lister.Listing.InternalFiles surfaces verbatim in
-// Result.ExtraInputs so the runner folds them into files_hash and depgraph
-// can wire upstream codegen tasks via output overlap.
+// Inputs so the runner folds them into files_hash and depgraph can wire
+// upstream codegen tasks via output overlap.
 func TestResolver_InternalFilesBecomeExtraInputs(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{
 		InternalFiles: []string{"cmd/foo/main.go", "pkg/util/util.go"},
 	}}
 
-	got, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", nil,
+	r := golocal.New(t.TempDir(), stub)
+	got, err := r.Inputs(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
 	)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Inputs: %v", err)
 	}
 	want := []string{"cmd/foo/main.go", "pkg/util/util.go"}
-	if diff := cmp.Diff(want, got.ExtraInputs); diff != "" {
-		t.Errorf("ExtraInputs (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Inputs (-want +got):\n%s", diff)
 	}
-	if len(got.Versions) != 0 {
-		t.Errorf("listing without ExternalModules must yield no Versions, got %+v", got.Versions)
+	versions, err := r.Versions(
+		context.Background(), ".",
+		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
+	)
+	if err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Errorf("listing without ExternalModules must yield no Versions, got %+v", versions)
 	}
 }
 
@@ -207,17 +221,17 @@ func TestResolver_ExternalModulesBecomeGoDepsVersions(t *testing.T) {
 		},
 	}}
 
-	got, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", nil,
+	got, err := golocal.New(t.TempDir(), stub).Versions(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
 	)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Versions: %v", err)
 	}
-	if len(got.Versions) != 2 {
-		t.Fatalf("len(Versions) = %d, want 2: %+v", len(got.Versions), got.Versions)
+	if len(got) != 2 {
+		t.Fatalf("len(Versions) = %d, want 2: %+v", len(got), got)
 	}
-	for _, v := range got.Versions {
+	for _, v := range got {
 		if !strings.HasPrefix(v.Version, "go-deps:example.com/") {
 			t.Errorf("Version = %q, want go-deps:example.com/... prefix", v.Version)
 		}
@@ -247,17 +261,42 @@ func TestResolver_GoSumDriftFlipsDepsVersion(t *testing.T) {
 	}
 }
 
+// TestResolver_InputsAndVersionsShareListing locks the IZU-16 caching
+// contract: when the resolver is wrapped in lister.NewMemoized (the
+// production wiring), calling Inputs and Versions for the same declared
+// tool causes packages.Load (the lister) to run exactly once. Without
+// memoisation, splitting the methods would double the cost.
+func TestResolver_InputsAndVersionsShareListing(t *testing.T) {
+	stub := &fakeLister{listing: lister.Listing{
+		InternalFiles:   []string{"cmd/foo/main.go"},
+		ExternalModules: []lister.ExternalModule{{Path: "example.com/x", Version: "v1.0.0"}},
+	}}
+	memo := lister.NewMemoized(stub)
+	r := golocal.New(t.TempDir(), memo)
+	declared := &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"}
+
+	if _, err := r.Inputs(context.Background(), ".", declared); err != nil {
+		t.Fatalf("Inputs: %v", err)
+	}
+	if _, err := r.Versions(context.Background(), ".", declared); err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Errorf("memoised lister should be called once across Inputs+Versions, got %d", stub.calls)
+	}
+}
+
 func mustVersion(t *testing.T, stub *fakeLister) string {
 	t.Helper()
-	got, err := golocal.New(t.TempDir(), stub).Resolve(
-		context.Background(), ".", nil,
+	got, err := golocal.New(t.TempDir(), stub).Versions(
+		context.Background(), ".",
 		&toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/foo"},
 	)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Versions: %v", err)
 	}
-	if len(got.Versions) != 1 {
-		t.Fatalf("len(Versions) = %d, want 1", len(got.Versions))
+	if len(got) != 1 {
+		t.Fatalf("len(Versions) = %d, want 1", len(got))
 	}
-	return got.Versions[0].Version
+	return got[0].Version
 }

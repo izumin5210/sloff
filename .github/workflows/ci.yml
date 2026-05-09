@@ -22,7 +22,9 @@ jobs:
           - name: tidy
             run: go mod tidy
           - name: proto-generate
-            run: go tool buf generate
+            run: |
+              go tool buf generate
+              go tool gofumpt -l -w -- .
           - name: proto-lint
             run: go tool buf lint
           - name: proto-breaking

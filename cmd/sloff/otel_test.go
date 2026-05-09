@@ -353,9 +353,12 @@ func TestSetupTracing_DisabledIsZeroCost(t *testing.T) {
 	clearOTelEnv(t)
 	ctx := context.Background()
 
-	shutdown, err := setupTracing(ctx)
+	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
 		t.Fatalf("setupTracing returned err = %v, want nil when env is empty", err)
+	}
+	if tp == nil {
+		t.Fatal("setupTracing returned nil TracerProvider; expected noop")
 	}
 	if shutdown == nil {
 		t.Fatal("setupTracing returned nil shutdown; expected callable no-op")
@@ -370,9 +373,12 @@ func TestSetupTracing_EnabledReturnsRealShutdown(t *testing.T) {
 	t.Setenv("OTEL_TRACES_EXPORTER", "console")
 	ctx := context.Background()
 
-	shutdown, err := setupTracing(ctx)
+	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
 		t.Fatalf("setupTracing returned err = %v", err)
+	}
+	if tp == nil {
+		t.Fatal("setupTracing returned nil TracerProvider")
 	}
 	if shutdown == nil {
 		t.Fatal("setupTracing returned nil shutdown")
@@ -430,7 +436,7 @@ func TestSetupTracing_NeverMutatesEnv(t *testing.T) {
 			before := snapshotOTELEnv()
 			ctx := context.Background()
 
-			shutdown, err := setupTracing(ctx)
+			_, shutdown, err := setupTracing(ctx)
 			if err != nil {
 				t.Fatalf("setupTracing err = %v", err)
 			}
@@ -462,108 +468,108 @@ func snapshotOTELEnv() map[string]any {
 	return snap
 }
 
-// TestSetupTracing_PassiveDisableDoesNotClobberGlobal preserves the
-// codex-flagged invariant: a sloff invocation with no tracing env at all
-// (passive disable) must leave a host-configured global TracerProvider in
-// place. This is distinct from explicit disable (SLOFF_OTEL_SDK_DISABLED=true
-// or SLOFF_OTEL_TRACES_EXPORTER=none) which intentionally swaps in noop —
-// see TestSetupTracing_ExplicitDisableInstallsTransientNoop.
-func TestSetupTracing_PassiveDisableDoesNotClobberGlobal(t *testing.T) {
-	clearOTelEnv(t)
-	prev := otel.GetTracerProvider()
-	ctx := context.Background()
-
-	shutdown, err := setupTracing(ctx)
-	if err != nil {
-		t.Fatalf("setupTracing returned err = %v", err)
-	}
-	t.Cleanup(func() { _ = shutdown(ctx) })
-
-	if got := otel.GetTracerProvider(); got != prev {
-		t.Fatal("passive-disabled setupTracing replaced global TracerProvider; want unchanged")
-	}
-}
-
-// TestSetupTracing_ExplicitDisableInstallsTransientNoop covers the case codex
-// flagged: when the user explicitly tells sloff to be silent
-// (OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none, with or without the
-// SLOFF_ prefix), an in-process host's TracerProvider must NOT keep receiving
-// sloff spans. setupTracing installs noop for the run and restores the prev
-// provider on shutdown so the host's instrumentation resumes after sloff exits.
-func TestSetupTracing_ExplicitDisableInstallsTransientNoop(t *testing.T) {
-	cases := []struct {
+// TestSetupTracing_NeverTouchesGlobalProvider is the load-bearing contract
+// for safe in-process embedding: setupTracing must NEVER mutate the otel-go
+// global TracerProvider or TextMapPropagator regardless of env state. Without
+// this, two concurrent sloff invocations in the same process race on the
+// global, and a shutdown from one run would tear down state another run
+// depends on (codex review round 6 P2 #2).
+func TestSetupTracing_NeverTouchesGlobalProvider(t *testing.T) {
+	scenarios := []struct {
 		name string
 		env  map[string]string
 	}{
-		{name: "OTEL_SDK_DISABLED=true", env: map[string]string{"OTEL_SDK_DISABLED": "true"}},
-		{name: "OTEL_TRACES_EXPORTER=none", env: map[string]string{"OTEL_TRACES_EXPORTER": "none"}},
-		{name: "SLOFF_OTEL_SDK_DISABLED=true silences sloff while host has its own TP", env: map[string]string{
+		{name: "passive disabled (no env)", env: nil},
+		{name: "explicit OTEL_SDK_DISABLED=true", env: map[string]string{"OTEL_SDK_DISABLED": "true"}},
+		{name: "explicit OTEL_TRACES_EXPORTER=none", env: map[string]string{"OTEL_TRACES_EXPORTER": "none"}},
+		{name: "SLOFF_OTEL_SDK_DISABLED=true with shell endpoint", env: map[string]string{
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://host-collector:4318",
 			"SLOFF_OTEL_SDK_DISABLED":     "true",
 		}},
-		{name: "SLOFF_OTEL_TRACES_EXPORTER=none silences sloff", env: map[string]string{
-			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://host-collector:4318",
-			"SLOFF_OTEL_TRACES_EXPORTER":  "none",
-		}},
+		{name: "enabled via OTEL_TRACES_EXPORTER=console", env: map[string]string{"OTEL_TRACES_EXPORTER": "console"}},
+		{name: "enabled via SLOFF_OTEL_*", env: map[string]string{"SLOFF_OTEL_TRACES_EXPORTER": "console"}},
 	}
-	for _, tc := range cases {
+	for _, tc := range scenarios {
 		t.Run(tc.name, func(t *testing.T) {
 			clearOTelEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
 
-			prev := otel.GetTracerProvider()
+			prevProvider := otel.GetTracerProvider()
+			prevPropagator := otel.GetTextMapPropagator()
 			ctx := context.Background()
 
-			shutdown, err := setupTracing(ctx)
+			_, shutdown, err := setupTracing(ctx)
 			if err != nil {
 				t.Fatalf("setupTracing err = %v", err)
 			}
-			if got := otel.GetTracerProvider(); got == prev {
-				t.Fatal("explicit-disable setupTracing did not swap in a noop provider; sloff spans would still flow through host TP")
+			if got := otel.GetTracerProvider(); got != prevProvider {
+				t.Fatal("setupTracing mutated the global TracerProvider; in-process embedders / concurrent runs would observe interference")
+			}
+			if got := otel.GetTextMapPropagator(); got != prevPropagator {
+				t.Fatal("setupTracing mutated the global TextMapPropagator; in-process embedders would observe interference")
 			}
 
 			if err := shutdown(ctx); err != nil {
 				t.Fatalf("shutdown err = %v", err)
 			}
-			if got := otel.GetTracerProvider(); got != prev {
-				t.Fatal("post-shutdown TracerProvider not restored to caller's prior value")
+			if got := otel.GetTracerProvider(); got != prevProvider {
+				t.Fatal("shutdown mutated the global TracerProvider")
 			}
 		})
 	}
 }
 
-// TestSetupTracing_EnabledRestoresProviderAndPropagator covers the enabled-
-// path mirror: sloff installs its own TracerProvider and propagator, but the
-// shutdown must put the prior provider and propagator back so the host
-// process is not stuck with sloff's shut-down provider after the command
-// returns.
-func TestSetupTracing_EnabledRestoresProviderAndPropagator(t *testing.T) {
+// TestSetupTracing_DisabledReturnsNoopProvider asserts that the disabled
+// path returns a TracerProvider on which Tracer().Start() is recordable as a
+// noop (the resulting span has an invalid SpanContext per the OTel spec).
+// Without this, runner.New(Options{TracerProvider: tp}) would silently
+// produce real spans even when the user asked for silence.
+func TestSetupTracing_DisabledReturnsNoopProvider(t *testing.T) {
 	clearOTelEnv(t)
-	t.Setenv("OTEL_TRACES_EXPORTER", "console")
-
-	prevProvider := otel.GetTracerProvider()
-	prevPropagator := otel.GetTextMapPropagator()
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
 	ctx := context.Background()
 
-	shutdown, err := setupTracing(ctx)
+	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
-		t.Fatalf("setupTracing returned err = %v", err)
+		t.Fatalf("setupTracing err = %v", err)
 	}
-	if got := otel.GetTracerProvider(); got == prevProvider {
-		t.Fatal("enabled setupTracing did not install a new TracerProvider")
-	}
+	t.Cleanup(func() { _ = shutdown(ctx) })
 
-	if err := shutdown(ctx); err != nil {
-		t.Fatalf("shutdown returned err = %v", err)
+	_, span := tp.Tracer("test").Start(ctx, "noop-check")
+	if span.SpanContext().IsValid() {
+		t.Fatal("disabled TracerProvider returned a span with a valid SpanContext; want noop")
 	}
-	if got := otel.GetTracerProvider(); got != prevProvider {
-		t.Fatal("post-shutdown TracerProvider not restored")
+	if span.IsRecording() {
+		t.Fatal("disabled TracerProvider returned a recording span; want noop")
 	}
-	if got := otel.GetTextMapPropagator(); got != prevPropagator {
-		t.Fatal("post-shutdown propagator not restored")
+	span.End()
+}
+
+// TestSetupTracing_EnabledReturnsRecordingProvider asserts that the enabled
+// path returns a TracerProvider whose tracers actually produce recording
+// spans. Together with TestSetupTracing_NeverTouchesGlobalProvider this nails
+// down "configured exporter, never via the global".
+func TestSetupTracing_EnabledReturnsRecordingProvider(t *testing.T) {
+	clearOTelEnv(t)
+	t.Setenv("OTEL_TRACES_EXPORTER", "console")
+	ctx := context.Background()
+
+	tp, shutdown, err := setupTracing(ctx)
+	if err != nil {
+		t.Fatalf("setupTracing err = %v", err)
 	}
+	t.Cleanup(func() { _ = shutdown(ctx) })
+
+	_, span := tp.Tracer("test").Start(ctx, "recording-check")
+	if !span.SpanContext().IsValid() {
+		t.Fatal("enabled TracerProvider returned a span with an invalid SpanContext; want recording")
+	}
+	if !span.IsRecording() {
+		t.Fatal("enabled TracerProvider returned a non-recording span; want recording")
+	}
+	span.End()
 }
 
 // TestConsoleSpanWriter_DefaultsToStderr guards the contract that the

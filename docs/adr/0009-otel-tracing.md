@@ -30,19 +30,21 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 
 ### D2. 環境変数で auto-detect する ( CLI フラグ追加なし)
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 disable / enable の判定は以下 3 状態:
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 disable signals ( `OTEL_SDK_DISABLED=true` / `OTEL_TRACES_EXPORTER=none`、 `SLOFF_OTEL_*` 経由含む) は enable signal を **常に上書き** する。
 
-| 状態 | env signal | 挙動 |
-|---|---|---|
-| **explicit disable** | `OTEL_SDK_DISABLED=true` または `OTEL_TRACES_EXPORTER=none` ( `SLOFF_OTEL_*` 経由含む) | **noop TracerProvider を一時 install** し、 shutdown で prev に restore。 in-process な host が既に provider を入れていても、 sloff の run 中は sloff の span を出さない ( user-explicit な silence 要求を honor)。 |
-| **passive disable** | 上記 enable signal も explicit disable signal も無し | global provider を **触らない**。 host の provider があるなら sloff の span はそこに流れる ( user は silence を要求していない)。 |
-| **enabled** | enable signal あり、 explicit disable signal 無し | sloff の TracerProvider を install、 SDK 構築、 shutdown で prev に restore。 |
+**`setupTracing` は sloff-local な `TracerProvider` を返すだけで、 otel-go の global ( `otel.SetTracerProvider`) には一切触らない。** runner / cmd は返ってきた TP から `Tracer` を導出して使う。 enable signal が立っていない、 または explicit disable signal が立っているケースでは noop TP を返す。
 
-理由 ( explicit / passive を分ける根拠) :
+| 状態 | 返値 |
+|---|---|
+| **enabled** | sloff 専用 sdktrace TracerProvider ( exporter は OTLP HTTP/gRPC または stdout) |
+| **disabled** ( passive または explicit) | `noop.NewTracerProvider()` ( 何も emit しない) |
 
-- in-process embedding で、 host が事前に provider を入れている状態を考える
-- 「 sloff だけ silence したい」 ( SLOFF_OTEL_SDK_DISABLED=true) という user-explicit な要求は、 noop 一時 install で sloff の trace 経路 ( cmdTracer / runner.tracer) を全部塞いで実現する。 副作用として host 自身の lazy `otel.Tracer()` も sloff の run 中は noop を返すが、 user が silence を選んだのでこれは仕様
-- 一方、 env を何も設定していない passive な状況で host の provider を勝手に塞ぐのは「 sloff が host のトレーシングを壊した」 と受け取られる動作になるので、 こちらは触らない
+理由 ( global を一切触らない設計の根拠) :
+
+- in-process な host が独自の global TracerProvider を入れている場合、 sloff が global を mutate すると host の instrumentation が壊れる
+- 同一プロセスで `run` / `graph` を **並行実行** する場合、 global 経由の挙動だと一方の shutdown が他方の TracerProvider を tearing down してしまう ( codex review round 6 の指摘) 。 sloff-local TP ならインスタンスごとに独立
+- explicit disable も「 sloff-local が noop」 で実現できるので、 global を一時的に noop に置換する必要がない ( 副次的に host の lazy `otel.Tracer()` を狂わせない)
+- 「 host が独自 TP を入れている状況で sloff の span を host backend に流したい」 ユースケースは、 host が `runner.Options.TracerProvider` に自分の TP を渡せば達成できる ( library 層の API 設計として明示的)
 
 理由:
 
@@ -68,6 +70,8 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 - 「 SDK 構築直後に restore」 する短時間 mutate でも、 process env を一時的にせよ書き換える設計はテスト不能・並行不能・読みづらく、 否応なく fragile
 
 代わりに、 **SDK が options を受ける** という事実を全面的に活用する。 OTel exporter / resource 系 API は env 読みと options が両方サポートされており、 options が常に env を override するので、 effective 値を options として渡せば env を一切触らずに SLOFF_ 優先を実現できる。
+
+**Subprocess env scrub**: 加えて、 runner が task の cmd を spawn する際 ( `runner.execCmd`) には `os.Environ()` から `SLOFF_OTEL_*` 接頭辞を持つ entry を **`childEnv` ヘルパで除外** する。 task の cmd 自体が別の `sloff` ( または同じ prefix を honor するツール) を invoke した場合、 child は親 run の SLOFF_ 設定を引き継ぐべきではない ( child は独立した sloff プロセスとして自身の env を持つべき)。 `OTEL_*` ( prefix なし) は通常通り child に届く。
 
 ### D3. Exporter は SLOFF_ 値を options で渡せるよう自前 dispatch する
 
@@ -141,21 +145,20 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 - **cache `Storage` interface は無変更**。 `Storage.Load` / `Storage.Save` の呼び出し箇所を span で囲む ( これも runner 側責任)。
 - **`spec.Discover` は cmd/sloff 側でラップ**。 spec パッケージに otel 依存を持たせない。 phase span として cmd / runner の境界に span 開始 / 終了が分散するが、 trace tree としては parent-child で正しく繋がる。
 
-### D6. Shutdown 規律 ( global state restore も含む)
+### D6. Shutdown 規律
 
 - `sdktrace.WithBatcher` ( BatchSpanProcessor) を採用。 短命 CLI なので `Shutdown` で必ず flush する。
 - 各 subcommand の `RunE` ( `runE` / `graphE`) で `defer shutdown(ctx)` する。 shutdown 失敗時は stderr に warn を 1 行出すだけで **exit code には影響させない**。 exporter 障害が CLI の primary 機能 ( codegen 実行成否) を壊さない原則。
 - shutdown は `context.Background()` ベースの短い deadline を持たせる ( 親 ctx が cancel された後でも flush が走るようにするため)。
-- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻す。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。
-- **env は一切 mutate しない** ( D2' / D3 / D4 参照)。 SLOFF_ override は effectiveEnv → options で SDK に渡るので、 `os.Setenv` を使わず process env は不変。 結果として shutdown で env restore する必要も無い。
-- **explicit disable パスは prev provider を snapshot して noop に置換、 shutdown で restore** ( D2 参照)。 user が明示的に silence を要求した場合は host の provider があってもそれを一時的に塞ぐ。 shutdown で必ず prev に戻すので、 sloff の run 後は host の instrumentation が再開する。
-- **passive disable パスは global provider にも env にも一切触らない**。 host の provider をそのまま尊重し、 shutdown は no-op で良い。
+- **shutdown は sloff-local TP の `Shutdown` を呼ぶだけ**。 global state の restore は不要 ( D2 で global を一切触らないと決めたため)。
+- **env も touch しない** ( D2' / D3 / D4)。 SLOFF_ override は effectiveEnv → options で SDK に渡るので、 `os.Setenv` を使わず process env は不変。 shutdown で env restore する必要も無い。
+- **disabled パス ( passive / explicit いずれも) は noop TP を返すだけ**。 shutdown は no-op。
 
-### D7. Propagator は TraceContext + Baggage のみ
+### D7. Propagator は global を touch しない
 
-`propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})` を global propagator に設定する。
+global TextMapPropagator も `setupTracing` から **触らない**。 sloff 自身は propagator を使う経路 ( HTTP server / TRACEPARENT 受信等) を持たないので、 global を上書きする利得が無い。 host の propagator 設定が温存される。
 
-- CI 環境などで親 span を `TRACEPARENT` env から受ける拡張 ( `otelchildspan` 的な inject) は **本 PR では入れない**。 必要に迫られたら別 ADR で再検討。
+- CI 環境などで親 span を `TRACEPARENT` env から受ける拡張は **本 PR では入れない**。 必要に迫られたら別 ADR で再検討 ( その場合は sloff-local な propagator を `runner.Options` に渡す形になる)。
 - task の cmd ( child process) に `TRACEPARENT` を伝搬する仕組みも本 PR では入れない ( 同上)。
 
 ### D8. metrics / logs / TRACEPARENT 受信は scope 外
@@ -177,7 +180,8 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 
 - **依存追加** ( `go.opentelemetry.io/otel` 系 ( otel / sdk / trace / exporters/otlp/otlptrace/{otlptracehttp,otlptracegrpc} / exporters/stdout/stdouttrace) + semconv)。 autoexport は採用しなかった ( D3 参照) ので prometheus / log bridge 系のトランジティブ依存が削れている。
 - **resource 取得** ( `resource.WithProcess() / WithOS() / WithHost()`) で `os/exec` 系の system call が発生する。 startup latency に数 ms 載る可能性。 ただし trace 有効時のみ。
-- **SLOFF_ override は env を一切汚染しない**。 child process ( task の cmd) が `OTEL_*` を読んでも、 user の shell が設定した値だけを見る。 「 sloff だけ別 endpoint」 という方針が subprocess に対しても矛盾なく成り立つ。
+- **SLOFF_ override は env を一切汚染しない**。 child process ( task の cmd) が `OTEL_*` を読んでも、 user の shell が設定した値だけを見る ( D2' の childEnv による subprocess scrub も併用)。 「 sloff だけ別 endpoint」 という方針が subprocess に対しても矛盾なく成り立つ。
+- **global OpenTelemetry state を一切 mutate しない**。 同一プロセスで複数の sloff invocation を直列 / 並列に走らせても干渉しない ( codex review round 6 P2 #2 で指摘された並行実行時の TP 巻き戻りリスクを構造的に排除)。 host が独自の global TracerProvider / propagator を入れていても影響を受けない。 in-process embedder が sloff spans を自分のバックエンドに流したい場合は `runner.Options.TracerProvider` に host TP を渡す。
 
 ### 将来再考の余地
 

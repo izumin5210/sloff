@@ -19,10 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/izumin5210/sloff/internal/sloff/cache"
@@ -34,10 +34,10 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver"
 )
 
-// tracer is the package-level OpenTelemetry Tracer for runner. otel.Tracer
-// returns a global-delegating wrapper, so this is safe to bind at init even
-// though setupTracing in cmd/sloff swaps the global provider later.
-var tracer = otel.Tracer("github.com/izumin5210/sloff/internal/sloff/runner")
+// runnerTracerName is the InstrumentationScope name attached to every span
+// runner emits. It is the import path so trace consumers can group sloff's
+// runner-side activity under a single library identity.
+const runnerTracerName = "github.com/izumin5210/sloff/internal/sloff/runner"
 
 // endSpan finishes span with error status when *errp is non-nil. The pointer
 // indirection lets callers tie span outcome to a named return value:
@@ -94,6 +94,14 @@ type Options struct {
 	// Clock supplies the timestamp written to record.GeneratedAt. Defaults to
 	// time.Now().UTC(); tests inject a fixed clock so cache YAML is byte-deterministic.
 	Clock func() time.Time
+
+	// TracerProvider is where runner emits OpenTelemetry spans. nil yields a
+	// noop provider so embedding callers that haven't configured tracing pay
+	// no cost and never accidentally bleed sloff's spans through a host's
+	// global TracerProvider. The CLI entry points pass a sloff-local provider
+	// configured from OTEL_*/SLOFF_OTEL_* env (cmd/sloff/otel.go); embedders
+	// can pass their own to fan sloff spans into their pipeline.
+	TracerProvider trace.TracerProvider
 }
 
 // Runner executes all discovered specs in topological order with cache lookup and
@@ -103,6 +111,7 @@ type Runner struct {
 	logger Logger
 	stdout io.Writer
 	stderr io.Writer
+	tracer trace.Tracer        // derived once in New from opts.TracerProvider
 	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
 
 	// producedBy maps each resolved output path to the task that produced it. Cross-task
@@ -132,7 +141,21 @@ func New(opts Options) *Runner {
 	if opts.Clock == nil {
 		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
-	return &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
+	tp := opts.TracerProvider
+	if tp == nil {
+		// Default to a sloff-local noop so callers that don't configure
+		// tracing pay nothing and don't accidentally route runner spans
+		// through whatever the host process happens to have on the global
+		// TracerProvider.
+		tp = noop.NewTracerProvider()
+	}
+	return &Runner{
+		opts:   opts,
+		logger: logger,
+		stdout: stdout,
+		stderr: stderr,
+		tracer: tp.Tracer(runnerTracerName),
+	}
 }
 
 // Run executes preflight then every task. Errors during preflight or task execution
@@ -188,7 +211,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // underlying call has no cancelable I/O, so the span purely captures phase
 // timing and the resolved task count for the trace tree.
 func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ToolVersion) (tasks []depgraph.Task, err error) {
-	_, span := tracer.Start(ctx, "runner.collect_tasks")
+	_, span := r.tracer.Start(ctx, "runner.collect_tasks")
 	defer endSpan(span, &err)
 	tasks, err = r.collectTasks(inputsByTool, versionsByTool)
 	if err != nil {
@@ -202,7 +225,7 @@ func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string
 // pure function that doesn't take ctx; the wrapper exists only so the phase
 // shows up in the trace tree alongside the others.
 func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task) (ordered []depgraph.Task, err error) {
-	_, span := tracer.Start(ctx, "runner.depgraph.build", trace.WithAttributes(
+	_, span := r.tracer.Start(ctx, "runner.depgraph.build", trace.WithAttributes(
 		attribute.Int("sloff.task.count", len(tasks)),
 	))
 	defer endSpan(span, &err)
@@ -229,7 +252,7 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err err
 	}
 
 	concurrency := taskConcurrency(len(ordered))
-	ctx, span := tracer.Start(ctx, "runner.tasks.run", trace.WithAttributes(
+	ctx, span := r.tracer.Start(ctx, "runner.tasks.run", trace.WithAttributes(
 		attribute.Int("sloff.task.count", len(ordered)),
 		attribute.Int("sloff.tasks.concurrency", concurrency),
 	))
@@ -383,7 +406,7 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 // (the check itself couldn't execute) bypass the read-only fall-through
 // and fail the run regardless.
 func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) (err error) {
-	ctx, span := tracer.Start(ctx, "runner.preflight", trace.WithAttributes(
+	ctx, span := r.tracer.Start(ctx, "runner.preflight", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referencedToolNames)),
 	))
 	defer endSpan(span, &err)
@@ -450,7 +473,7 @@ func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, reference
 // structure (`sloff graph` / future `--explain`-style read-only debug
 // surfaces) skip the Versions path entirely; see IZU-16.
 func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]string, err error) {
-	ctx, span := tracer.Start(ctx, "runner.resolve.inputs", trace.WithAttributes(
+	ctx, span := r.tracer.Start(ctx, "runner.resolve.inputs", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
 	defer endSpan(span, &err)
@@ -465,7 +488,7 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 		g.Go(func() (gerr error) {
-			toolCtx, toolSpan := tracer.Start(gctx,
+			toolCtx, toolSpan := r.tracer.Start(gctx,
 				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
 				trace.WithAttributes(
 					attribute.String("sloff.tool.name", entry.Name),
@@ -497,7 +520,7 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 // resolveVersionContribs invokes Registry.Versions once per referenced tool
 // name. Same scoping discipline as resolveInputContribs.
 func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]toolresolver.ToolVersion, err error) {
-	ctx, span := tracer.Start(ctx, "runner.resolve.versions", trace.WithAttributes(
+	ctx, span := r.tracer.Start(ctx, "runner.resolve.versions", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
 	defer endSpan(span, &err)
@@ -512,7 +535,7 @@ func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.Tool
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 		g.Go(func() (gerr error) {
-			toolCtx, toolSpan := tracer.Start(gctx,
+			toolCtx, toolSpan := r.tracer.Start(gctx,
 				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
 				trace.WithAttributes(
 					attribute.String("sloff.tool.name", entry.Name),
@@ -762,7 +785,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	info := r.byKey[depgraphKey(t)]
 	versions := info.versions
 
-	ctx, span := tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
+	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
 		attribute.String("sloff.spec", t.SpecRelpath),
 		attribute.String("sloff.task.name", t.Name),
 		attribute.Int("sloff.tool.count", len(versions)),
@@ -855,7 +878,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 // sloff.cache.state attribute distinguishes hit / stale / not_found / error so
 // trace consumers can analyse cache health without re-running.
 func (r *Runner) cacheLookup(ctx context.Context, key cache.Key) (hit bool, paths []string, err error) {
-	_, span := tracer.Start(ctx, "runner.cache.load")
+	_, span := r.tracer.Start(ctx, "runner.cache.load")
 	defer func() {
 		if err != nil {
 			span.SetAttributes(attribute.String("sloff.cache.state", "error"))
@@ -885,7 +908,7 @@ func (r *Runner) cacheLookup(ctx context.Context, key cache.Key) (hit bool, path
 // cacheStore wraps Storage.Save with a runner.cache.save span tagged with the
 // output file count.
 func (r *Runner) cacheStore(ctx context.Context, key cache.Key, rec *cache.Record) (err error) {
-	_, span := tracer.Start(ctx, "runner.cache.save", trace.WithAttributes(
+	_, span := r.tracer.Start(ctx, "runner.cache.save", trace.WithAttributes(
 		attribute.Int("sloff.output.file_count", len(rec.Output.Files)),
 	))
 	defer endSpan(span, &err)
@@ -933,7 +956,7 @@ func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
 }
 
 func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
-	ctx, span := tracer.Start(ctx, "runner.task.exec")
+	ctx, span := r.tracer.Start(ctx, "runner.task.exec")
 	defer endSpan(span, &err)
 
 	if len(info.command.Cmd) == 0 {
@@ -947,7 +970,7 @@ func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
 	cmd.Dir = filepath.Join(r.opts.RepoRoot, info.specRelpath)
 	cmd.Stdout = r.stdout
 	cmd.Stderr = r.stderr
-	cmd.Env = os.Environ()
+	cmd.Env = childEnv(os.Environ())
 	err = cmd.Run()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -956,6 +979,23 @@ func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
 		span.SetAttributes(attribute.Int("process.exit_code", 0))
 	}
 	return err
+}
+
+// childEnv returns env entries with SLOFF_OTEL_* keys removed. ADR-0009 D2'
+// scopes the SLOFF_-prefixed tracing config to the **current** sloff run; if a
+// task cmd happens to invoke another `sloff` (or any tool that honors the same
+// prefix), the child should not silently inherit the parent's silence /
+// endpoint overrides. Standard OTEL_* keys still flow through so otel-aware
+// codegen tools see whatever the user's shell configured.
+func childEnv(parent []string) []string {
+	out := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "SLOFF_OTEL_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func (r *Runner) reportPreflightIssues(issues []preflight.Issue) {

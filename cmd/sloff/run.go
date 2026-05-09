@@ -52,13 +52,14 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 		ctx = context.Background()
 	}
 
-	shutdown, err := setupTracing(ctx)
+	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
 		return fmt.Errorf("setup tracing: %w", err)
 	}
 	defer flushTracing(shutdown)
 
-	ctx, span := cmdTracer.Start(ctx, "sloff.run", trace.WithAttributes(
+	tracer := tp.Tracer(cmdTracerName)
+	ctx, span := tracer.Start(ctx, "sloff.run", trace.WithAttributes(
 		attribute.String("sloff.subcommand", "run"),
 		attribute.String("sloff.spec.pattern", pattern),
 	))
@@ -70,7 +71,7 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 	}
 	span.SetAttributes(attribute.String("sloff.repo_root", root))
 
-	specs, err := discoverSpecs(ctx, root, pattern)
+	specs, err := discoverSpecs(ctx, tracer, root, pattern)
 	if err != nil {
 		return err
 	}
@@ -85,12 +86,13 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 	}
 
 	r := runner.New(runner.Options{
-		RepoRoot:  root,
-		Specs:     specs,
-		Storage:   local.New(root),
-		Resolvers: resolvers,
-		Preflight: buildPreflight(root),
-		ReadOnly:  readOnly,
+		RepoRoot:       root,
+		Specs:          specs,
+		Storage:        local.New(root),
+		Resolvers:      resolvers,
+		Preflight:      buildPreflight(root),
+		ReadOnly:       readOnly,
+		TracerProvider: tp,
 	})
 
 	return r.Run(ctx)
@@ -98,9 +100,11 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 
 // discoverSpecs wraps spec.Discover with a span. spec.Discover doesn't take a
 // context (its work is local file I/O), so the span purely captures timing and
-// the resolved spec count for the trace tree.
-func discoverSpecs(ctx context.Context, root, pattern string) (specs []spec.Spec, err error) {
-	_, span := cmdTracer.Start(ctx, "spec.discover", trace.WithAttributes(
+// the resolved spec count for the trace tree. The tracer is passed in (rather
+// than read from a package var) so cmd/sloff stays free of any global OTel
+// state and concurrent invocations don't share Tracer instances.
+func discoverSpecs(ctx context.Context, tracer trace.Tracer, root, pattern string) (specs []spec.Spec, err error) {
+	_, span := tracer.Start(ctx, "spec.discover", trace.WithAttributes(
 		attribute.String("sloff.spec.pattern", pattern),
 	))
 	defer endSpan(span, &err)

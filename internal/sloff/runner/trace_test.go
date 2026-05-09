@@ -3,12 +3,10 @@ package runner_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -25,36 +23,17 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/script"
 )
 
-// traceRecorder is the package-shared SpanRecorder installed once via TestMain.
-// otel-go's global TracerProvider delegate is set by sync.Once on the first
-// SetTracerProvider call, so per-test provider swaps don't take effect — every
-// trace test reuses this single recorder and resets it at the start of each
-// test instead. Existing E2E tests in this package don't inspect spans; the
-// extra recording they trigger is harmless and gets cleared by Reset before
-// each trace assertion.
-var traceRecorder = tracetest.NewSpanRecorder()
-
-func TestMain(m *testing.M) {
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder))
-	otel.SetTracerProvider(tp)
-	code := m.Run()
-	_ = tp.Shutdown(context.Background())
-	os.Exit(code)
-}
-
-// resetRecorder clears any spans accumulated by prior tests (or fixture priming
-// runs within the same test) so a subsequent rec.Ended() returns only what the
-// current step emitted.
-func resetRecorder(t *testing.T) {
+// runOnceForTrace runs the runner once with a fresh in-memory SpanRecorder
+// wired through Options.TracerProvider, and returns the recorder for caller
+// inspection. Each invocation uses its own provider; sloff never touches the
+// otel-go global TracerProvider, so concurrent / sequential calls don't share
+// state and the test process's host instrumentation is untouched.
+func runOnceForTrace(t *testing.T, h *harness) *tracetest.SpanRecorder {
 	t.Helper()
-	traceRecorder.Reset()
-}
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-// runOnceForTrace mirrors runStep but takes the harness directly so callers can
-// drive multiple runs against the same workdir to observe cache hit/miss
-// transitions in the span stream.
-func runOnceForTrace(t *testing.T, h *harness) {
-	t.Helper()
 	specs, err := spec.Discover(h.workdir, "**/sloff.yml")
 	if err != nil {
 		t.Fatalf("discover: %v", err)
@@ -70,16 +49,18 @@ func runOnceForTrace(t *testing.T, h *harness) {
 	preflightReg := preflight.NewRegistry()
 	preflightReg.Register(preflightpnpm.New(h.workdir))
 	r := runner.New(runner.Options{
-		RepoRoot:  h.workdir,
-		Specs:     specs,
-		Storage:   local.New(h.workdir),
-		Resolvers: resolverReg,
-		Preflight: preflightReg,
-		Clock:     func() time.Time { return fixedClock },
+		RepoRoot:       h.workdir,
+		Specs:          specs,
+		Storage:        local.New(h.workdir),
+		Resolvers:      resolverReg,
+		Preflight:      preflightReg,
+		Clock:          func() time.Time { return fixedClock },
+		TracerProvider: tp,
 	})
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	return rec
 }
 
 // findSpan returns the first ended span with the given name, or nil if absent.
@@ -154,11 +135,10 @@ func dumpSpans(spans []sdktrace.ReadOnlySpan) string {
 }
 
 func TestTrace_FirstRunCacheMiss(t *testing.T) {
-	resetRecorder(t)
 	h := setupHarness(t, "first-run-writes-record")
-	runOnceForTrace(t, h)
+	rec := runOnceForTrace(t, h)
 
-	spans := traceRecorder.Ended()
+	spans := rec.Ended()
 
 	// Each phase span must exist exactly once at the top level (cmd/sloff is not
 	// in scope for this test, so phases have no parent under the recorder).
@@ -226,16 +206,14 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 }
 
 func TestTrace_SecondRunCacheHit(t *testing.T) {
-	resetRecorder(t)
 	h := setupHarness(t, "first-run-writes-record")
 
-	// Prime the cache.
-	runOnceForTrace(t, h)
-	traceRecorder.Reset()
+	// Prime the cache (recorder discarded — we only inspect the second run).
+	_ = runOnceForTrace(t, h)
 
 	// Second run hits the cache and must skip exec + save.
-	runOnceForTrace(t, h)
-	spans := traceRecorder.Ended()
+	rec := runOnceForTrace(t, h)
+	spans := rec.Ended()
 
 	taskSpans := findSpansByName(spans, "runner.task.run")
 	if len(taskSpans) != 1 {
@@ -267,11 +245,10 @@ func TestTrace_SecondRunCacheHit(t *testing.T) {
 }
 
 func TestTrace_TaskSpanCarriesIdentity(t *testing.T) {
-	resetRecorder(t)
 	h := setupHarness(t, "first-run-writes-record")
-	runOnceForTrace(t, h)
+	rec := runOnceForTrace(t, h)
 
-	taskSpan := findSpan(traceRecorder.Ended(), "runner.task.run")
+	taskSpan := findSpan(rec.Ended(), "runner.task.run")
 	if taskSpan == nil {
 		t.Fatal("runner.task.run missing")
 	}

@@ -58,13 +58,14 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		ctx = context.Background()
 	}
 
-	shutdown, err := setupTracing(ctx)
+	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
 		return fmt.Errorf("setup tracing: %w", err)
 	}
 	defer flushTracing(shutdown)
 
-	ctx, span := cmdTracer.Start(ctx, "sloff.graph", trace.WithAttributes(
+	tracer := tp.Tracer(cmdTracerName)
+	ctx, span := tracer.Start(ctx, "sloff.graph", trace.WithAttributes(
 		attribute.String("sloff.subcommand", "graph"),
 		attribute.String("sloff.spec.pattern", pattern),
 		attribute.String("sloff.graph.format", format),
@@ -77,7 +78,7 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 	}
 	span.SetAttributes(attribute.String("sloff.repo_root", root))
 
-	specs, err := discoverSpecs(ctx, root, pattern)
+	specs, err := discoverSpecs(ctx, tracer, root, pattern)
 	if err != nil {
 		return err
 	}
@@ -93,10 +94,11 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 	// blocks rendering — graph is the tool users reach for *when* the build
 	// is broken.
 	r := runner.New(runner.Options{
-		RepoRoot:  root,
-		Specs:     specs,
-		Storage:   local.New(root),
-		Resolvers: resolvers,
+		RepoRoot:       root,
+		Specs:          specs,
+		Storage:        local.New(root),
+		Resolvers:      resolvers,
+		TracerProvider: tp,
 	})
 
 	tasks, err := r.Plan(ctx)

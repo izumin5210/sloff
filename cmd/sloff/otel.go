@@ -9,13 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
@@ -23,10 +21,10 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-// cmdTracer is the package-level Tracer for cmd/sloff. otel.Tracer is wired to
-// the global provider lazily, so creating it at package init is safe even though
-// setupTracing replaces the provider later.
-var cmdTracer = otel.Tracer("github.com/izumin5210/sloff/cmd/sloff")
+// cmdTracerName is the InstrumentationScope name for spans emitted by cmd/sloff
+// (the `sloff.run` / `sloff.graph` root spans and `spec.discover`). Callers
+// derive a Tracer from the TracerProvider that setupTracing returns.
+const cmdTracerName = "github.com/izumin5210/sloff/cmd/sloff"
 
 // consoleSpanWriter is the destination stdouttrace writes to when
 // OTEL_TRACES_EXPORTER=console. It must be os.Stderr (not os.Stdout) so
@@ -93,34 +91,23 @@ func firstNonEmpty(keys ...string) string {
 	return ""
 }
 
-// envOTelDisabledExplicitly reports whether the user has *explicitly* asked
-// sloff to be silent (as opposed to merely not setting any export env). This
-// distinction matters in in-process embedding scenarios:
-//
-//   - Passive disable (no env at all): leave the host's global provider
-//     alone so sloff's spans opportunistically flow through whatever the
-//     host has configured. The user did not ask for silence.
-//   - Explicit disable (OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none,
-//     possibly via SLOFF_OTEL_*): the user does want silence. setupTracing
-//     installs noop transiently so even a host-installed provider stops
-//     receiving sloff spans for the duration of the run, and restores the
-//     prev provider on shutdown.
-func envOTelDisabledExplicitly() bool {
-	if strings.EqualFold(effectiveEnv("OTEL_SDK_DISABLED"), "true") {
-		return true
-	}
-	if strings.EqualFold(effectiveEnv("OTEL_TRACES_EXPORTER"), "none") {
-		return true
-	}
-	return false
-}
-
 // envOTelEnabled reports whether the user has expressed intent to export traces.
 // All reads go through effectiveEnv so SLOFF_-prefix overrides participate
-// without any process-env mutation. Explicit disable signals (see
-// envOTelDisabledExplicitly) always win.
+// without any process-env mutation.
+//
+// Disable signals win over enable signals so a SLOFF_-targeted opt-out can
+// silence sloff even when the surrounding shell sets a generic OTLP endpoint:
+//
+//   - OTEL_SDK_DISABLED=true forces disabled
+//   - OTEL_TRACES_EXPORTER=none forces disabled
+//
+// Otherwise, any of the OTLP endpoint vars or a non-"none" OTEL_TRACES_EXPORTER
+// being set to a non-empty value enables tracing.
 func envOTelEnabled() bool {
-	if envOTelDisabledExplicitly() {
+	if strings.EqualFold(effectiveEnv("OTEL_SDK_DISABLED"), "true") {
+		return false
+	}
+	if strings.EqualFold(effectiveEnv("OTEL_TRACES_EXPORTER"), "none") {
 		return false
 	}
 	for _, k := range []string{
@@ -320,47 +307,33 @@ func grpcSpanExporterOpts() []otlptracegrpc.Option {
 	return opts
 }
 
-// setupTracing wires the global TracerProvider based on env signals.
+// setupTracing builds a sloff-local TracerProvider from env signals. It
+// **never touches** the otel-go global TracerProvider or TextMapPropagator,
+// so concurrent invocations in the same process are safe and host code that
+// has its own global stays untouched.
 //
-// **Explicit disable path** (OTEL_SDK_DISABLED=true / OTEL_TRACES_EXPORTER=none,
-// possibly via SLOFF_OTEL_*): the user has explicitly asked for sloff to be
-// silent. Install noop for the run and restore the prev provider on shutdown
-// so a host-installed TracerProvider stops receiving sloff spans during sloff's
-// run but resumes immediately after.
+// **Disabled** (OTEL_SDK_DISABLED=true, OTEL_TRACES_EXPORTER=none, or simply
+// no tracing env at all): returns a noop TracerProvider. cmd/sloff and
+// runner derive their tracers from this and emit nothing.
 //
-// **Passive disable path** (no tracing env at all): leave the global provider
-// untouched. In-process hosts that already configured OpenTelemetry keep their
-// tracer wiring, and sloff's runner spans flow through whatever the host has
-// set up. The user did not ask for silence, so we do not impose it.
-//
-// **Enabled path**: builds the Resource and SpanExporter from effective env
-// (`SLOFF_OTEL_*` overrides win over `OTEL_*` via effectiveEnv) using explicit
-// options on the OTel SDK constructors, then installs sloff's TracerProvider
-// and propagator. The shutdown drains the BatchSpanProcessor and restores the
-// caller's prior provider + propagator.
+// **Enabled**: builds the Resource and SpanExporter from effective env
+// (`SLOFF_OTEL_*` overrides win over `OTEL_*` via effectiveEnv) using
+// explicit options on the OTel SDK constructors. Returns the configured
+// TracerProvider so the caller can pass it to runner.Options.TracerProvider
+// and derive a Tracer for the cmd/sloff root spans.
 //
 // **Env immutability**: setupTracing never calls os.Setenv. Subprocesses
 // spawned by runner.Run therefore inherit only the OTEL_* values the user's
-// shell already set; SLOFF_-derived values never leak to codegen tools.
+// shell already set; SLOFF_-derived values never leak to codegen tools (and
+// runner additionally strips SLOFF_OTEL_* from the subprocess env).
 //
 // The returned shutdown is always non-nil and safe to call once.
-func setupTracing(ctx context.Context) (func(context.Context) error, error) {
-	if envOTelDisabledExplicitly() {
-		// User-explicit silence: swap in noop transiently so cmdTracer /
-		// runner.tracer dispatch via the wrapper land on noop for the run.
-		// Restore the prev provider on shutdown so the host's instrumentation
-		// (if any) resumes after sloff exits. Without this, an in-process
-		// host with its own TracerProvider would keep receiving sloff spans
-		// despite the user explicitly asking for silence.
-		prevProvider := otel.GetTracerProvider()
-		otel.SetTracerProvider(noop.NewTracerProvider())
-		return func(context.Context) error {
-			otel.SetTracerProvider(prevProvider)
-			return nil
-		}, nil
-	}
+func setupTracing(ctx context.Context) (trace.TracerProvider, func(context.Context) error, error) {
 	if !envOTelEnabled() {
-		return func(context.Context) error { return nil }, nil
+		// Both the explicit-disable and passive-disable paths land here.
+		// Return a noop sloff-local provider; tracers derived from it emit
+		// nothing, so sloff is silent regardless of any host TracerProvider.
+		return noop.NewTracerProvider(), func(context.Context) error { return nil }, nil
 	}
 
 	res, err := buildResource(ctx)
@@ -368,30 +341,17 @@ func setupTracing(ctx context.Context) (func(context.Context) error, error) {
 	// produced usable attributes; partial resource info is preferable to aborting
 	// tracing setup, so only hard-fail on non-partial errors.
 	if err != nil && !errors.Is(err, resource.ErrPartialResource) {
-		return nil, fmt.Errorf("otel: build resource: %w", err)
+		return nil, nil, fmt.Errorf("otel: build resource: %w", err)
 	}
 
 	exp, err := buildSpanExporter(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("otel: build span exporter: %w", err)
+		return nil, nil, fmt.Errorf("otel: build span exporter: %w", err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(exp),
 	)
-	prevProvider := otel.GetTracerProvider()
-	prevPropagator := otel.GetTextMapPropagator()
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
-
-	return func(ctx context.Context) error {
-		err := tp.Shutdown(ctx)
-		otel.SetTracerProvider(prevProvider)
-		otel.SetTextMapPropagator(prevPropagator)
-		return err
-	}, nil
+	return tp, tp.Shutdown, nil
 }

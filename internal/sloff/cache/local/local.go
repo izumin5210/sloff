@@ -1,8 +1,8 @@
-// Package local is the default Storage backend that persists records as YAML files on
-// the local filesystem under <repoRoot>/.sloff/cache/. It performs no git operations;
-// committing the resulting files (or excluding them via .gitignore) is up to the user
-// of sloff. This is the file-on-disk variant; remote backends (e.g. S3) live in
-// sibling packages.
+// Package local is the default Storage backend that persists records as protobuf
+// binary files on the local filesystem under <repoRoot>/.sloff/cache/. It performs
+// no git operations; committing the resulting files (or excluding them via
+// .gitignore) is up to the user of sloff. This is the file-on-disk variant;
+// remote backends (e.g. S3) live in sibling packages.
 package local
 
 import (
@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
@@ -21,7 +22,7 @@ const backendName = "local"
 
 // Storage stores cache records under <repoRoot>/.sloff/cache/.
 //
-// Layout: .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml.
+// Layout: .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb.
 //
 // SpecRelpath in Key uses forward slashes (canonical) and is converted to OS-native
 // path on disk. Architecture.md mentions an "_" substitution; we deviate and keep the
@@ -41,7 +42,7 @@ func New(repoRoot string) *Storage {
 func (s *Storage) Name() string { return backendName }
 
 // Load implements cache.Storage.
-func (s *Storage) Load(_ context.Context, key cache.Key) (*cache.Record, bool, error) {
+func (s *Storage) Load(_ context.Context, key cache.Key) (*cachev1.Record, bool, error) {
 	b, err := os.ReadFile(s.pathFor(key))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
@@ -57,12 +58,12 @@ func (s *Storage) Load(_ context.Context, key cache.Key) (*cache.Record, bool, e
 }
 
 // Save implements cache.Storage.
-func (s *Storage) Save(_ context.Context, key cache.Key, record *cache.Record) error {
+func (s *Storage) Save(_ context.Context, key cache.Key, record *cachev1.Record) error {
 	p := s.pathFor(key)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := record.Marshal()
+	b, err := cache.Marshal(record)
 	if err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if d.IsDir() || filepath.Ext(p) != ".yml" {
+		if d.IsDir() || filepath.Ext(p) != cache.FileExt {
 			return nil
 		}
 
@@ -107,7 +108,7 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 		key := cache.Key{
 			SpecRelpath: strings.Join(parts[:n-2], "/"),
 			TaskID:      parts[n-2],
-			InputHash:   strings.TrimSuffix(parts[n-1], ".yml"),
+			InputHash:   strings.TrimSuffix(parts[n-1], cache.FileExt),
 		}
 		if filter.SpecRelpath != "" && key.SpecRelpath != filter.SpecRelpath {
 			return nil
@@ -135,5 +136,5 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 
 func (s *Storage) pathFor(key cache.Key) string {
 	specOS := filepath.FromSlash(path.Clean("/" + key.SpecRelpath))[1:] // tolerate empty / leading slash
-	return filepath.Join(s.repoRoot, ".sloff", "cache", specOS, key.TaskID, key.InputHash+".yml")
+	return filepath.Join(s.repoRoot, ".sloff", "cache", specOS, key.TaskID, key.InputHash+cache.FileExt)
 }

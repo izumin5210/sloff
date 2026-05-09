@@ -15,7 +15,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 「内製ソース ( = `local`)」 という意味では [pnpm-local](./resolver-pnpm-local.md) と対応物の関係。 両 resolver は同じ shape の Result を返す:
 
 - **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 これにより depgraph が「 main module 内の Go ファイルを生成する upstream codegen task」 を output overlap で自動検知し、 go-local task との依存 edge を貼る ( pnpm-local が build task を自動連鎖する仕組みと同じ)
-- **外部 Go module** は `go-deps:<path>@<version>+sum:<go.sum-hash>` 形式の **ToolVersion** として tools_hash に流れる。 module bump / go.sum drift で必ず invalidate される
+- **外部 Go module** は `go-deps:<path>@<version>+sum:<go.sum-hash>` 形式の **ResolvedVersion** として resolved_versions_hash に流れる。 module bump / go.sum drift で必ず invalidate される
 
 外部配布 ( aqua / `go tool` 経由) の OSS ツールは [script resolver](./resolver-script.md) で `<bin> --version` を取るアプローチに統一されている ( ADR-0007)。
 
@@ -28,7 +28,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 1. spec の top-level `tools:` map で `go-local: <import-path>` 形式で named 定義された tool entry を取得 ( ADR-0008)。 entry は **その tool が定義された `sloff.yml` の dir** に相対
 2. 内部 `SourceLister` ( デフォルト `goPackagesLister`) で transitive 依存を解析し `Listing{InternalFiles, ExternalModules}` を得る
 3. **InternalFiles → Result.ExtraInputs** に詰めて返す ( runner が task.inputs に union)
-4. **ExternalModules → 1 個ずつ Result.Versions の ToolVersion** に変換して返す
+4. **ExternalModules → 1 個ずつ Result.Versions の ResolvedVersion** に変換して返す
 
 ### Result の形式
 
@@ -39,7 +39,7 @@ toolresolver.Result{
         "internal/util/util.go",
         ...   // main module / repo-local replace の .go / 埋め込み / .s 等を含む
     },
-    Versions: []toolresolver.ToolVersion{
+    Versions: []toolresolver.ResolvedVersion{
         {Name: "example.com/dep",   Source: "go-local:./cmd/foo", Version: "go-deps:example.com/dep@v1.0.0+sum:<sha>"},
         {Name: "example.com/other", Source: "go-local:./cmd/foo", Version: "go-deps:example.com/other@v2.0.0+sum:<sha>"},
         ...
@@ -47,9 +47,9 @@ toolresolver.Result{
 }
 ```
 
-`<sha>` は go.sum 行 ( `<path> <version> h1:...` 等) を SHA-256 した hex。 これにより同じ path@version でも go.sum の bytes が変われば ToolVersion が変わる ( 公式 Go 配布 + tampered mirror の食い違いを cache が検知できる)。
+`<sha>` は go.sum 行 ( `<path> <version> h1:...` 等) を SHA-256 した hex。 これにより同じ path@version でも go.sum の bytes が変われば ResolvedVersion が変わる ( 公式 Go 配布 + tampered mirror の食い違いを cache が検知できる)。
 
-旧版 ( PR の初期実装) は内部コード + 外部 module を 1 つの sha256 に詰めて `go-local:<entry>@sha256:<hex>` 形式の ToolVersion 1 本を返していたが、 現行は ExtraInputs / ToolVersion に分離している。 動機は [pnpm-local](./resolver-pnpm-local.md) と shape を揃えること、 および codegen → go-local の依存を depgraph に自動検知させること。
+旧版 ( PR の初期実装) は内部コード + 外部 module を 1 つの sha256 に詰めて `go-local:<entry>@sha256:<hex>` 形式の ResolvedVersion 1 本を返していたが、 現行は ExtraInputs / ResolvedVersion に分離している。 動機は [pnpm-local](./resolver-pnpm-local.md) と shape を揃えること、 および codegen → go-local の依存を depgraph に自動検知させること。
 
 ### Dispatch ( declared-only)
 
@@ -106,9 +106,9 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
         return toolresolver.Result{}, err
     }
 
-    versions := make([]toolresolver.ToolVersion, 0, len(listing.ExternalModules))
+    versions := make([]toolresolver.ResolvedVersion, 0, len(listing.ExternalModules))
     for _, m := range listing.ExternalModules {
-        versions = append(versions, toolresolver.ToolVersion{
+        versions = append(versions, toolresolver.ResolvedVersion{
             Name:    m.Path,
             Source:  "go-local:" + declared.Entry,
             Version: encodeExternalVersion(m), // "go-deps:<path>@<version>+sum:<sha>"
@@ -162,7 +162,7 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 そこで Listing から:
 
 - **InternalFiles** ( 内部コード) → ExtraInputs として task の inputs に union → files_hash 経路 ( runner が content hash)
-- **ExternalModules** ( 外部 module) → 個別 ToolVersion として tools_hash 経路 ( go.sum 行 sha256 + path@version で識別)
+- **ExternalModules** ( 外部 module) → 個別 ResolvedVersion として resolved_versions_hash 経路 ( go.sum 行 sha256 + path@version で識別)
 
 判定戦略は以下のとおり:
 

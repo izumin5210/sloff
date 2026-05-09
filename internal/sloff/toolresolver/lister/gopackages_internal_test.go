@@ -13,7 +13,7 @@ import (
 // TestReadGoSumForMainModules_ReadsFromLoadedModuleDir guards the fix for the
 // nested-module go.sum bug: the lister must fingerprint external deps against
 // the go.sum that sits next to the *loaded* go.mod, not against repoRoot/go.sum.
-// Without this, bumping a dependency in submodule/ would leave tools_hash
+// Without this, bumping a dependency in submodule/ would leave resolved_versions_hash
 // unchanged and let sloff serve stale outputs.
 func TestReadGoSumForMainModules_ReadsFromLoadedModuleDir(t *testing.T) {
 	repoRoot := t.TempDir()
@@ -84,7 +84,7 @@ func TestReadGoSumForMainModules_NoMainModuleReturnsEmpty(t *testing.T) {
 // TestReadGoSumForMainModules_ConcatenatesGoWorkSiblings guards multi-module
 // go.work support: when packages.Load surfaces two repo-local mains, both
 // modules' go.sum lines must end up in the result so that bumping a dep in
-// either module flips tools_hash.
+// either module flips resolved_versions_hash.
 func TestReadGoSumForMainModules_ConcatenatesGoWorkSiblings(t *testing.T) {
 	repoRoot := t.TempDir()
 	dirA := filepath.Join(repoRoot, "a")
@@ -223,7 +223,7 @@ func TestExternalLabel_VersionedReplaceLooksUpGoSumByReplacementPath(t *testing.
 // TestWalk_LocalReplaceHashesReplacedSourcesAsInternal guards that local
 // replace directives (`replace example.com/a => ../local`) are folded into
 // the internal-file set rather than treated as external label-only entries.
-// Without this, edits to the replaced module would leave tools_hash unchanged
+// Without this, edits to the replaced module would leave resolved_versions_hash unchanged
 // even though `go run` rebuilds against the new code.
 func TestWalk_LocalReplaceHashesReplacedSourcesAsInternal(t *testing.T) {
 	repoRoot := t.TempDir()

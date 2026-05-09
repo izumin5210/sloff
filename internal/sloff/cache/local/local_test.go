@@ -8,21 +8,24 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 )
 
-func newRecord(taskID string) *cache.Record {
-	return &cache.Record{
-		GeneratedAt:   time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC),
-		Input:         cache.Input{Hash: "deadbeef"},
-		Output:        cache.Output{Hash: "cafebabe"},
+func newRecord(taskID string) *cachev1.Record {
+	return &cachev1.Record{
+		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)),
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
 		SchemaVersion: cache.SchemaVersion,
-		Spec: cache.RecordSpec{
+		Spec: &cachev1.Spec{
 			Cmd:    "echo hi",
 			Dir:    "path/to/spec",
-			TaskID: taskID,
+			TaskId: taskID,
 		},
 	}
 }
@@ -45,7 +48,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Load: expected hit")
 	}
-	if diff := cmp.Diff(rec, got); diff != "" {
+	if diff := cmp.Diff(rec, got, protocmp.Transform()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -77,7 +80,7 @@ func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 	// Deviation from architecture.md: we keep the spec dir hierarchy verbatim instead of
 	// flattening with "_". A "_" substitution would lose information on List for spec
 	// dirs whose names contain underscores.
-	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "abc123.yml")
+	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "abc123.pb")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("expected record at %s, got err=%v", want, err)
 	}
@@ -164,7 +167,7 @@ func TestList_OlderThan(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Backdate the on-disk mtime to something definitively older.
-	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "old.yml")
+	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "old.pb")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldFile, past, past); err != nil {
 		t.Fatal(err)

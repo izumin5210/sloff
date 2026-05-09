@@ -1,153 +1,148 @@
-// Package cache defines the on-disk record schema and storage backends used by sloff.
+// Package cache defines the storage interface and serialization helpers for
+// sloff's on-disk cache records. The record schema itself is the protobuf
+// message in proto/sloff/cache/v1/cache.proto; generated code lives at
+// internal/proto/sloff/cache/v1 (Go package cachev1). Callers operate on
+// *cachev1.Record values directly; this package only provides the marshal /
+// sort / lookup helpers and the storage backend interface.
 package cache
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
-	yaml "github.com/goccy/go-yaml"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 )
 
-// SchemaVersion is the current cache record schema version.
-const SchemaVersion = 1
+// SchemaVersion is the canonical schema version embedded in newly written
+// records. Bumped to V2 by ADR-0009 (V1 was the YAML format).
+const SchemaVersion = cachev1.SchemaVersion_SCHEMA_VERSION_V2
 
-// Record is the deterministic on-disk representation of one task's cache entry.
+// FileExt is the on-disk extension of a cache record file. Storage backends
+// use this to assemble paths and to filter directory listings.
+const FileExt = ".pb"
+
+// Marshal returns the deterministic proto wire format of rec.
 //
-// The Go field order is alphabetical because goccy/go-yaml emits struct fields in
-// declaration order, and architecture.md requires alphabetical top-level keys.
-type Record struct {
-	GeneratedAt              time.Time         `yaml:"generated_at"`
-	GeneratorVersionSnapshot GeneratorVersions `yaml:"generator_version_snapshot,omitempty"`
-	Input                    Input             `yaml:"input"`
-	Output                   Output            `yaml:"output"`
-	SchemaVersion            int               `yaml:"schema_version"`
-	Spec                     RecordSpec        `yaml:"spec"`
+// proto.MarshalOptions{Deterministic: true} is intentionally only invoked here
+// so the option lives in a single location (ADR-0009 §"byte stability の担保").
+// Marshal also normalises the order of repeated fields that the schema
+// requires sorted, so callers can append entries in any order.
+func Marshal(rec *cachev1.Record) ([]byte, error) {
+	if rec == nil {
+		return nil, fmt.Errorf("cache: nil record")
+	}
+	if err := validateSchemaVersion(rec.GetSchemaVersion()); err != nil {
+		return nil, err
+	}
+	Sort(rec)
+	return proto.MarshalOptions{Deterministic: true}.Marshal(rec)
 }
 
-// RecordSpec captures the spec coordinates of a record.
-type RecordSpec struct {
-	Cmd    string `yaml:"cmd"`
-	Dir    string `yaml:"dir"`
-	TaskID string `yaml:"task_id"`
+// Unmarshal parses a proto-encoded cache record. ADR-0009 treats records with
+// an unknown or unspecified schema_version as runtime errors rather than
+// best-effort decodes, so the validation runs symmetrically on the read path
+// — including against zero-byte files, which proto.Unmarshal otherwise turns
+// into a default-valued Record.
+func Unmarshal(b []byte) (*cachev1.Record, error) {
+	rec := &cachev1.Record{}
+	if err := proto.Unmarshal(b, rec); err != nil {
+		return nil, err
+	}
+	if err := validateSchemaVersion(rec.GetSchemaVersion()); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
-// Input is the hashed input descriptor.
-type Input struct {
-	Components InputComponents `yaml:"components"`
-	Hash       string          `yaml:"hash"`
+func validateSchemaVersion(v cachev1.SchemaVersion) error {
+	if v == cachev1.SchemaVersion_SCHEMA_VERSION_UNSPECIFIED {
+		return fmt.Errorf("cache: schema version is unspecified (likely a corrupt or empty record file)")
+	}
+	if _, ok := cachev1.SchemaVersion_name[int32(v)]; !ok {
+		return fmt.Errorf("cache: unknown schema version %d", v)
+	}
+	return nil
 }
 
-// InputComponents are the three sub-hashes that compose the input hash.
-type InputComponents struct {
-	CmdHash   string `yaml:"cmd_hash"`
-	FilesHash string `yaml:"files_hash"`
-	ToolsHash string `yaml:"tools_hash"`
+// Sort normalises the order of repeated fields whose schema requires
+// deterministic ordering (output.files by path, input.resolved_versions by
+// name → version → source). Marshal calls this internally; callers
+// comparing two records can invoke it explicitly to make sure both sides
+// are in canonical order.
+//
+// resolved_versions sort uses a composite key because ResolvedVersion.Name
+// is not guaranteed unique: the script resolver derives Name from
+// filepath.Base(exec[0]), so two distinct tools whose exec heads share a
+// basename (e.g. ["go", "version"] vs ["go", "tool", "compile", "-V"])
+// both produce Name == "go". With a name-only sort the relative order of
+// such entries would depend on insertion order, breaking byte stability
+// for the same logical input set.
+func Sort(rec *cachev1.Record) {
+	if out := rec.GetOutput(); out != nil {
+		sort.SliceStable(out.Files, func(i, j int) bool {
+			return out.Files[i].GetPath() < out.Files[j].GetPath()
+		})
+	}
+	if in := rec.GetInput(); in != nil {
+		sort.SliceStable(in.ResolvedVersions, func(i, j int) bool {
+			a, b := in.ResolvedVersions[i], in.ResolvedVersions[j]
+			if a.GetName() != b.GetName() {
+				return a.GetName() < b.GetName()
+			}
+			if a.GetVersion() != b.GetVersion() {
+				return a.GetVersion() < b.GetVersion()
+			}
+			return a.GetSource() < b.GetSource()
+		})
+	}
 }
 
-// Output is the hashed output descriptor.
-type Output struct {
-	Files FileHashes `yaml:"files"`
-	Hash  string     `yaml:"hash"`
-}
-
-// FileHash pairs an output file path (repo-root relative, slash-separated) with its content SHA-256.
-type FileHash struct {
-	Path string
-	Hash string
-}
-
-// FileHashes is a deterministic, path-sorted set of FileHash entries.
-type FileHashes []FileHash
-
-// Paths returns just the path strings of the entries, in their current order.
-func (fh FileHashes) Paths() []string {
-	out := make([]string, len(fh))
-	for i, e := range fh {
-		out[i] = e.Path
+// FilePaths returns just the path strings of files in their current order.
+// Use after Sort if a sorted slice is required.
+func FilePaths(files []*cachev1.FileEntry) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		out[i] = f.GetPath()
 	}
 	return out
 }
 
-// MarshalYAML emits the entries as a path-sorted YAML mapping.
-func (fh FileHashes) MarshalYAML() (any, error) {
-	sorted := append(FileHashes(nil), fh...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
-	m := make(yaml.MapSlice, 0, len(sorted))
-	for _, e := range sorted {
-		m = append(m, yaml.MapItem{Key: e.Path, Value: e.Hash})
-	}
-	return m, nil
-}
-
-// UnmarshalYAML reads a YAML mapping and converts it to a path-sorted FileHashes slice.
-// Empty mappings round-trip back to a nil slice to preserve byte-for-byte identity with
-// records that were created without any output files.
-func (fh *FileHashes) UnmarshalYAML(b []byte) error {
-	var m yaml.MapSlice
-	if err := yaml.Unmarshal(b, &m); err != nil {
-		return err
-	}
-	if len(m) == 0 {
-		*fh = nil
-		return nil
-	}
-	out := make(FileHashes, 0, len(m))
-	for _, item := range m {
-		path, ok := item.Key.(string)
-		if !ok {
-			return fmt.Errorf("output.files key must be a string, got %T", item.Key)
-		}
-		hash, ok := item.Value.(string)
-		if !ok {
-			return fmt.Errorf("output.files value for %q must be a string, got %T", path, item.Value)
-		}
-		out = append(out, FileHash{Path: path, Hash: hash})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	*fh = out
-	return nil
-}
-
-// GeneratorVersion is one informational entry in generator_version_snapshot.
-type GeneratorVersion struct {
-	Name    string `yaml:"name"`
-	Source  string `yaml:"source"`
-	Version string `yaml:"version"`
-}
-
-// GeneratorVersions is a deterministic, name-sorted list.
-type GeneratorVersions []GeneratorVersion
-
-// MarshalYAML emits the entries sorted by Name.
-func (g GeneratorVersions) MarshalYAML() (any, error) {
-	sorted := append(GeneratorVersions(nil), g...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	return []GeneratorVersion(sorted), nil
-}
-
-// Marshal returns the deterministic YAML representation: alphabetical top-level keys,
-// path-sorted output.files, name-sorted generator_version_snapshot, and exactly one
-// trailing LF.
-func (r *Record) Marshal() ([]byte, error) {
-	b, err := yaml.Marshal(r)
+// MarshalJSON returns the canonical protojson representation of rec.
+// Shared by `sloff cache show` and the runner E2E harness so the human-readable
+// view of a record is produced from a single set of options.
+//
+// The output is canonical: repeated fields are sorted via Sort before
+// marshalling so a hand-crafted or non-canonical .pb file decodes to the same
+// JSON as a runner-written one. Sort works in place on a clone so callers
+// that hold a reference to rec don't see their slice order shift.
+//
+// protojson intentionally randomises the whitespace after every `:` to
+// discourage byte-stable comparisons; we re-flow the bytes through
+// json.Compact + json.Indent so the output is reproducible across calls
+// while still preserving the proto declaration order of keys (encoding/json
+// keeps the original token order when transforming a raw JSON byte slice).
+func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
+	canonical := proto.Clone(rec).(*cachev1.Record)
+	Sort(canonical)
+	raw, err := protojson.MarshalOptions{
+		UseProtoNames:   true,
+		EmitUnpopulated: false,
+	}.Marshal(canonical)
 	if err != nil {
 		return nil, err
 	}
-	return ensureSingleTrailingLF(b), nil
-}
-
-// Unmarshal parses a record YAML document.
-func Unmarshal(b []byte) (*Record, error) {
-	r := &Record{}
-	if err := yaml.Unmarshal(b, r); err != nil {
-		return nil, err
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return nil, fmt.Errorf("cache: compact protojson output: %w", err)
 	}
-	return r, nil
-}
-
-func ensureSingleTrailingLF(b []byte) []byte {
-	b = bytes.TrimRight(b, "\n")
-	return append(b, '\n')
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, compact.Bytes(), "", "  "); err != nil {
+		return nil, fmt.Errorf("cache: re-indent protojson output: %w", err)
+	}
+	return indented.Bytes(), nil
 }

@@ -30,7 +30,7 @@ type DepWalk struct {
 //     queue that's then drained against snapshots[<pkg@version>] for
 //     transitive externals; peer-context suffixes like
 //     "lodash@4.17.21(peer@1.0.0)" round-trip verbatim so peer-version drift
-//     still flips tools_hash.
+//     still flips resolved_versions_hash.
 //
 // Walking both fronts in one pass matters: if @org/codegen depends on
 // @org/util (link:) and @org/util depends on lodash (npm), we must reach

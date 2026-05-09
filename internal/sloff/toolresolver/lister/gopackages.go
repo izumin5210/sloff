@@ -44,7 +44,7 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	cfg := &packages.Config{
 		// NeedEmbedFiles surfaces //go:embed targets in pkg.EmbedFiles. Without it,
 		// edits to embedded templates / schemas / data files would not change the
-		// tools_hash and sloff would serve stale cache hits even though `go run`
+		// resolved_versions_hash and sloff would serve stale cache hits even though `go run`
 		// rebuilds the binary on every embed change.
 		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedModule,
@@ -69,7 +69,7 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	// Read go.sum from every *loaded* main module, not from the repo root.
 	// In a nested-module monorepo (submodule/go.mod + submodule/go.sum) the
 	// repo-root go.sum may not exist or may track an unrelated module set,
-	// so fingerprinting external deps against it would leave tools_hash
+	// so fingerprinting external deps against it would leave resolved_versions_hash
 	// stable across submodule dependency bumps. When `go.work` brings
 	// several main modules into the same build, every module's go.sum is
 	// concatenated so external dep bumps in any sibling module flip the
@@ -90,7 +90,7 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 // concatenates each <module dir>/go.sum. Multiple main modules show up when a
 // `go.work` file pulls several repo-local modules into one build; combining
 // their go.sum files lets dependency bumps in any used module flip
-// tools_hash. Missing go.sum is tolerated (fresh module before `go mod tidy`,
+// resolved_versions_hash. Missing go.sum is tolerated (fresh module before `go mod tidy`,
 // stdlib-only deps); empty go.sum ends up as empty GoSumLine values for any
 // external modules, which is honest about the missing cryptographic anchor.
 //
@@ -154,9 +154,9 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 			// Local replace (`replace example.com/a => ../local`) brings an
 			// arbitrary directory into the build that is not covered by go.sum.
 			// Treat its sources exactly like main-module sources so edits to
-			// the replaced directory invalidate tools_hash. The collector
+			// the replaced directory invalidate resolved_versions_hash. The collector
 			// rejects paths that escape repoRoot — absolute-path replaces or
-			// `../sibling-repo` targets would tie tools_hash to per-developer
+			// `../sibling-repo` targets would tie resolved_versions_hash to per-developer
 			// machine layouts, which we leave to a future ADR.
 			if err := l.collectInternalFiles(pkg, internalSet); err != nil {
 				return fmt.Errorf("local replace %s => %s: %w",

@@ -11,7 +11,7 @@
 
 加えて、 `goLocalResolver` を追加した PR #6 の Codex レビューで以下 2 点の問題が顕在化した:
 
-1. **mixed 構成での silent stale cache**: `cmd: ["go", "run", "./cmd/gen"]` と `tools: [{exec: ["go", "version"]}]` を併記したとき、 declared が非空なので auto-dispatch loop は起動せず、 `./cmd/gen` の編集は `tools_hash` に入らない。 ユーザーが `go-local: ./cmd/gen` を併記し忘れただけで cache が嘘をつく。
+1. **mixed 構成での silent stale cache**: `cmd: ["go", "run", "./cmd/gen"]` と `tools: [{exec: ["go", "version"]}]` を併記したとき、 declared が非空なので auto-dispatch loop は起動せず、 `./cmd/gen` の編集は `resolved_versions_hash` に入らない。 ユーザーが `go-local: ./cmd/gen` を併記し忘れただけで cache が嘘をつく。
 2. **`go run` フラグ引数の暗黙パース**: `go run -exec ./bin/wrapper ./cmd/gen` のような cmd で「最初の `./` 始まり引数」を entry とみなすと、 entry を取り違える。 これは auto-dispatch のために cmd を内部でパースしているために発生する。
 
 これらは「auto-dispatch を残しつつ正しく動かす」方向で個別対処もできるが、 本 ADR では仕組み自体を見直す。

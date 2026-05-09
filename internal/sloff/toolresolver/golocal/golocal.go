@@ -10,8 +10,8 @@
 //     what lets depgraph wire upstream codegen tasks (whose outputs land
 //     inside the same source tree the tool reads) to this task automatically
 //     by the existing output-overlap rule, with no extra dependency channel.
-//   - External Go modules become individual ToolVersion entries
-//     ("go-deps:<path>@<version>+sum:<go.sum-line>") and feed tools_hash, so
+//   - External Go modules become individual ResolvedVersion entries
+//     ("go-deps:<path>@<version>+sum:<go.sum-line>") and feed resolved_versions_hash, so
 //     dep bumps invalidate without re-reading the lister-traversed source set.
 //
 // Per ADR-0005 the resolver is declared-only: invoked when the spec wrote
@@ -22,8 +22,8 @@
 //   - Local replace (`replace foo => ../foo` without version): lister treats
 //     replaced sources as internal — they show up in ExtraInputs.
 //   - Versioned replace (`replace foo => bar v1.0.0`): the resolver emits a
-//     go-deps ToolVersion encoding both the original path and the
-//     replacement target, so swapping replacement targets flips tools_hash.
+//     go-deps ResolvedVersion encoding both the original path and the
+//     replacement target, so swapping replacement targets flips resolved_versions_hash.
 package golocal
 
 import (
@@ -48,7 +48,7 @@ const Name = "go-local"
 const DepsPrefix = "go-deps:"
 
 // Resolver resolves a Go-local tool's source contributions (as ExtraInputs)
-// and external module set (as go-deps ToolVersions).
+// and external module set (as go-deps ResolvedVersions).
 type Resolver struct {
 	repoRoot string
 	lister   lister.SourceLister
@@ -78,18 +78,18 @@ func (r *Resolver) Inputs(ctx context.Context, specDir string, declared *toolres
 	return append([]string(nil), listing.InternalFiles...), nil
 }
 
-// Versions returns one ToolVersion per external module reachable from the
+// Versions returns one ResolvedVersion per external module reachable from the
 // declared entry, encoded as "go-deps:<path>@<version>+sum:<go.sum-line>" so
-// dep bumps and go.sum drift both invalidate tools_hash.
-func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+// dep bumps and go.sum drift both invalidate resolved_versions_hash.
+func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ResolvedVersion, error) {
 	listing, entry, err := r.list(ctx, specDir, declared)
 	if err != nil {
 		return nil, err
 	}
 	source := Name + ":" + entry
-	versions := make([]toolresolver.ToolVersion, 0, len(listing.ExternalModules))
+	versions := make([]toolresolver.ResolvedVersion, 0, len(listing.ExternalModules))
 	for _, m := range listing.ExternalModules {
-		versions = append(versions, toolresolver.ToolVersion{
+		versions = append(versions, toolresolver.ResolvedVersion{
 			Name:    m.Path,
 			Source:  source,
 			Version: encodeExternalVersion(m),

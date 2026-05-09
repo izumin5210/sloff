@@ -73,7 +73,7 @@ commands:
 - stdout が空、 もしくは `extract` がマッチしなかった
 - `exec[0]` が `$PATH` 上に見つからない
 
-cmd 文字列だけで `tools_hash` を fallback 計算するような暗黙挙動は **入れない**。 「version が取れていない」事故を構造的に防ぐため、 失敗は明示する。
+cmd 文字列だけで `resolved_versions_hash` を fallback 計算するような暗黙挙動は **入れない**。 「version が取れていない」事故を構造的に防ぐため、 失敗は明示する。
 
 ### Dispatch (declared-only)
 
@@ -128,7 +128,7 @@ func (r *Resolver) Name() string { return Name }
 
 // Resolve は declared 経由でのみ呼ばれる ( ADR-0005)。 declared.Exec が
 // script resolver の入力で、 declared.Extract が任意の正規表現。
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) ([]toolresolver.ResolvedVersion, error) {
     if declared == nil {
         return nil, errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
     }
@@ -141,7 +141,7 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
     r.mu.Lock()
     if cached, ok := r.cache[cacheKey]; ok {
         r.mu.Unlock()
-        return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}, nil
+        return []toolresolver.ResolvedVersion{makeVersion(declared.Exec[0], cached)}, nil
     }
     r.mu.Unlock()
 
@@ -158,7 +158,7 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
     r.cache[cacheKey] = captured
     r.mu.Unlock()
 
-    return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}, nil
+    return []toolresolver.ResolvedVersion{makeVersion(declared.Exec[0], captured)}, nil
 }
 
 func (r *Resolver) runVersion(ctx context.Context, specDir string, argv []string) (string, error) {
@@ -194,9 +194,9 @@ func applyExtract(stdout, pattern string) (string, error) {
     }
 }
 
-func makeVersion(execHead, captured string) toolresolver.ToolVersion {
+func makeVersion(execHead, captured string) toolresolver.ResolvedVersion {
     bin := filepath.Base(execHead)
-    return toolresolver.ToolVersion{
+    return toolresolver.ResolvedVersion{
         Name:    bin,
         Source:  "script:" + bin,
         Version: "script:" + bin + "@" + captured,

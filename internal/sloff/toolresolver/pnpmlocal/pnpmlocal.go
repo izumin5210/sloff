@@ -9,10 +9,10 @@
 //     Source edits flip files_hash so consumer tasks rerun the cmd, which
 //     itself is responsible for any rebuild step (ADR-0008 D7, mirroring the
 //     `go run` model used by go-local).
-//   - Versions (tools_hash channel): every transitively-reachable external
+//   - Versions (resolved_versions_hash channel): every transitively-reachable external
 //     npm package, surgically walked from pnpm-lock.yaml's importers and
 //     snapshots. Each entry is encoded as `pnpm-deps:<pkg>@<version>` so peer
-//     suffixes round-trip and tools_hash flips on registry-resolved bumps
+//     suffixes round-trip and resolved_versions_hash flips on registry-resolved bumps
 //     (Turborepo-equivalent precision).
 //
 // External npm packages used as tools — i.e. anything not in the workspace —
@@ -46,7 +46,7 @@ const DepsPrefix = "pnpm-deps:"
 
 // Resolver resolves a pnpm workspace-local tool's contributions: source files
 // (via FileEnumerator) as ExtraInputs and transitive npm deps as
-// pnpm-deps ToolVersions. The resolver itself does NOT orchestrate the
+// pnpm-deps ResolvedVersions. The resolver itself does NOT orchestrate the
 // workspace package's build — that's the consuming task's cmd's job. It also
 // does NOT validate that node_modules matches pnpm-lock.yaml; that lives in
 // the preflight subsystem (preflight/pnpmlocal/) so the runner can apply the
@@ -75,7 +75,7 @@ type Resolver struct {
 type pkgComputation struct {
 	once     sync.Once
 	inputs   []string
-	versions []toolresolver.ToolVersion
+	versions []toolresolver.ResolvedVersion
 	err      error
 }
 
@@ -114,15 +114,15 @@ func (r *Resolver) Inputs(ctx context.Context, _ string, declared *toolresolver.
 	return append([]string(nil), pc.inputs...), nil
 }
 
-// Versions returns one ToolVersion per transitively-reachable external npm
+// Versions returns one ResolvedVersion per transitively-reachable external npm
 // package, encoded as `pnpm-deps:<pkg>@<version>` so peer suffixes round-trip
-// and tools_hash flips on registry-resolved bumps.
-func (r *Resolver) Versions(ctx context.Context, _ string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+// and resolved_versions_hash flips on registry-resolved bumps.
+func (r *Resolver) Versions(ctx context.Context, _ string, declared *toolresolver.DeclaredTool) ([]toolresolver.ResolvedVersion, error) {
 	pc, err := r.computeFor(ctx, declared)
 	if err != nil {
 		return nil, err
 	}
-	return append([]toolresolver.ToolVersion(nil), pc.versions...), nil
+	return append([]toolresolver.ResolvedVersion(nil), pc.versions...), nil
 }
 
 // computeFor returns the per-package cached computation (workspace files +
@@ -165,7 +165,7 @@ func (r *Resolver) pkgComputationFor(packageName string) *pkgComputation {
 // (via snapshots), then runs the FileEnumerator for the union of workspace
 // dirs. The result feeds both Inputs (workspace files) and Versions (npm
 // dep entries).
-func (r *Resolver) compute(ctx context.Context, packageName string) ([]string, []toolresolver.ToolVersion, error) {
+func (r *Resolver) compute(ctx context.Context, packageName string) ([]string, []toolresolver.ResolvedVersion, error) {
 	ws, err := r.loadWorkspace()
 	if err != nil {
 		return nil, nil, fmt.Errorf("pnpm-local: load workspace: %w", err)
@@ -185,10 +185,10 @@ func (r *Resolver) compute(ctx context.Context, packageName string) ([]string, [
 		return nil, nil, fmt.Errorf("pnpm-local: enumerate files for %q: %w", pkg.Name, err)
 	}
 
-	versions := make([]toolresolver.ToolVersion, 0, len(walk.Externals))
+	versions := make([]toolresolver.ResolvedVersion, 0, len(walk.Externals))
 	source := Name + ":" + pkg.Name
 	for _, e := range walk.Externals {
-		versions = append(versions, toolresolver.ToolVersion{
+		versions = append(versions, toolresolver.ResolvedVersion{
 			Name:    e,
 			Source:  source,
 			Version: DepsPrefix + e,

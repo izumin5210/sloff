@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
 	preflightpnpm "github.com/izumin5210/sloff/internal/sloff/preflight/pnpmlocal"
@@ -189,6 +191,15 @@ func (h *harness) assertExpected(t *testing.T) {
 // readTree returns a map[forward-slash relpath]string-content for every regular file under
 // root. Symlinks are not followed; the .git directory is skipped because the harness git-
 // inits the workdir for git ls-files but the goldens shouldn't capture that bookkeeping.
+//
+// For each .pb cache record:
+//   - the raw bytes are added at the .pb path (byte stability check)
+//   - if there is no committed .json sibling on disk, a synthesised one decoded
+//     via cache.MarshalJSON is added at the .json path
+//
+// Committed .json siblings (in expectedDir) are read as-is. The asymmetry —
+// workdir synthesises, expectedDir reads from disk — is what catches drift
+// between the committed JSON and what the .pb actually decodes to.
 func readTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -205,11 +216,19 @@ func readTree(root string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
+		slashRel := filepath.ToSlash(rel)
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		out[filepath.ToSlash(rel)] = string(b)
+		out[slashRel] = string(b)
+		if filepath.Ext(p) == cache.FileExt && !hasJSONSibling(p) {
+			j, err := decodeRecordToJSON(b)
+			if err != nil {
+				return fmt.Errorf("decode %s: %w", p, err)
+			}
+			out[strings.TrimSuffix(slashRel, cache.FileExt)+".json"] = string(j)
+		}
 		return nil
 	})
 	if err != nil {
@@ -219,7 +238,9 @@ func readTree(root string) (map[string]string, error) {
 }
 
 // mirrorTree copies all regular files (not symlinks) from src into dst, creating dst and
-// any necessary subdirectories. The .git directory is skipped (see readTree).
+// any necessary subdirectories. The .git directory is skipped (see readTree). Each .pb
+// cache record additionally writes a decoded .json sibling so the goldens carry both
+// the canonical bytes and the human-readable view.
 func mirrorTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -243,8 +264,37 @@ func mirrorTree(src, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		return os.WriteFile(target, b, 0o644)
+		if err := os.WriteFile(target, b, 0o644); err != nil {
+			return err
+		}
+		if filepath.Ext(p) == cache.FileExt {
+			j, err := decodeRecordToJSON(b)
+			if err != nil {
+				return fmt.Errorf("decode %s: %w", p, err)
+			}
+			jsonTarget := strings.TrimSuffix(target, cache.FileExt) + ".json"
+			if err := os.WriteFile(jsonTarget, j, 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+}
+
+// decodeRecordToJSON unmarshals the proto wire bytes of a cache record and
+// re-encodes them via cache.MarshalJSON, the same path `sloff cache show` uses.
+func decodeRecordToJSON(pb []byte) ([]byte, error) {
+	rec, err := cache.Unmarshal(pb)
+	if err != nil {
+		return nil, err
+	}
+	return cache.MarshalJSON(rec)
+}
+
+func hasJSONSibling(pbPath string) bool {
+	json := strings.TrimSuffix(pbPath, cache.FileExt) + ".json"
+	_, err := os.Stat(json)
+	return err == nil
 }
 
 func TestRunner_FirstRunWritesRecord(t *testing.T) {
@@ -296,7 +346,7 @@ func TestRunner_OutputDriftInvalidates(t *testing.T) {
 // goLocalGeneratorV2 is the post-edit body of cmd/copy/main.go used to flip the
 // go-local resolver's source hash. The generator stays valid Go and produces a
 // different output.txt so the test exercises both invalidate paths
-// (tools_hash via source change AND output_hash via content change).
+// (resolved_versions_hash via source change AND output_hash via content change).
 const goLocalGeneratorV2 = `package main
 
 import (
@@ -360,7 +410,7 @@ func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
 }
 
 // pnpmLocalGeneratorV2 flips the source content the esbuild lister hashes.
-// It is dropped into packages/codegen/dist/lib.js so the tools_hash changes
+// It is dropped into packages/codegen/dist/lib.js so the resolved_versions_hash changes
 // even though input.txt and the cmd are unchanged.
 const pnpmLocalGeneratorV2 = "export const helper = 'v2';\n"
 
@@ -374,7 +424,7 @@ func TestRunner_PnpmLocal_SecondRunHits(t *testing.T) {
 
 // TestRunner_PnpmLocal_SourceChangeInvalidates is the pnpm-local equivalent
 // of the go-local source-change test: editing a transitive source file in
-// the workspace package must flip tools_hash and trigger re-execution.
+// the workspace package must flip resolved_versions_hash and trigger re-execution.
 func TestRunner_PnpmLocal_SourceChangeInvalidates(t *testing.T) {
 	runE2E(
 		t, "pnpmlocal-source-change-invalidates",

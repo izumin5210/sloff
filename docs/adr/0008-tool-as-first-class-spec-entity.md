@@ -87,7 +87,7 @@ tool 定義に含まれる path 系フィールド ( `go-local: ./cmd/foo` 等) 
 
 #### Cross-spec 参照時の cmd 側責任 ( foot-gun 注意)
 
-tool 定義の path は **resolver の hash 入力** ( files_hash / tools_hash 経路) に乗るだけで、 task の cmd が実行する binary 自体を sloff が解決するわけではない。 cmd は task 自身の `specRelpath` ( 参照元 task の dir) を cwd として実行されるので、 **「 cmd 側 path が tool 定義の指す target と同じものを参照しているか」 は cmd 作者の責任**:
+tool 定義の path は **resolver の hash 入力** ( files_hash / resolved_versions_hash 経路) に乗るだけで、 task の cmd が実行する binary 自体を sloff が解決するわけではない。 cmd は task 自身の `specRelpath` ( 参照元 task の dir) を cwd として実行されるので、 **「 cmd 側 path が tool 定義の指す target と同じものを参照しているか」 は cmd 作者の責任**:
 
 ```yaml
 # packages/codegen/sloff.yml
@@ -126,7 +126,7 @@ Runner は `Run` の冒頭で discover 済み spec から `ToolRegistry` を構�
 
 #### IZU-16 補遺: Inputs / Versions 分割と内部メモ化
 
-resolver の公開 API は `Inputs` ( task inputs に union される repo-relative path 集合) と `Versions` ( tools_hash に投入される ToolVersion 集合) の 2 メソッドに分割されている ( IZU-16)。 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心を別経路に分離するための切り分けで、 ここで言う「 1 回 resolve」 は **同一 tool に対する Inputs と Versions の連続呼び出しが内部の発見作業を共有する** ことを意味する:
+resolver の公開 API は `Inputs` ( task inputs に union される repo-relative path 集合) と `Versions` ( resolved_versions_hash に投入される ResolvedVersion 集合) の 2 メソッドに分割されている ( IZU-16)。 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心を別経路に分離するための切り分けで、 ここで言う「 1 回 resolve」 は **同一 tool に対する Inputs と Versions の連続呼び出しが内部の発見作業を共有する** ことを意味する:
 
 - **`script`**: `Inputs` は常に `nil` を即返す ( source contribution なし)。 `Versions` のみが既存の `<bin> --version` cache を消費する。
 - **`go-local`**: 両メソッドとも `lister.NewMemoized` 経由で `packages.Load` を呼ぶ。 memoize により 1 entry あたり 1 回の `packages.Load` で済み、 Inputs ( InternalFiles 抽出) / Versions ( ExternalModules 抽出) 双方が同じ Listing を slice する。
@@ -155,7 +155,7 @@ commands:
 cmd を組み立てる責務は利用者にある。 sloff の関与は:
 
 - pnpm-local resolver が当該 workspace package の **git-tracked + transitive workspace dep の git-tracked ファイル** を ExtraInputs に contribute → files_hash 経路で source 変更を検知
-- 当該 workspace の **transitive 外部 npm dep の resolved version** を `pnpm-deps:<pkg>@<ver>` ToolVersion として contribute → tools_hash 経路で外部 dep bump を検知
+- 当該 workspace の **transitive 外部 npm dep の resolved version** を `pnpm-deps:<pkg>@<ver>` ResolvedVersion として contribute → resolved_versions_hash 経路で外部 dep bump を検知
 
 source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の build + run が走る → 新しい binary で task が走る。
 

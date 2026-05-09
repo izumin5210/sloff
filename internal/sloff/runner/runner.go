@@ -531,7 +531,52 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			}
 		}
 	}
+	if err := detectOutputPatternConflicts(tasks, r.byKey); err != nil {
+		return nil, err
+	}
 	return tasks, nil
+}
+
+// detectOutputPatternConflicts fails fast when two tasks declare the same
+// raw output glob string (e.g. both list `shared.txt` or both list
+// `pkg/**/*.go`). It complements depgraph.Build's expanded-path conflict
+// detector: that one operates on the post-glob file set, which is empty on
+// a clean checkout and therefore can't see two tasks aimed at the same path
+// before either has run. The pattern-string check works regardless of
+// checkout state, and matters more under the parallel scheduler where the
+// runtime recordProducedPaths trip races against OS-level cmd errors when
+// two cmds try to create the same file simultaneously.
+//
+// Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`)
+// are not detected here; they still surface via the runtime
+// recordProducedPaths check after both cmds finish writing.
+func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[string]taskInfo) error {
+	patternProducers := map[string][]string{}
+	for _, t := range tasks {
+		info := byKey[depgraphKey(t)]
+		label := taskLabel(t)
+		seen := map[string]struct{}{}
+		for _, p := range info.outputPatterns {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			patternProducers[p] = append(patternProducers[p], label)
+		}
+	}
+	var parts []string
+	for pattern, labels := range patternProducers {
+		if len(labels) <= 1 {
+			continue
+		}
+		sort.Strings(labels)
+		parts = append(parts, fmt.Sprintf("%q -> [%s]", pattern, strings.Join(labels, ", ")))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	sort.Strings(parts)
+	return fmt.Errorf("duplicate output pattern producers: %s; fix the spec to give each output pattern exactly one writer", strings.Join(parts, "; "))
 }
 
 // combineToolInputs concatenates ExtraInputs in the order tools appear in

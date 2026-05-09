@@ -11,17 +11,18 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 )
 
-func newRecord(taskID string) *cache.Record {
-	return &cache.Record{
+func newRecord(taskID string) *cachev1.Record {
+	return &cachev1.Record{
 		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)),
-		Input:         &cache.Input{Hash: "deadbeef"},
-		Output:        &cache.Output{Hash: "cafebabe"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
 		SchemaVersion: cache.SchemaVersion,
-		Spec: &cache.Spec{
+		Spec: &cachev1.Spec{
 			Cmd:    "echo hi",
 			Dir:    "path/to/spec",
 			TaskId: taskID,

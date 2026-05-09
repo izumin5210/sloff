@@ -9,32 +9,32 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sloffv1 "github.com/izumin5210/sloff/internal/proto/sloff/v1"
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
-func sampleRecord() *cache.Record {
-	return &cache.Record{
+func sampleRecord() *cachev1.Record {
+	return &cachev1.Record{
 		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC)),
 		SchemaVersion: cache.SchemaVersion,
-		Spec: &cache.Spec{
+		Spec: &cachev1.Spec{
 			Cmd:    "buf generate --template buf.gen.yaml",
 			Dir:    "path/to/spec",
 			TaskId: "protoc-gen-go",
 		},
-		Input: &cache.Input{
+		Input: &cachev1.Input{
 			Hash:                 "3f9a1c",
 			FilesHash:            "a1b2",
 			CmdHash:              "c3d4",
 			ResolvedVersionsHash: "e5f6",
-			ResolvedVersions: []*cache.ResolvedVersion{
+			ResolvedVersions: []*cachev1.ResolvedVersion{
 				{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
 				{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
 			},
 		},
-		Output: &cache.Output{
+		Output: &cachev1.Output{
 			Hash: "7e2b",
-			Files: []*cache.FileEntry{
+			Files: []*cachev1.FileEntry{
 				{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
 				{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
 			},
@@ -43,7 +43,7 @@ func sampleRecord() *cache.Record {
 }
 
 // TestMarshalSortsOutputFilesByPath guards the path-sorted invariant on the
-// proto wire: even if the in-memory FileHashes were unsorted, Marshal /
+// proto wire: even if the in-memory FileEntry slice was unsorted, Marshal /
 // Unmarshal must produce a path-ascending sequence in output.files so the
 // hash output is reproducible across writers.
 func TestMarshalSortsOutputFilesByPath(t *testing.T) {
@@ -51,7 +51,7 @@ func TestMarshalSortsOutputFilesByPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	msg := &sloffv1.CacheRecord{}
+	msg := &cachev1.Record{}
 	if err := proto.Unmarshal(b, msg); err != nil {
 		t.Fatalf("proto.Unmarshal: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	msg := &sloffv1.CacheRecord{}
+	msg := &cachev1.Record{}
 	if err := proto.Unmarshal(b, msg); err != nil {
 		t.Fatalf("proto.Unmarshal: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestMarshalIsByteStable(t *testing.T) {
 // than silently encoded best-effort data.
 func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	rec := sampleRecord()
-	rec.SchemaVersion = sloffv1.CacheRecord_SchemaVersion(999)
+	rec.SchemaVersion = cachev1.SchemaVersion(999)
 	if _, err := cache.Marshal(rec); err == nil {
 		t.Fatal("Marshal: expected error for unknown schema version, got nil")
 	}

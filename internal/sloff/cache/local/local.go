@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
@@ -41,7 +42,7 @@ func New(repoRoot string) *Storage {
 func (s *Storage) Name() string { return backendName }
 
 // Load implements cache.Storage.
-func (s *Storage) Load(_ context.Context, key cache.Key) (*cache.Record, bool, error) {
+func (s *Storage) Load(_ context.Context, key cache.Key) (*cachev1.Record, bool, error) {
 	b, err := os.ReadFile(s.pathFor(key))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
@@ -57,7 +58,7 @@ func (s *Storage) Load(_ context.Context, key cache.Key) (*cache.Record, bool, e
 }
 
 // Save implements cache.Storage.
-func (s *Storage) Save(_ context.Context, key cache.Key, record *cache.Record) error {
+func (s *Storage) Save(_ context.Context, key cache.Key, record *cachev1.Record) error {
 	p := s.pathFor(key)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err

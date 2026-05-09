@@ -48,7 +48,7 @@
 - generator 自体の高速化 ( generator 本体の処理時間短縮)
 - Windows 対応
 - watch モード ( 初版では非対応)
-- record の `schema_version` 跨ぎの後方互換読み込み ( 異なる schema_version の record を同じバイナリで両対応する経路は実装しない、 ADR-0009)。 wire-incompatible な変更が発生した場合は proto package を `sloff.v2` に切り出す運用
+- record の `schema_version` 跨ぎの後方互換読み込み ( 異なる schema_version の record を同じバイナリで両対応する経路は実装しない、 ADR-0009)。 wire-incompatible な変更が発生した場合は proto package を `sloff.cache.v2` に切り出す運用
 - 環境構築タスク ( パッケージマネージャの install 等) のオーケストレーション。 sloff は「pure な代入関数 ( inputs → outputs) としての generator」だけを扱い、 副作用が大きい install タスクは利用者の Makefile / shell スクリプト側に委ねる
 
 ## 要件
@@ -149,7 +149,7 @@ commands:
 
 #### Schema (protobuf)
 
-record の wire schema は [`proto/sloff/v1/cache.proto`](../../proto/sloff/v1/cache.proto) が SSoT。 generated Go code は `internal/proto/sloff/v1/cache.pb.go` ( package `sloffv1`)。
+record の wire schema は [`proto/sloff/cache/v1/cache.proto`](../../proto/sloff/cache/v1/cache.proto) が SSoT。 generated Go code は `internal/proto/sloff/cache/v1/cache.pb.go` ( package `cachev1`)。
 
 論理構造を JSON 表記で示すと:
 

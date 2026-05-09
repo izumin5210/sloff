@@ -114,14 +114,15 @@ binary だが schema 強制 / 公式 breaking 検出ツールが proto と比べ
 ### Schema 設計規則
 
 - **proto3** を使用。 presence detection が必要な field のみ `optional` を明示
-- **top-level message は `CacheRecord`**、 `Spec` / `Input` / `Output` / `FileEntry` などは `CacheRecord` の **nested message として宣言する**。 トップレベルに広い名前を露出させない
+- **proto package を `sloff.cache.v1` に分離する**。 これにより top-level message を `Record` / `Spec` / `Input` / `Output` / `FileEntry` / `ResolvedVersion` の素直な名前で宣言できる ( package qualifier `cachev1.Spec` 等で曖昧さは解消される)。 親 `sloff.v1` 配下に置くと `sloff.v1.Spec` のように cache 文脈が消えて spec config 等と区別がつかない
+- **Go 側で alias は使わず、 generated 型を直接引き回す**。 `cache` package は Storage interface / Marshal-Unmarshal helper / Sort / FilePaths / SchemaVersion 定数 / FileExt 定数のみを export し、 record 型は `cachev1.Record` を呼び出し側で直接使う
 - **`map<,>` 禁止**。 順序が問題になる集合はすべて `repeated <Entry>` で表現し、 marshal 前に明示ソート
   - `output.files` → `repeated FileEntry { string path; string hash; }` を path 昇順
   - `input.resolved_versions` → `repeated ResolvedVersion { string name; string version; string source; }` を name 昇順
 - **`Input` を tools 関連の SSoT にする**。 旧 `tools_hash` ( `input.components` の sub-hash) と informational だった `generator_version_snapshot` を 1 箇所に統合し、 `Input.resolved_versions_hash` ( hash 入力) と `Input.resolved_versions` ( per-entry detail) として並べる。 「 何が hash に効いて、 何が informational か」 が同じ階層で読める
 - **`ToolVersion` → `ResolvedVersion` に rename**。 `tools_hash` も同様に `resolved_versions_hash` へ。 旧名は 「 user-declared tool の version」 を示唆するが、 実体は `Resolver.Versions()` が返す **OS 中立な version pin** で、 script resolver の declared tool 自身に加えて go-local の外部 Go module / pnpm-local の外部 npm package pin も含む ( `Tool` という呼称は narrow すぎ)。 Go 側 (`internal/sloff/toolresolver/resolver.go` の `ToolVersion` 型 ほか 30 箇所程度) も同 rename を後続項目として追従する
 - **`google.protobuf.Timestamp`** で `generated_at` を表現
-- **proto package 名に version segment を含める** (`sloff.v1`)。 wire-incompatible な変更が必要になった時は新 package (`sloff.v2`) を切る運用とし、 既存 v1 reader を壊さない
+- **proto package 名に version segment を含める** (`sloff.cache.v1`)。 wire-incompatible な変更が必要になった時は新 package (`sloff.cache.v2`) を切る運用とし、 既存 v1 reader を壊さない
 - **`schema_version` は enum で表現** し、 valid version のみ wire レベルで表現可能にする ( 不明値は `SCHEMA_VERSION_UNSPECIFIED` に集約)。 enum 値は version 番号と一致させ、 YAML 時代の `schema_version: 1` は proto enum には含めない
 
 ### byte stability の担保
@@ -143,7 +144,7 @@ proto wire format はデフォルトで決定論的でない (`proto.Marshal` �
 - **`buf` を `go.mod` の `tool ( ... )` ブロックで pin** ( gofumpt / lefthook と同じ機構)
 - `buf.yaml` に `BREAKING_FILE` (= wire-incompatible 変更を禁ずる ruleset) を設定
 - CI に `go tool buf breaking --against '.git#branch=main'` を追加し、 PR で wire-breaking な変更を弾く
-- 「 wire-breaking な変更が必要になった場合」 は package を `sloff.v2` に切る (= 新 reader/writer を実装し、 v1 を deprecated として一定期間並走させる) 運用ルールを併記する
+- 「 wire-breaking な変更が必要になった場合」 は package を `sloff.cache.v2` に切る (= 新 reader/writer を実装し、 v1 を deprecated として一定期間並走させる) 運用ルールを併記する
 
 ### debug 経路
 
@@ -186,7 +187,7 @@ binary 化で失う inspect 容易性を、 同 PR で以下のサブコマン�
 
 本 ADR の決定を受けて以下を実装する。 各項目は別途 PR / ADR で具体化する:
 
-1. **proto schema 配置**: `proto/sloff/v1/cache.proto` に SSoT、 `internal/proto/sloff/v1/cache.pb.go` ( package `sloffv1`) に generated code。 buf の `PACKAGE_DIRECTORY_MATCH` lint を満たすため out path も proto package 階層をミラーする
+1. **proto schema 配置**: `proto/sloff/cache/v1/cache.proto` に SSoT、 `internal/proto/sloff/cache/v1/cache.pb.go` ( package `cachev1`) に generated code。 buf の `PACKAGE_DIRECTORY_MATCH` lint を満たすため out path も proto package 階層をミラーする
 2. **Go 側 `ToolVersion` → `ResolvedVersion` rename**: `internal/sloff/toolresolver/resolver.go` の型定義および registry / golocal / pnpmlocal / 各 test の参照箇所 (約 30 箇所) を proto rename と同期。 `tools_hash` を参照する命名 (resolver doc / architecture.md) も `resolved_versions_hash` に揃える。 本 ADR と同 PR で実施する
 3. **buf 設定**: `buf.yaml` ( BREAKING_FILE ruleset) / `buf.gen.yaml` を repo root に配置
 4. **`go.mod` の `tool ( ... )` 追加**: `google.golang.org/protobuf/cmd/protoc-gen-go`、 `github.com/bufbuild/buf/cmd/buf`

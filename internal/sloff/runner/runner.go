@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 	"github.com/izumin5210/sloff/internal/sloff/glob"
@@ -708,22 +709,22 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return nil
 	}
 
-	newRec := &cache.Record{
+	newRec := &cachev1.Record{
 		GeneratedAt:   timestamppb.New(r.opts.Clock()),
 		SchemaVersion: cache.SchemaVersion,
-		Spec: &cache.Spec{
+		Spec: &cachev1.Spec{
 			Cmd:    strings.Join(info.command.Cmd, " "),
 			Dir:    info.specRelpath,
 			TaskId: info.command.Name,
 		},
-		Input: &cache.Input{
+		Input: &cachev1.Input{
 			Hash:                 inputHash,
 			FilesHash:            filesHash,
 			CmdHash:              cmdHash,
 			ResolvedVersionsHash: resolvedVersionsHash,
 			ResolvedVersions:     resolvedVersionsFromTool(versions),
 		},
-		Output: &cache.Output{
+		Output: &cachev1.Output{
 			Hash:  outputHash,
 			Files: files,
 		},
@@ -748,15 +749,15 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 // produced file set. Hash and per-entry (path, hash) tuples must match; field
 // order is normalised by sorting because callers may build Output before the
 // proto Marshal helper sorts FileEntries.
-func outputsEquivalent(a, b *cache.Output) bool {
+func outputsEquivalent(a, b *cachev1.Output) bool {
 	if a.GetHash() != b.GetHash() {
 		return false
 	}
 	if len(a.GetFiles()) != len(b.GetFiles()) {
 		return false
 	}
-	left := append([]*cache.FileEntry(nil), a.GetFiles()...)
-	right := append([]*cache.FileEntry(nil), b.GetFiles()...)
+	left := append([]*cachev1.FileEntry(nil), a.GetFiles()...)
+	right := append([]*cachev1.FileEntry(nil), b.GetFiles()...)
 	sort.Slice(left, func(i, j int) bool { return left[i].GetPath() < left[j].GetPath() })
 	sort.Slice(right, func(i, j int) bool { return right[i].GetPath() < right[j].GetPath() })
 	for i := range left {
@@ -849,25 +850,25 @@ func versionStrings(versions []toolresolver.ResolvedVersion) []string {
 	return out
 }
 
-func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*cache.ResolvedVersion {
+func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*cachev1.ResolvedVersion {
 	if len(versions) == 0 {
 		return nil
 	}
-	out := make([]*cache.ResolvedVersion, len(versions))
+	out := make([]*cachev1.ResolvedVersion, len(versions))
 	for i, v := range versions {
-		out[i] = &cache.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
+		out[i] = &cachev1.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
 	}
 	return out
 }
 
-func perFileHashes(root string, paths []string) ([]*cache.FileEntry, error) {
-	out := make([]*cache.FileEntry, 0, len(paths))
+func perFileHashes(root string, paths []string) ([]*cachev1.FileEntry, error) {
+	out := make([]*cachev1.FileEntry, 0, len(paths))
 	for _, p := range paths {
 		h, err := hash.File(root, p)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, &cache.FileEntry{Path: p, Hash: h})
+		out = append(out, &cachev1.FileEntry{Path: p, Hash: h})
 	}
 	return out, nil
 }

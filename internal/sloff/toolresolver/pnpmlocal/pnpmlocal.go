@@ -58,6 +58,25 @@ type Resolver struct {
 	once         sync.Once
 	workspace    *Workspace
 	workspaceErr error
+
+	// pkgs caches the (extra inputs, versions) pair per declared package
+	// name so Inputs and Versions don't both walk the lockfile and call the
+	// file enumerator. The cached entry is computed lazily on first call;
+	// subsequent calls (Inputs after Versions, or vice versa) read from
+	// memory. Errors are cached too so a failing package doesn't keep
+	// retrying within a single run.
+	pkgsMu sync.Mutex
+	pkgs   map[string]*pkgComputation
+}
+
+// pkgComputation is the memoised result of WalkDeps + collectFiles for one
+// declared package name. Both Inputs and Versions read from the same value,
+// so the heavy work happens at most once per (resolver, package) per run.
+type pkgComputation struct {
+	once     sync.Once
+	inputs   []string
+	versions []toolresolver.ToolVersion
+	err      error
 }
 
 // New constructs a Resolver. The pnpm-lock.yaml is loaded lazily on the first
@@ -78,37 +97,92 @@ func New(repoRoot string, enumerator FileEnumerator) (*Resolver, error) {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// Resolve walks the lockfile from declared.PackageName's importer entry,
-// gathering the workspace dirs (via link: edges) and the transitive external
-// npm dep set (via snapshots). For each workspace dir, the FileEnumerator
-// produces the list of git-tracked / non-ignored files; the union becomes
-// ExtraInputs. Externals become individual `pnpm-deps:<pkg>@<ver>`
-// ToolVersions.
-func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
+// Inputs returns the union of git-tracked / non-ignored files inside the
+// declared workspace package and every transitively-linked workspace dir,
+// repo-relative slash form. The runner folds these into the consuming
+// task's input set so source edits flip files_hash and depgraph wires up
+// upstream codegen via output overlap.
+//
+// Inputs and Versions share a per-package cache (pkgComputation) so the
+// lockfile walk and FileEnumerator invocation happen at most once per
+// declared package name per run.
+func (r *Resolver) Inputs(ctx context.Context, _ string, declared *toolresolver.DeclaredTool) ([]string, error) {
+	pc, err := r.computeFor(ctx, declared)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), pc.inputs...), nil
+}
+
+// Versions returns one ToolVersion per transitively-reachable external npm
+// package, encoded as `pnpm-deps:<pkg>@<version>` so peer suffixes round-trip
+// and tools_hash flips on registry-resolved bumps.
+func (r *Resolver) Versions(ctx context.Context, _ string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+	pc, err := r.computeFor(ctx, declared)
+	if err != nil {
+		return nil, err
+	}
+	return append([]toolresolver.ToolVersion(nil), pc.versions...), nil
+}
+
+// computeFor returns the per-package cached computation (workspace files +
+// external deps) for declared.PackageName. The first caller pays the
+// lockfile walk and file enumeration; subsequent callers (Inputs after
+// Versions, or vice versa) read from memory.
+func (r *Resolver) computeFor(ctx context.Context, declared *toolresolver.DeclaredTool) (*pkgComputation, error) {
 	if declared == nil {
-		return toolresolver.Result{}, errors.New("pnpm-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
+		return nil, errors.New("pnpm-local: declared tool is required (auto-dispatch was removed in ADR-0005)")
 	}
 	if declared.PackageName == "" {
-		return toolresolver.Result{}, errors.New("pnpm-local: declared package name is required")
+		return nil, errors.New("pnpm-local: declared package name is required")
 	}
+	pc := r.pkgComputationFor(declared.PackageName)
+	pc.once.Do(func() {
+		pc.inputs, pc.versions, pc.err = r.compute(ctx, declared.PackageName)
+	})
+	if pc.err != nil {
+		return nil, pc.err
+	}
+	return pc, nil
+}
 
+func (r *Resolver) pkgComputationFor(packageName string) *pkgComputation {
+	r.pkgsMu.Lock()
+	defer r.pkgsMu.Unlock()
+	if r.pkgs == nil {
+		r.pkgs = map[string]*pkgComputation{}
+	}
+	if existing, ok := r.pkgs[packageName]; ok {
+		return existing
+	}
+	pc := &pkgComputation{}
+	r.pkgs[packageName] = pc
+	return pc
+}
+
+// compute walks the lockfile from packageName's importer entry, gathering
+// the workspace dirs (via link: edges) and transitive external npm deps
+// (via snapshots), then runs the FileEnumerator for the union of workspace
+// dirs. The result feeds both Inputs (workspace files) and Versions (npm
+// dep entries).
+func (r *Resolver) compute(ctx context.Context, packageName string) ([]string, []toolresolver.ToolVersion, error) {
 	ws, err := r.loadWorkspace()
 	if err != nil {
-		return toolresolver.Result{}, fmt.Errorf("pnpm-local: load workspace: %w", err)
+		return nil, nil, fmt.Errorf("pnpm-local: load workspace: %w", err)
 	}
-	pkg, ok := ws.Lookup(declared.PackageName)
+	pkg, ok := ws.Lookup(packageName)
 	if !ok {
-		return toolresolver.Result{}, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, declared.PackageName)
+		return nil, nil, fmt.Errorf("%w: %q", ErrNotWorkspacePackage, packageName)
 	}
 
 	walk, err := WalkDeps(ws.lockfile, filepath.ToSlash(pkg.Dir))
 	if err != nil {
-		return toolresolver.Result{}, fmt.Errorf("pnpm-local: walk deps for %q: %w", pkg.Name, err)
+		return nil, nil, fmt.Errorf("pnpm-local: walk deps for %q: %w", pkg.Name, err)
 	}
 
 	extraInputs, err := r.collectFiles(ctx, walk.Workspaces)
 	if err != nil {
-		return toolresolver.Result{}, fmt.Errorf("pnpm-local: enumerate files for %q: %w", pkg.Name, err)
+		return nil, nil, fmt.Errorf("pnpm-local: enumerate files for %q: %w", pkg.Name, err)
 	}
 
 	versions := make([]toolresolver.ToolVersion, 0, len(walk.Externals))
@@ -120,8 +194,7 @@ func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *
 			Version: DepsPrefix + e,
 		})
 	}
-
-	return toolresolver.Result{Versions: versions, ExtraInputs: extraInputs}, nil
+	return extraInputs, versions, nil
 }
 
 // loadWorkspace caches the (Workspace, error) pair so a single sloff run

@@ -122,12 +122,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	resolved, err := r.resolveReferencedTools(ctx, registry, referencedToolNames)
+	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
+	if err != nil {
+		return err
+	}
+	versionsByTool, err := r.resolveVersionContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
 	}
 
-	tasks, err := r.collectTasks(resolved)
+	tasks, err := r.collectTasks(inputsByTool, versionsByTool)
 	if err != nil {
 		return err
 	}
@@ -245,29 +249,49 @@ func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, reference
 	return out
 }
 
-// resolveReferencedTools invokes the toolresolver registry once per name in
-// referenced and returns a name → Result map. specDir for each invocation is
-// the dir where the tool was *defined* (ADR-0008 D3), not where it's
-// referenced from, so tool definitions stay self-contained relative to their
-// host sloff.yml.
+// resolveInputContribs invokes Registry.Inputs once per referenced tool name.
+// specDir for each invocation is the dir where the tool was *defined*
+// (ADR-0008 D3), not where it's referenced from, so tool definitions stay
+// self-contained relative to their host sloff.yml.
 //
 // Names not in the registry have already been rejected by
-// ValidateToolReferences, so this loop assumes every name resolves; a missing
-// entry would indicate a programmer error elsewhere and we surface it as
-// such rather than silently dropping the contribution.
-func (r *Runner) resolveReferencedTools(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string]toolresolver.Result, error) {
-	out := make(map[string]toolresolver.Result, len(referenced))
+// ValidateToolReferences; a missing entry here would be a programmer error.
+//
+// Splitting Inputs from Versions lets callers that only care about depgraph
+// structure (`sloff graph` / future `--explain`-style read-only debug
+// surfaces) skip the Versions path entirely; see IZU-16.
+func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(referenced))
 	for _, name := range referenced {
 		entry, ok := registry.Lookup(name)
 		if !ok {
 			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		res, err := r.opts.Resolvers.Resolve(ctx, entry.SpecDir, nil, declared)
+		ins, err := r.opts.Resolvers.Inputs(ctx, entry.SpecDir, declared)
 		if err != nil {
-			return nil, fmt.Errorf("resolve tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+			return nil, fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
 		}
-		out[entry.Name] = res
+		out[entry.Name] = ins
+	}
+	return out, nil
+}
+
+// resolveVersionContribs invokes Registry.Versions once per referenced tool
+// name. Same scoping discipline as resolveInputContribs.
+func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]toolresolver.ToolVersion, error) {
+	out := make(map[string][]toolresolver.ToolVersion, len(referenced))
+	for _, name := range referenced {
+		entry, ok := registry.Lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
+		}
+		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+		vs, err := r.opts.Resolvers.Versions(ctx, entry.SpecDir, declared)
+		if err != nil {
+			return nil, fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+		}
+		out[entry.Name] = vs
 	}
 	return out, nil
 }
@@ -300,18 +324,23 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
-	// resolverResult is computed once per task during collectTasks so depgraph
-	// sees resolver-contributed extra inputs (e.g. pnpm-local pulls workspace
-	// tool sources) and runTask can hash without re-running the resolver.
-	resolverResult toolresolver.Result
+	// versions holds the per-task ToolVersion concatenation in tools[] order,
+	// pre-computed during collectTasks so runTask can hash without revisiting
+	// the resolver registry. nil when collectTasks ran without versions
+	// (depgraph-only callers).
+	versions []toolresolver.ToolVersion
 }
 
 // collectTasks expands inputs/outputs for every spec command and folds each
-// task's referenced tools' contributions (from the pre-resolved per-tool
-// cache) into the task's input set. Folding extras in here is what lets
-// depgraph wire up workspace-tool build tasks to their consumers via the
-// usual output-overlap rule, instead of needing a parallel dependency channel.
-func (r *Runner) collectTasks(resolved map[string]toolresolver.Result) ([]depgraph.Task, error) {
+// task's referenced tools' contributions into the task's input set. Folding
+// extras in here is what lets depgraph wire up workspace-tool build tasks to
+// their consumers via the usual output-overlap rule, instead of needing a
+// parallel dependency channel.
+//
+// versionsByTool may be nil for callers that don't need tools_hash (graph-
+// style consumers); inputsByTool must always be present so depgraph sees the
+// same inputs the runner would.
+func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ToolVersion) ([]depgraph.Task, error) {
 	r.byKey = map[string]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
@@ -325,8 +354,13 @@ func (r *Runner) collectTasks(resolved map[string]toolresolver.Result) ([]depgra
 				return nil, fmt.Errorf("%s/%s: expand outputs: %w", sp.Dir, c.Name, err)
 			}
 
-			combined := combineToolResults(c.Tools, resolved)
-			mergedInputs := mergeInputs(inputs, combined.ExtraInputs)
+			extraInputs := combineToolInputs(c.Tools, inputsByTool)
+			mergedInputs := mergeInputs(inputs, extraInputs)
+
+			var versions []toolresolver.ToolVersion
+			if versionsByTool != nil {
+				versions = combineToolVersions(c.Tools, versionsByTool)
+			}
 
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
@@ -340,27 +374,38 @@ func (r *Runner) collectTasks(resolved map[string]toolresolver.Result) ([]depgra
 				command:        c,
 				inputPaths:     mergedInputs,
 				outputPatterns: c.Outputs,
-				resolverResult: combined,
+				versions:       versions,
 			}
 		}
 	}
 	return tasks, nil
 }
 
-// combineToolResults concatenates Versions and ExtraInputs in the order tools
-// appear in the spec's tools[] list, mirroring the previous inline behaviour
-// where dispatch order followed declaration order. ValidateToolReferences has
-// already guaranteed every name resolves, so a missing entry here is a
-// programmer error and we panic to surface it loudly during tests.
-func combineToolResults(names []string, resolved map[string]toolresolver.Result) toolresolver.Result {
-	var combined toolresolver.Result
+// combineToolInputs concatenates ExtraInputs in the order tools appear in
+// the spec's tools[] list. ValidateToolReferences has already guaranteed
+// every name resolves, so a missing entry here is a programmer error and
+// we panic to surface it loudly during tests.
+func combineToolInputs(names []string, inputsByTool map[string][]string) []string {
+	var combined []string
 	for _, name := range names {
-		r, ok := resolved[name]
+		v, ok := inputsByTool[name]
 		if !ok {
-			panic(fmt.Sprintf("runner: tool %q missing from resolved registry; ValidateToolReferences should have caught this", name))
+			panic(fmt.Sprintf("runner: tool %q missing from resolved inputs map; ValidateToolReferences should have caught this", name))
 		}
-		combined.Versions = append(combined.Versions, r.Versions...)
-		combined.ExtraInputs = append(combined.ExtraInputs, r.ExtraInputs...)
+		combined = append(combined, v...)
+	}
+	return combined
+}
+
+// combineToolVersions is the Versions sibling of combineToolInputs.
+func combineToolVersions(names []string, versionsByTool map[string][]toolresolver.ToolVersion) []toolresolver.ToolVersion {
+	var combined []toolresolver.ToolVersion
+	for _, name := range names {
+		v, ok := versionsByTool[name]
+		if !ok {
+			panic(fmt.Sprintf("runner: tool %q missing from resolved versions map; ValidateToolReferences should have caught this", name))
+		}
+		combined = append(combined, v...)
 	}
 	return combined
 }
@@ -398,7 +443,7 @@ func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Nam
 
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	info := r.byKey[depgraphKey(t)]
-	versions := info.resolverResult.Versions
+	versions := info.versions
 
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {

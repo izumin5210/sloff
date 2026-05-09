@@ -6,6 +6,7 @@ package spec
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -243,30 +244,82 @@ type Spec struct {
 	File *File
 }
 
-// Discover walks root using the given doublestar pattern (e.g. "**/sloff.yml") and returns
-// each matched spec parsed and validated. The order of results is the doublestar.Glob order.
+// discoverSkipDirs are directory names Discover refuses to descend into. These
+// are not (and never have been) places sloff specs live, but they balloon the
+// `**/sloff.yml` walk catastrophically:
+//
+//   - `node_modules` in a polyglot monorepo can carry hundreds of thousands of
+//     files and dwarf the rest of the repo by orders of magnitude. Walking it
+//     took ~5 minutes wall in observed cases.
+//   - `.git` is always present and stat-heavy; nothing there matches a YAML spec.
+//
+// Same skip discipline Turborepo / pnpm / Nx apply for the same reason.
+// Respecting full `.gitignore` would cover more pathological repos but is left
+// as a follow-up: the two entries below recover essentially all of the wall in
+// practice without forcing every consumer to commit a .gitignore.
+var discoverSkipDirs = map[string]struct{}{
+	"node_modules": {},
+	".git":         {},
+}
+
+// Discover walks root and returns each file matching pattern (a doublestar
+// expression like "**/sloff.yml") parsed and validated. Heavy build / VCS
+// directories listed in discoverSkipDirs are pruned without descent.
+//
+// Ordering is path-ascending and deterministic — fs.WalkDir visits siblings in
+// lexical order, so callers no longer depend on doublestar.Glob's traversal
+// order to be stable.
 func Discover(root, pattern string) ([]Spec, error) {
-	fsys := os.DirFS(root)
-	matches, err := doublestar.Glob(fsys, pattern, doublestar.WithFilesOnly())
-	if err != nil {
-		return nil, fmt.Errorf("glob %q: %w", pattern, err)
+	if _, err := doublestar.Match(pattern, ""); err != nil {
+		// doublestar.Match rejects malformed patterns up-front so we surface the
+		// same error the previous Glob path did, instead of silently walking the
+		// whole tree and matching nothing.
+		return nil, fmt.Errorf("invalid pattern %q: %w", pattern, err)
 	}
-	specs := make([]Spec, 0, len(matches))
-	for _, p := range matches {
-		osPath := filepath.FromSlash(p)
-		b, err := os.ReadFile(filepath.Join(root, osPath))
+
+	var specs []Spec
+	walkErr := filepath.WalkDir(root, func(osPath string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", p, err)
+			return err
 		}
-		f, err := Parse(b)
+		if d.IsDir() {
+			if osPath == root {
+				return nil
+			}
+			if _, skip := discoverSkipDirs[d.Name()]; skip {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, osPath)
 		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
+			return err
+		}
+		slashRel := filepath.ToSlash(rel)
+		ok, err := doublestar.Match(pattern, slashRel)
+		if err != nil {
+			return fmt.Errorf("match %q against %q: %w", pattern, slashRel, err)
+		}
+		if !ok {
+			return nil
+		}
+		b, readErr := os.ReadFile(osPath)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", slashRel, readErr)
+		}
+		f, parseErr := Parse(b)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", slashRel, parseErr)
 		}
 		specs = append(specs, Spec{
-			Dir:  filepath.FromSlash(path.Dir(p)),
-			Path: osPath,
+			Dir:  filepath.FromSlash(path.Dir(slashRel)),
+			Path: filepath.FromSlash(slashRel),
 			File: f,
 		})
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
 	}
 	return specs, nil
 }

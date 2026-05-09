@@ -378,6 +378,46 @@ commands:
 	}
 }
 
+// TestDiscover_SkipsHeavyDirs guards that node_modules / .git are pruned
+// without descent. Polyglot monorepos commonly carry hundreds of thousands of
+// files under node_modules; without skipping, the doublestar walk took ~5
+// minutes wall in observed cases. We assert that a sloff.yml planted inside
+// node_modules is intentionally invisible to Discover so future patterns of
+// "where do specs live?" don't silently re-introduce the walk.
+func TestDiscover_SkipsHeavyDirs(t *testing.T) {
+	root := t.TempDir()
+	visible := `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
+  - name: gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`
+	mustWrite(t, filepath.Join(root, "pkg", "sloff.yml"), visible)
+	// Decoys placed inside skipped dirs: Discover should NOT descend into these.
+	mustWrite(t, filepath.Join(root, "node_modules", "pkg", "sloff.yml"), visible)
+	mustWrite(t, filepath.Join(root, ".git", "hooks", "sloff.yml"), visible)
+	// Nested node_modules (pnpm workspace shape) should also be skipped.
+	mustWrite(t, filepath.Join(root, "apps", "web", "node_modules", "sloff.yml"), visible)
+
+	got, err := spec.Discover(root, "**/sloff.yml")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 1 {
+		paths := make([]string, len(got))
+		for i, g := range got {
+			paths[i] = g.Path
+		}
+		t.Fatalf("len(got)=%d, want 1; got paths=%v", len(got), paths)
+	}
+	if got[0].Dir != "pkg" {
+		t.Errorf("got[0].Dir = %q, want %q", got[0].Dir, "pkg")
+	}
+}
+
 // TestDiscover_DuplicateTaskAcrossSpecsAllowed guards that the same task name
 // can appear in different spec dirs (they're disambiguated by spec dir in the
 // cache record path), even though duplicates within one file are rejected.

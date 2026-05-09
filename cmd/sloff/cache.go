@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/cobra"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
+	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
 func newCacheCmd() *cobra.Command {
@@ -122,11 +122,5 @@ func readRecord(path string) (*cachev1.Record, error) {
 }
 
 func marshalRecordJSON(rec *cachev1.Record) ([]byte, error) {
-	opts := protojson.MarshalOptions{
-		Multiline:       true,
-		Indent:          "  ",
-		UseProtoNames:   true,
-		EmitUnpopulated: false,
-	}
-	return opts.Marshal(rec)
+	return cache.MarshalJSON(rec)
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
@@ -74,4 +75,17 @@ func FilePaths(files []*cachev1.FileEntry) []string {
 		out[i] = f.GetPath()
 	}
 	return out
+}
+
+// MarshalJSON returns the canonical protojson representation of rec.
+// Shared by `sloff cache show` and the runner E2E harness so the human-readable
+// view of a record is produced from a single set of options.
+func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
+	opts := protojson.MarshalOptions{
+		Multiline:       true,
+		Indent:          "  ",
+		UseProtoNames:   true,
+		EmitUnpopulated: false,
+	}
+	return opts.Marshal(rec)
 }

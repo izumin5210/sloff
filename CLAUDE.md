@@ -40,6 +40,8 @@ When adding E2E tests, create a dedicated fixture directory per test case under 
 - Use Conventional Commits for titles: `<type>(<scope>): <description>`.
 - PR descriptions must include:
     - `Why`: reason for the change.
-    - `Summary`: short overview of what changed.
+    - `What`: outline of the change plus the important / watch-out points. Do not exhaustively list every file or implementation detail — the diff already shows them.
+- Optional `Notes for reviewers` only when there is something the diff does not convey (e.g. generated files, follow-up work). Keep it brief.
+- Do not add a `Test plan` section.
 - If `Why` is unknown, ask the user before finalizing the PR description.
 - Prose (PR bodies, comments, docs) must add what the diff / code does not convey. If a sentence only narrates what the artifact already shows, delete it.

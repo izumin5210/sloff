@@ -462,10 +462,13 @@ func snapshotOTELEnv() map[string]any {
 	return snap
 }
 
-// TestSetupTracing_DisabledDoesNotClobberGlobal preserves the codex-flagged
-// invariant: a disabled sloff invocation must leave a host-configured global
-// TracerProvider in place.
-func TestSetupTracing_DisabledDoesNotClobberGlobal(t *testing.T) {
+// TestSetupTracing_PassiveDisableDoesNotClobberGlobal preserves the
+// codex-flagged invariant: a sloff invocation with no tracing env at all
+// (passive disable) must leave a host-configured global TracerProvider in
+// place. This is distinct from explicit disable (SLOFF_OTEL_SDK_DISABLED=true
+// or SLOFF_OTEL_TRACES_EXPORTER=none) which intentionally swaps in noop —
+// see TestSetupTracing_ExplicitDisableInstallsTransientNoop.
+func TestSetupTracing_PassiveDisableDoesNotClobberGlobal(t *testing.T) {
 	clearOTelEnv(t)
 	prev := otel.GetTracerProvider()
 	ctx := context.Background()
@@ -477,7 +480,57 @@ func TestSetupTracing_DisabledDoesNotClobberGlobal(t *testing.T) {
 	t.Cleanup(func() { _ = shutdown(ctx) })
 
 	if got := otel.GetTracerProvider(); got != prev {
-		t.Fatal("disabled setupTracing replaced global TracerProvider; want unchanged")
+		t.Fatal("passive-disabled setupTracing replaced global TracerProvider; want unchanged")
+	}
+}
+
+// TestSetupTracing_ExplicitDisableInstallsTransientNoop covers the case codex
+// flagged: when the user explicitly tells sloff to be silent
+// (OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none, with or without the
+// SLOFF_ prefix), an in-process host's TracerProvider must NOT keep receiving
+// sloff spans. setupTracing installs noop for the run and restores the prev
+// provider on shutdown so the host's instrumentation resumes after sloff exits.
+func TestSetupTracing_ExplicitDisableInstallsTransientNoop(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "OTEL_SDK_DISABLED=true", env: map[string]string{"OTEL_SDK_DISABLED": "true"}},
+		{name: "OTEL_TRACES_EXPORTER=none", env: map[string]string{"OTEL_TRACES_EXPORTER": "none"}},
+		{name: "SLOFF_OTEL_SDK_DISABLED=true silences sloff while host has its own TP", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://host-collector:4318",
+			"SLOFF_OTEL_SDK_DISABLED":     "true",
+		}},
+		{name: "SLOFF_OTEL_TRACES_EXPORTER=none silences sloff", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://host-collector:4318",
+			"SLOFF_OTEL_TRACES_EXPORTER":  "none",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearOTelEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			prev := otel.GetTracerProvider()
+			ctx := context.Background()
+
+			shutdown, err := setupTracing(ctx)
+			if err != nil {
+				t.Fatalf("setupTracing err = %v", err)
+			}
+			if got := otel.GetTracerProvider(); got == prev {
+				t.Fatal("explicit-disable setupTracing did not swap in a noop provider; sloff spans would still flow through host TP")
+			}
+
+			if err := shutdown(ctx); err != nil {
+				t.Fatalf("shutdown err = %v", err)
+			}
+			if got := otel.GetTracerProvider(); got != prev {
+				t.Fatal("post-shutdown TracerProvider not restored to caller's prior value")
+			}
+		})
 	}
 }
 

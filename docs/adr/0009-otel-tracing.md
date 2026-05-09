@@ -30,7 +30,19 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 
 ### D2. 環境変数で auto-detect する ( CLI フラグ追加なし)
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 未設定なら **global provider をそのまま** にする ( `setupTracing` が disabled パスで何もしない、 SDK もエクスポーターも組まない)。 in-process な host が既に独自 TracerProvider を設定済みなら、 sloff の span はその host の provider を経由して host のバックエンドに届く ( 「 disable は exporter 設定をしない」 という意味であって、 「 sloff の spans を絶対に送らない」 とは扱わない)。
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_TRACES_EXPORTER` のいずれかが set されていれば SDK を初期化する。 disable / enable の判定は以下 3 状態:
+
+| 状態 | env signal | 挙動 |
+|---|---|---|
+| **explicit disable** | `OTEL_SDK_DISABLED=true` または `OTEL_TRACES_EXPORTER=none` ( `SLOFF_OTEL_*` 経由含む) | **noop TracerProvider を一時 install** し、 shutdown で prev に restore。 in-process な host が既に provider を入れていても、 sloff の run 中は sloff の span を出さない ( user-explicit な silence 要求を honor)。 |
+| **passive disable** | 上記 enable signal も explicit disable signal も無し | global provider を **触らない**。 host の provider があるなら sloff の span はそこに流れる ( user は silence を要求していない)。 |
+| **enabled** | enable signal あり、 explicit disable signal 無し | sloff の TracerProvider を install、 SDK 構築、 shutdown で prev に restore。 |
+
+理由 ( explicit / passive を分ける根拠) :
+
+- in-process embedding で、 host が事前に provider を入れている状態を考える
+- 「 sloff だけ silence したい」 ( SLOFF_OTEL_SDK_DISABLED=true) という user-explicit な要求は、 noop 一時 install で sloff の trace 経路 ( cmdTracer / runner.tracer) を全部塞いで実現する。 副作用として host 自身の lazy `otel.Tracer()` も sloff の run 中は noop を返すが、 user が silence を選んだのでこれは仕様
+- 一方、 env を何も設定していない passive な状況で host の provider を勝手に塞ぐのは「 sloff が host のトレーシングを壊した」 と受け取られる動作になるので、 こちらは触らない
 
 理由:
 
@@ -136,7 +148,8 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 - shutdown は `context.Background()` ベースの短い deadline を持たせる ( 親 ctx が cancel された後でも flush が走るようにするため)。
 - **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻す。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。
 - **env は一切 mutate しない** ( D2' / D3 / D4 参照)。 SLOFF_ override は effectiveEnv → options で SDK に渡るので、 `os.Setenv` を使わず process env は不変。 結果として shutdown で env restore する必要も無い。
-- **disabled パスは global provider にも env にも一切触らない**。 host の provider をそのまま尊重し、 shutdown は no-op で良い。
+- **explicit disable パスは prev provider を snapshot して noop に置換、 shutdown で restore** ( D2 参照)。 user が明示的に silence を要求した場合は host の provider があってもそれを一時的に塞ぐ。 shutdown で必ず prev に戻すので、 sloff の run 後は host の instrumentation が再開する。
+- **passive disable パスは global provider にも env にも一切触らない**。 host の provider をそのまま尊重し、 shutdown は no-op で良い。
 
 ### D7. Propagator は TraceContext + Baggage のみ
 

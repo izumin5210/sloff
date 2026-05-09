@@ -20,6 +20,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // cmdTracer is the package-level Tracer for cmd/sloff. otel.Tracer is wired to
@@ -92,23 +93,34 @@ func firstNonEmpty(keys ...string) string {
 	return ""
 }
 
-// envOTelEnabled reports whether the user has expressed intent to export traces.
-// All reads go through effectiveEnv so SLOFF_-prefix overrides participate
-// without any process-env mutation.
+// envOTelDisabledExplicitly reports whether the user has *explicitly* asked
+// sloff to be silent (as opposed to merely not setting any export env). This
+// distinction matters in in-process embedding scenarios:
 //
-// Disable signals win over enable signals so a SLOFF_-targeted opt-out can
-// silence sloff even when the surrounding shell sets a generic OTLP endpoint:
-//
-//   - OTEL_SDK_DISABLED=true forces disabled
-//   - OTEL_TRACES_EXPORTER=none forces disabled
-//
-// Otherwise, any of the OTLP endpoint vars or a non-"none" OTEL_TRACES_EXPORTER
-// being set to a non-empty value enables tracing.
-func envOTelEnabled() bool {
+//   - Passive disable (no env at all): leave the host's global provider
+//     alone so sloff's spans opportunistically flow through whatever the
+//     host has configured. The user did not ask for silence.
+//   - Explicit disable (OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none,
+//     possibly via SLOFF_OTEL_*): the user does want silence. setupTracing
+//     installs noop transiently so even a host-installed provider stops
+//     receiving sloff spans for the duration of the run, and restores the
+//     prev provider on shutdown.
+func envOTelDisabledExplicitly() bool {
 	if strings.EqualFold(effectiveEnv("OTEL_SDK_DISABLED"), "true") {
-		return false
+		return true
 	}
 	if strings.EqualFold(effectiveEnv("OTEL_TRACES_EXPORTER"), "none") {
+		return true
+	}
+	return false
+}
+
+// envOTelEnabled reports whether the user has expressed intent to export traces.
+// All reads go through effectiveEnv so SLOFF_-prefix overrides participate
+// without any process-env mutation. Explicit disable signals (see
+// envOTelDisabledExplicitly) always win.
+func envOTelEnabled() bool {
+	if envOTelDisabledExplicitly() {
 		return false
 	}
 	for _, k := range []string{
@@ -308,11 +320,18 @@ func grpcSpanExporterOpts() []otlptracegrpc.Option {
 	return opts
 }
 
-// setupTracing wires the global TracerProvider when env signals export intent.
+// setupTracing wires the global TracerProvider based on env signals.
 //
-// **Disabled path**: leaves the global provider untouched. In-process hosts
-// that already configured OpenTelemetry keep their tracer wiring, and sloff's
-// runner spans flow through whatever the host has set up.
+// **Explicit disable path** (OTEL_SDK_DISABLED=true / OTEL_TRACES_EXPORTER=none,
+// possibly via SLOFF_OTEL_*): the user has explicitly asked for sloff to be
+// silent. Install noop for the run and restore the prev provider on shutdown
+// so a host-installed TracerProvider stops receiving sloff spans during sloff's
+// run but resumes immediately after.
+//
+// **Passive disable path** (no tracing env at all): leave the global provider
+// untouched. In-process hosts that already configured OpenTelemetry keep their
+// tracer wiring, and sloff's runner spans flow through whatever the host has
+// set up. The user did not ask for silence, so we do not impose it.
 //
 // **Enabled path**: builds the Resource and SpanExporter from effective env
 // (`SLOFF_OTEL_*` overrides win over `OTEL_*` via effectiveEnv) using explicit
@@ -326,6 +345,20 @@ func grpcSpanExporterOpts() []otlptracegrpc.Option {
 //
 // The returned shutdown is always non-nil and safe to call once.
 func setupTracing(ctx context.Context) (func(context.Context) error, error) {
+	if envOTelDisabledExplicitly() {
+		// User-explicit silence: swap in noop transiently so cmdTracer /
+		// runner.tracer dispatch via the wrapper land on noop for the run.
+		// Restore the prev provider on shutdown so the host's instrumentation
+		// (if any) resumes after sloff exits. Without this, an in-process
+		// host with its own TracerProvider would keep receiving sloff spans
+		// despite the user explicitly asking for silence.
+		prevProvider := otel.GetTracerProvider()
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		return func(context.Context) error {
+			otel.SetTracerProvider(prevProvider)
+			return nil
+		}, nil
+	}
 	if !envOTelEnabled() {
 		return func(context.Context) error { return nil }, nil
 	}

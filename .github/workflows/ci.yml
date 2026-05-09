@@ -56,7 +56,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
-      - run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+      - run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
       - name: Strip generated proto code from coverage profile
         run: |
           grep -v '^github.com/izumin5210/sloff/internal/proto/' coverage.out > coverage.filtered

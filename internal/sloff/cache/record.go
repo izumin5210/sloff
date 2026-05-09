@@ -71,8 +71,17 @@ func validateSchemaVersion(v cachev1.SchemaVersion) error {
 
 // Sort normalises the order of repeated fields whose schema requires
 // deterministic ordering (output.files by path, input.resolved_versions by
-// name). Marshal calls this internally; callers comparing two records can
-// invoke it explicitly to make sure both sides are in canonical order.
+// name → version → source). Marshal calls this internally; callers
+// comparing two records can invoke it explicitly to make sure both sides
+// are in canonical order.
+//
+// resolved_versions sort uses a composite key because ResolvedVersion.Name
+// is not guaranteed unique: the script resolver derives Name from
+// filepath.Base(exec[0]), so two distinct tools whose exec heads share a
+// basename (e.g. ["go", "version"] vs ["go", "tool", "compile", "-V"])
+// both produce Name == "go". With a name-only sort the relative order of
+// such entries would depend on insertion order, breaking byte stability
+// for the same logical input set.
 func Sort(rec *cachev1.Record) {
 	if out := rec.GetOutput(); out != nil {
 		sort.SliceStable(out.Files, func(i, j int) bool {
@@ -81,7 +90,14 @@ func Sort(rec *cachev1.Record) {
 	}
 	if in := rec.GetInput(); in != nil {
 		sort.SliceStable(in.ResolvedVersions, func(i, j int) bool {
-			return in.ResolvedVersions[i].GetName() < in.ResolvedVersions[j].GetName()
+			a, b := in.ResolvedVersions[i], in.ResolvedVersions[j]
+			if a.GetName() != b.GetName() {
+				return a.GetName() < b.GetName()
+			}
+			if a.GetVersion() != b.GetVersion() {
+				return a.GetVersion() < b.GetVersion()
+			}
+			return a.GetSource() < b.GetSource()
 		})
 	}
 }

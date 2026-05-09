@@ -77,3 +77,20 @@ func writePB(t *testing.T, dir, name string, rec *cachev1.Record) string {
 	}
 	return p
 }
+
+// TestRunCacheShow_RejectsCorruptRecord guards that `sloff cache show`
+// surfaces corruption rather than printing `{}` for a zero-byte file.
+// readRecord goes through cache.Unmarshal which validates schema_version,
+// so empty / SCHEMA_VERSION_UNSPECIFIED records fail loudly here as well
+// as on the storage path.
+func TestRunCacheShow_RejectsCorruptRecord(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.pb")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCacheShow(&out, p); err == nil {
+		t.Errorf("expected error for empty record file, got output: %q", out.String())
+	}
+}

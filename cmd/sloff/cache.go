@@ -121,8 +121,8 @@ func readRecord(path string) (*cachev1.Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	rec := &cachev1.Record{}
-	if err := proto.Unmarshal(b, rec); err != nil {
+	rec, err := cache.Unmarshal(b)
+	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	return rec, nil

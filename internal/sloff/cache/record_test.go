@@ -161,3 +161,29 @@ func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
 		t.Error("Unmarshal: expected error for unknown schema version")
 	}
 }
+
+// TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder guards against
+// name-only sort ambiguity. ResolvedVersion.Name is not guaranteed unique
+// (the script resolver derives it from filepath.Base of exec[0]) so two
+// distinct tools can share a Name. Sort must produce the same ordering
+// regardless of how the entries were appended, otherwise byte stability
+// of the marshaled record depends on insertion order.
+func TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder(t *testing.T) {
+	// Same set of entries, different insertion orders. After Sort both
+	// records must compare equal.
+	entries := []*cachev1.ResolvedVersion{
+		{Name: "go", Version: "script:go@compile1.x", Source: "script:go-build"},
+		{Name: "go", Version: "script:go@go1.26.0", Source: "script:go-runtime"},
+		{Name: "buf", Version: "script:buf@1.30.0", Source: "script:buf"},
+	}
+
+	forward := &cachev1.Record{Input: &cachev1.Input{ResolvedVersions: append([]*cachev1.ResolvedVersion(nil), entries...)}}
+	reverse := &cachev1.Record{Input: &cachev1.Input{ResolvedVersions: []*cachev1.ResolvedVersion{entries[2], entries[1], entries[0]}}}
+
+	cache.Sort(forward)
+	cache.Sort(reverse)
+
+	if diff := cmp.Diff(forward, reverse, protocmp.Transform()); diff != "" {
+		t.Errorf("Sort must canonicalise regardless of insertion order:\n%s", diff)
+	}
+}

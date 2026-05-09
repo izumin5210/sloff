@@ -23,5 +23,6 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	cmd.AddCommand(newRunCmd())
+	cmd.AddCommand(newGraphCmd())
 	return cmd
 }

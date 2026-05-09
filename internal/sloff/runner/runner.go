@@ -109,14 +109,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	// (e.g. a pnpm-local entry for a workspace package missing from the
 	// current checkout); resolving them eagerly would block unrelated tasks
 	// that never use those tools.
-	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
 		return err
 	}
-	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
-		return err
-	}
-	referencedToolNames := referencedTools(r.opts.Specs)
 
 	// Preflight runs only the checkers whose resolver name matches a tool the
 	// current spec set actually references — same scoping discipline as
@@ -150,6 +146,46 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Plan resolves all discovered specs into a topologically-ordered task list
+// without running preflight or executing any cmd. It is the planning core
+// shared with `sloff graph` (and the future `sloff run --explain`): same
+// registry / resolver path as Run, so callers observe the exact set of
+// inputs / outputs the runner would orchestrate.
+//
+// Preflight is intentionally skipped here. Debugging tools that read the
+// depgraph must remain usable when the install state is drifted, since
+// drift is one of the conditions users reach for the graph to investigate.
+func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
+	registry, referencedToolNames, err := r.prepareRegistry()
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := r.resolveReferencedTools(ctx, registry, referencedToolNames)
+	if err != nil {
+		return nil, err
+	}
+	tasks, err := r.collectTasks(resolved)
+	if err != nil {
+		return nil, err
+	}
+	return depgraph.Build(tasks)
+}
+
+// prepareRegistry builds the repo-wide tool registry, validates command tool
+// references against it, and collects the deduplicated set of names some
+// command actually pulls in. Both Run and Plan need this same triple, so the
+// helper keeps the two flows from diverging on the validation rules.
+func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
+	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return nil, nil, err
+	}
+	return registry, referencedTools(r.opts.Specs), nil
 }
 
 // runPreflight invokes only the registered Checkers whose names match a

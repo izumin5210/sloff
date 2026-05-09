@@ -4,11 +4,9 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   check:
-    if: ${{ !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -40,7 +38,6 @@ jobs:
       run: git diff --exit-code
 
   test:
-    if: ${{ !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,6 +74,7 @@ jobs:
         with:
           version: ${{ steps.buf-version.outputs.version }}
           push: false
+          breaking: ${{ !contains(github.event.pull_request.title, '!:') }}
 
   status-check:
     runs-on: ubuntu-latest

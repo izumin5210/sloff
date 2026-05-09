@@ -10,7 +10,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	sloffv1 "github.com/izumin5210/sloff/internal/proto/sloff/v1"
+	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
 func newCacheCmd() *cobra.Command {
@@ -109,19 +109,19 @@ func runCacheDiff(w io.Writer, pathA, pathB string) error {
 // stdout without a duplicate message on stderr.
 var errCacheRecordsDiffer = &exitCodeError{code: 1}
 
-func readRecord(path string) (*sloffv1.CacheRecord, error) {
+func readRecord(path string) (*cache.Record, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	rec := &sloffv1.CacheRecord{}
+	rec := &cache.Record{}
 	if err := proto.Unmarshal(b, rec); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	return rec, nil
 }
 
-func marshalRecordJSON(rec *sloffv1.CacheRecord) ([]byte, error) {
+func marshalRecordJSON(rec *cache.Record) ([]byte, error) {
 	opts := protojson.MarshalOptions{
 		Multiline:       true,
 		Indent:          "  ",

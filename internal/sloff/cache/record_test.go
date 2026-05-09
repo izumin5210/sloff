@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/testing/protocmp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sloffv1 "github.com/izumin5210/sloff/internal/proto/sloff/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
@@ -13,26 +15,26 @@ import (
 
 func sampleRecord() *cache.Record {
 	return &cache.Record{
-		GeneratedAt:   time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC),
+		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC)),
 		SchemaVersion: cache.SchemaVersion,
-		Spec: cache.RecordSpec{
+		Spec: &cache.Spec{
 			Cmd:    "buf generate --template buf.gen.yaml",
 			Dir:    "path/to/spec",
-			TaskID: "protoc-gen-go",
+			TaskId: "protoc-gen-go",
 		},
-		Input: cache.Input{
+		Input: &cache.Input{
 			Hash:                 "3f9a1c",
 			FilesHash:            "a1b2",
 			CmdHash:              "c3d4",
 			ResolvedVersionsHash: "e5f6",
-			ResolvedVersions: cache.ResolvedVersions{
+			ResolvedVersions: []*cache.ResolvedVersion{
 				{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
 				{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
 			},
 		},
-		Output: cache.Output{
+		Output: &cache.Output{
 			Hash: "7e2b",
-			Files: cache.FileHashes{
+			Files: []*cache.FileEntry{
 				{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
 				{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
 			},
@@ -45,7 +47,7 @@ func sampleRecord() *cache.Record {
 // Unmarshal must produce a path-ascending sequence in output.files so the
 // hash output is reproducible across writers.
 func TestMarshalSortsOutputFilesByPath(t *testing.T) {
-	b, err := sampleRecord().Marshal()
+	b, err := cache.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestMarshalSortsOutputFilesByPath(t *testing.T) {
 // the proto wire for input.resolved_versions, which absorbs the previous
 // generator_version_snapshot field per ADR-0009.
 func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
-	b, err := sampleRecord().Marshal()
+	b, err := cache.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
 
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	want := sampleRecord()
-	b, err := want.Marshal()
+	b, err := cache.Marshal(want)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -95,22 +97,15 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	// Output.Files / Input.ResolvedVersions are sorted on Marshal, so we expect sorted form back.
-	want.Output.Files = cache.FileHashes{
-		{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
-		{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
-	}
-	want.Input.ResolvedVersions = cache.ResolvedVersions{
-		{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
-		{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
-	}
-	if diff := cmp.Diff(want, got); diff != "" {
+	// Marshal sorts repeated fields in place; the want fixture now reflects
+	// the canonical order so cmp.Diff sees equivalent records.
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestMarshalIsByteStable(t *testing.T) {
-	b1, err := sampleRecord().Marshal()
+	b1, err := cache.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -118,7 +113,7 @@ func TestMarshalIsByteStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	b2, err := rec.Marshal()
+	b2, err := cache.Marshal(rec)
 	if err != nil {
 		t.Fatalf("Marshal #2: %v", err)
 	}
@@ -127,14 +122,14 @@ func TestMarshalIsByteStable(t *testing.T) {
 	}
 }
 
-// TestMarshalRejectsUnknownSchemaVersion guards that ad-hoc integer values
-// outside the proto enum cannot leak into a cache file. ADR-0009 §"schema_version
-// 移行戦略" treats unknown versions as runtime errors rather than silently
-// encoded best-effort data.
+// TestMarshalRejectsUnknownSchemaVersion guards that ad-hoc enum values
+// outside the proto enum registry cannot leak into a cache file. ADR-0009 §
+// "schema_version 移行戦略" treats unknown versions as runtime errors rather
+// than silently encoded best-effort data.
 func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	rec := sampleRecord()
-	rec.SchemaVersion = 999
-	if _, err := rec.Marshal(); err == nil {
+	rec.SchemaVersion = sloffv1.CacheRecord_SchemaVersion(999)
+	if _, err := cache.Marshal(rec); err == nil {
 		t.Fatal("Marshal: expected error for unknown schema version, got nil")
 	}
 }

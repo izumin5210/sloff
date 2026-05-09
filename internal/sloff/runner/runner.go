@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
@@ -670,9 +671,9 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	}
 	if hadExisting {
-		paths := existing.Output.Files.Paths()
+		paths := cache.FilePaths(existing.GetOutput().GetFiles())
 		current, hashErr := hash.Files(r.opts.RepoRoot, paths)
-		if hashErr == nil && current == existing.Output.Hash {
+		if hashErr == nil && current == existing.GetOutput().GetHash() {
 			if err := r.recordProducedPaths(taskLabel, paths); err != nil {
 				return err
 			}
@@ -708,21 +709,21 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	}
 
 	newRec := &cache.Record{
-		GeneratedAt:   r.opts.Clock(),
+		GeneratedAt:   timestamppb.New(r.opts.Clock()),
 		SchemaVersion: cache.SchemaVersion,
-		Spec: cache.RecordSpec{
+		Spec: &cache.Spec{
 			Cmd:    strings.Join(info.command.Cmd, " "),
 			Dir:    info.specRelpath,
-			TaskID: info.command.Name,
+			TaskId: info.command.Name,
 		},
-		Input: cache.Input{
+		Input: &cache.Input{
 			Hash:                 inputHash,
 			FilesHash:            filesHash,
 			CmdHash:              cmdHash,
 			ResolvedVersionsHash: resolvedVersionsHash,
 			ResolvedVersions:     resolvedVersionsFromTool(versions),
 		},
-		Output: cache.Output{
+		Output: &cache.Output{
 			Hash:  outputHash,
 			Files: files,
 		},
@@ -733,7 +734,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	// the existing entry is still semantically correct. Skip the rewrite so
 	// proto runtime byte-level drift never reaches git, and informational fields
 	// (generated_at, resolved_versions[*].source) keep their first-observed value.
-	if hadExisting && outputsEquivalent(existing.Output, newRec.Output) {
+	if hadExisting && outputsEquivalent(existing.GetOutput(), newRec.GetOutput()) {
 		return nil
 	}
 
@@ -747,19 +748,19 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 // produced file set. Hash and per-entry (path, hash) tuples must match; field
 // order is normalised by sorting because callers may build Output before the
 // proto Marshal helper sorts FileEntries.
-func outputsEquivalent(a, b cache.Output) bool {
-	if a.Hash != b.Hash {
+func outputsEquivalent(a, b *cache.Output) bool {
+	if a.GetHash() != b.GetHash() {
 		return false
 	}
-	if len(a.Files) != len(b.Files) {
+	if len(a.GetFiles()) != len(b.GetFiles()) {
 		return false
 	}
-	left := append(cache.FileHashes(nil), a.Files...)
-	right := append(cache.FileHashes(nil), b.Files...)
-	sort.Slice(left, func(i, j int) bool { return left[i].Path < left[j].Path })
-	sort.Slice(right, func(i, j int) bool { return right[i].Path < right[j].Path })
+	left := append([]*cache.FileEntry(nil), a.GetFiles()...)
+	right := append([]*cache.FileEntry(nil), b.GetFiles()...)
+	sort.Slice(left, func(i, j int) bool { return left[i].GetPath() < left[j].GetPath() })
+	sort.Slice(right, func(i, j int) bool { return right[i].GetPath() < right[j].GetPath() })
 	for i := range left {
-		if left[i] != right[i] {
+		if left[i].GetPath() != right[i].GetPath() || left[i].GetHash() != right[i].GetHash() {
 			return false
 		}
 	}
@@ -848,25 +849,25 @@ func versionStrings(versions []toolresolver.ResolvedVersion) []string {
 	return out
 }
 
-func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) cache.ResolvedVersions {
+func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*cache.ResolvedVersion {
 	if len(versions) == 0 {
 		return nil
 	}
-	out := make(cache.ResolvedVersions, len(versions))
+	out := make([]*cache.ResolvedVersion, len(versions))
 	for i, v := range versions {
-		out[i] = cache.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
+		out[i] = &cache.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
 	}
 	return out
 }
 
-func perFileHashes(root string, paths []string) (cache.FileHashes, error) {
-	out := make(cache.FileHashes, 0, len(paths))
+func perFileHashes(root string, paths []string) ([]*cache.FileEntry, error) {
+	out := make([]*cache.FileEntry, 0, len(paths))
 	for _, p := range paths {
 		h, err := hash.File(root, p)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, cache.FileHash{Path: p, Hash: h})
+		out = append(out, &cache.FileEntry{Path: p, Hash: h})
 	}
 	return out, nil
 }

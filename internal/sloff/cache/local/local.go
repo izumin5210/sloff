@@ -62,7 +62,7 @@ func (s *Storage) Save(_ context.Context, key cache.Key, record *cache.Record) e
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := record.Marshal()
+	b, err := cache.Marshal(record)
 	if err != nil {
 		return err
 	}

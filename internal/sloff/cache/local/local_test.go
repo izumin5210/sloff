@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/cache/local"
@@ -15,14 +17,14 @@ import (
 
 func newRecord(taskID string) *cache.Record {
 	return &cache.Record{
-		GeneratedAt:   time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC),
-		Input:         cache.Input{Hash: "deadbeef"},
-		Output:        cache.Output{Hash: "cafebabe"},
+		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)),
+		Input:         &cache.Input{Hash: "deadbeef"},
+		Output:        &cache.Output{Hash: "cafebabe"},
 		SchemaVersion: cache.SchemaVersion,
-		Spec: cache.RecordSpec{
+		Spec: &cache.Spec{
 			Cmd:    "echo hi",
 			Dir:    "path/to/spec",
-			TaskID: taskID,
+			TaskId: taskID,
 		},
 	}
 }
@@ -45,7 +47,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Load: expected hit")
 	}
-	if diff := cmp.Diff(rec, got); diff != "" {
+	if diff := cmp.Diff(rec, got, protocmp.Transform()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -161,11 +161,11 @@ importers:
 	}
 }
 
-// TestResolver_EmitsTransitiveExternalsAsToolVersions covers the tools_hash
+// TestResolver_EmitsTransitiveExternalsAsResolvedVersions covers the resolved_versions_hash
 // side: every external dep reachable from the workspace package via the
 // lockfile graph (including those reached only through workspace links)
 // surfaces as `pnpm-deps:<pkg>@<ver>`.
-func TestResolver_EmitsTransitiveExternalsAsToolVersions(t *testing.T) {
+func TestResolver_EmitsTransitiveExternalsAsResolvedVersions(t *testing.T) {
 	root := setupWorkspace(
 		t,
 		[]importerSpec{

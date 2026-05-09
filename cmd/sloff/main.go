@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -9,11 +10,23 @@ import (
 )
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	err := newRootCmd().Execute()
+	if err == nil {
+		return
 	}
+	if ec, ok := errors.AsType[*exitCodeError](err); ok {
+		os.Exit(ec.code)
+	}
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }
+
+// exitCodeError carries a custom process exit code without an accompanying
+// stderr message. Subcommands that own their stdout output (e.g. `cache diff`)
+// return this so main can set the exit code without printing a generic error.
+type exitCodeError struct{ code int }
+
+func (e *exitCodeError) Error() string { return fmt.Sprintf("exit code %d", e.code) }
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -24,5 +37,6 @@ func newRootCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newGraphCmd())
+	cmd.AddCommand(newCacheCmd())
 	return cmd
 }

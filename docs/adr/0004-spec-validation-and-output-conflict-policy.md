@@ -6,7 +6,7 @@
 
 Codex のアドバサリアルレビューで以下 3 点の方針判断を求められた:
 
-1. **`tools:` 未宣言 spec の扱い** — tools_hash が空のまま cache key に混ざると、 generator binary upgrade (例: `buf` 1.x → 2.x) で cache invalidate されない
+1. **`tools:` 未宣言 spec の扱い** — resolved_versions_hash が空のまま cache key に混ざると、 generator binary upgrade (例: `buf` 1.x → 2.x) で cache invalidate されない
 2. **output pattern が 0 ファイルにマッチした場合の扱い** — generator が exit 0 で何も書かなかったケースをどう拾うか
 3. **同一 output path を複数 task が produce する spec の検出方法** — 静的 (実行前) か事後 (実行時) か
 
@@ -36,7 +36,7 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 ### D1: `tools:` 必須化
 
 - sloff はコード生成 orchestrator であり、 何らかの generator binary を呼び出すことが前提。 spec に対応する tool が **存在しない** ケースは構造的に想定しづらい
-- tools_hash が空のまま cache key に混ざると、 binary 更新が cache invalidate に効かず、 stale な generation 結果が serve され続ける。 これは ADR-0002 で確定した output-comparison の前提を破る
+- resolved_versions_hash が空のまま cache key に混ざると、 binary 更新が cache invalidate に効かず、 stale な generation 結果が serve され続ける。 これは ADR-0002 で確定した output-comparison の前提を破る
 - 「警告だけ出して cache を保存する」フォールバック経路は、 安全機構として機能しない (record はそのまま残り、 次回 cache hit する) ため撤去
 - pre-1.0 でユーザー spec の互換性ブレイクは許容範囲
 

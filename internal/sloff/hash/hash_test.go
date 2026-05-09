@@ -99,19 +99,19 @@ func TestCmdHash_Deterministic(t *testing.T) {
 	}
 }
 
-func TestToolsHash_SortedInternally(t *testing.T) {
-	a := hash.Tools([]string{"aqua:bufbuild/buf@v1.30.0", "go-external:google.golang.org/protobuf@v1.34.2"})
-	b := hash.Tools([]string{"go-external:google.golang.org/protobuf@v1.34.2", "aqua:bufbuild/buf@v1.30.0"})
+func TestResolvedVersionsHash_SortedInternally(t *testing.T) {
+	a := hash.ResolvedVersions([]string{"aqua:bufbuild/buf@v1.30.0", "go-external:google.golang.org/protobuf@v1.34.2"})
+	b := hash.ResolvedVersions([]string{"go-external:google.golang.org/protobuf@v1.34.2", "aqua:bufbuild/buf@v1.30.0"})
 	if a != b {
-		t.Error("Tools must sort versions internally")
+		t.Error("ResolvedVersions must sort versions internally")
 	}
 }
 
-func TestToolsHash_EmptyIsStable(t *testing.T) {
-	a := hash.Tools(nil)
-	b := hash.Tools([]string{})
+func TestResolvedVersionsHash_EmptyIsStable(t *testing.T) {
+	a := hash.ResolvedVersions(nil)
+	b := hash.ResolvedVersions([]string{})
 	if a != b {
-		t.Error("Tools must produce same hash for nil and empty slice")
+		t.Error("ResolvedVersions must produce same hash for nil and empty slice")
 	}
 	want := hex.EncodeToString(sha256.New().Sum(nil))
 	if a != want {
@@ -121,9 +121,9 @@ func TestToolsHash_EmptyIsStable(t *testing.T) {
 
 func TestInputHash_CombinesAllThree(t *testing.T) {
 	a := hash.Input("aaa", "bbb", "ccc")
-	b := hash.Input("aaa", "bbb", "ccd") // tools differs
+	b := hash.Input("aaa", "bbb", "ccd") // resolved versions differ
 	if a == b {
-		t.Error("Input must depend on tools_hash")
+		t.Error("Input must depend on resolved_versions_hash")
 	}
 	c := hash.Input("aaa", "bbc", "ccc") // cmd differs
 	if a == c {

@@ -56,7 +56,7 @@ snapshots:
 // TestCollectExternals_SkipsWorkspaceLinks ensures workspace:* (recorded as
 // "link:..." or "file:..." in the lockfile) are NOT emitted as externals.
 // Their hashing is the esbuild lister's job; double-counting them here would
-// inflate tools_hash with workspace identifiers that already feed files_hash
+// inflate resolved_versions_hash with workspace identifiers that already feed files_hash
 // via extra inputs.
 func TestCollectExternals_SkipsWorkspaceLinks(t *testing.T) {
 	root := t.TempDir()
@@ -126,7 +126,7 @@ snapshots:
 
 // TestCollectExternals_DedupesAcrossPaths exercises diamond dependencies:
 // two paths can reach the same external. The walk must emit each (name,
-// version) exactly once so tools_hash stays deterministic.
+// version) exactly once so resolved_versions_hash stays deterministic.
 func TestCollectExternals_DedupesAcrossPaths(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
@@ -311,7 +311,7 @@ importers:
 // TestCollectExternals_UnknownImporterFails surfaces user errors loudly:
 // asking for externals of a workspace package that the lockfile doesn't list
 // must error rather than silently return empty (which would produce a
-// misleadingly-stable tools_hash).
+// misleadingly-stable resolved_versions_hash).
 func TestCollectExternals_UnknownImporterFails(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'

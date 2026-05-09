@@ -77,7 +77,7 @@ func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 	// Deviation from architecture.md: we keep the spec dir hierarchy verbatim instead of
 	// flattening with "_". A "_" substitution would lose information on List for spec
 	// dirs whose names contain underscores.
-	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "abc123.yml")
+	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "abc123.pb")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("expected record at %s, got err=%v", want, err)
 	}
@@ -164,7 +164,7 @@ func TestList_OlderThan(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Backdate the on-disk mtime to something definitively older.
-	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "old.yml")
+	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "old.pb")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldFile, past, past); err != nil {
 		t.Fatal(err)

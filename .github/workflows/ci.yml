@@ -21,6 +21,12 @@ jobs:
             run: go vet -v ./...
           - name: tidy
             run: go mod tidy
+          - name: proto-generate
+            run: go tool buf generate
+          - name: proto-lint
+            run: go tool buf lint
+          - name: proto-breaking
+            run: go tool buf breaking --against '.git#branch=main'
       fail-fast: false
     permissions:
       contents: read

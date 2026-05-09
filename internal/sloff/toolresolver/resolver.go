@@ -1,7 +1,7 @@
 // Package toolresolver dispatches tool version resolution to per-channel resolvers
 // (script for prebuilt binaries — including external npm / Go OSS packages, see
 // ADR-0007 — and go-local / pnpm-local for internal sources) and produces the
-// OS-neutral logical version strings that feed the cache record's tools_hash
+// OS-neutral logical version strings that feed the cache record's resolved_versions_hash
 // component, plus the ExtraInputs that feed the runner's depgraph derivation.
 package toolresolver
 
@@ -20,7 +20,7 @@ import "context"
 //     has no source contribution (script — the version is captured by
 //     spawning `<bin> --version`) return nil.
 //   - Versions returns OS-neutral logical version entries that feed
-//     tools_hash. Resolvers that only contribute via Inputs (none today, but
+//     resolved_versions_hash. Resolvers that only contribute via Inputs (none today, but
 //     the interface admits it) return nil.
 //
 // Splitting the two contributions makes graph-style consumers honest about
@@ -42,12 +42,12 @@ type Resolver interface {
 	// Inputs returns the ExtraInputs contribution for one declared tool.
 	Inputs(ctx context.Context, specDir string, declared *DeclaredTool) ([]string, error)
 
-	// Versions returns the ToolVersion contribution for one declared tool.
-	Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ToolVersion, error)
+	// Versions returns the ResolvedVersion contribution for one declared tool.
+	Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ResolvedVersion, error)
 }
 
-// ToolVersion is the OS-neutral logical version of a single tool.
-type ToolVersion struct {
+// ResolvedVersion is the OS-neutral logical version of a single tool.
+type ResolvedVersion struct {
 	Name    string // human-friendly identifier, e.g. "buf"
 	Source  string // origin label, e.g. "script:buf"
 	Version string // logical version string, e.g. "script:buf@1.30.0"

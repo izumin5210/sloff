@@ -52,7 +52,7 @@ func TestResolver_VersionsTrimStdoutAsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Versions: %v", err)
 	}
-	want := []toolresolver.ToolVersion{{
+	want := []toolresolver.ResolvedVersion{{
 		Name:    "sh",
 		Source:  "script:sh",
 		Version: "script:sh@v1.0.0",

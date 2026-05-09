@@ -1,108 +1,87 @@
 package cache_test
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 
+	sloffv1 "github.com/izumin5210/sloff/internal/proto/sloff/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 )
 
 func sampleRecord() *cache.Record {
 	return &cache.Record{
-		GeneratedAt: time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC),
-		GeneratorVersionSnapshot: cache.GeneratorVersions{
-			{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
-			{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
-		},
-		Input: cache.Input{
-			Components: cache.InputComponents{
-				CmdHash:   "c3d4",
-				FilesHash: "a1b2",
-				ToolsHash: "e5f6",
-			},
-			Hash: "3f9a1c",
-		},
-		Output: cache.Output{
-			Files: cache.FileHashes{
-				{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
-				{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
-			},
-			Hash: "7e2b",
-		},
-		SchemaVersion: 1,
+		GeneratedAt:   time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC),
+		SchemaVersion: cache.SchemaVersion,
 		Spec: cache.RecordSpec{
 			Cmd:    "buf generate --template buf.gen.yaml",
 			Dir:    "path/to/spec",
 			TaskID: "protoc-gen-go",
 		},
+		Input: cache.Input{
+			Hash:                 "3f9a1c",
+			FilesHash:            "a1b2",
+			CmdHash:              "c3d4",
+			ResolvedVersionsHash: "e5f6",
+			ResolvedVersions: cache.ResolvedVersions{
+				{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
+				{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
+			},
+		},
+		Output: cache.Output{
+			Hash: "7e2b",
+			Files: cache.FileHashes{
+				{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
+				{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
+			},
+		},
 	}
 }
 
-func TestMarshalEmitsAlphabeticalTopLevelKeys(t *testing.T) {
-	b, err := sampleRecord().Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	want := []string{
-		"generated_at",
-		"generator_version_snapshot",
-		"input",
-		"output",
-		"schema_version",
-		"spec",
-	}
-	got := topLevelKeys(string(b))
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("top-level key order mismatch (-want +got):\n%s\nfull yaml:\n%s", diff, b)
-	}
-}
-
+// TestMarshalSortsOutputFilesByPath guards the path-sorted invariant on the
+// proto wire: even if the in-memory FileHashes were unsorted, Marshal /
+// Unmarshal must produce a path-ascending sequence in output.files so the
+// hash output is reproducible across writers.
 func TestMarshalSortsOutputFilesByPath(t *testing.T) {
 	b, err := sampleRecord().Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	s := string(b)
-	bar := strings.Index(s, "path/to/spec/bar.pb.go")
-	foo := strings.Index(s, "path/to/spec/foo.pb.go")
-	if bar < 0 || foo < 0 {
-		t.Fatalf("expected both file paths in output:\n%s", s)
+	msg := &sloffv1.CacheRecord{}
+	if err := proto.Unmarshal(b, msg); err != nil {
+		t.Fatalf("proto.Unmarshal: %v", err)
 	}
-	if bar > foo {
-		t.Errorf("output.files must be sorted ascending; bar at %d, foo at %d", bar, foo)
+	want := []string{"path/to/spec/bar.pb.go", "path/to/spec/foo.pb.go"}
+	got := make([]string, 0, len(msg.GetOutput().GetFiles()))
+	for _, f := range msg.GetOutput().GetFiles() {
+		got = append(got, f.GetPath())
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("output.files order mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestMarshalSortsGeneratorVersionSnapshotByName(t *testing.T) {
+// TestMarshalSortsResolvedVersionsByName guards the name-sorted invariant on
+// the proto wire for input.resolved_versions, which absorbs the previous
+// generator_version_snapshot field per ADR-0009.
+func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
 	b, err := sampleRecord().Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	s := string(b)
-	bufIdx := strings.Index(s, "name: buf")
-	pgIdx := strings.Index(s, "name: protoc-gen-go")
-	if bufIdx < 0 || pgIdx < 0 {
-		t.Fatalf("expected both names in output:\n%s", s)
+	msg := &sloffv1.CacheRecord{}
+	if err := proto.Unmarshal(b, msg); err != nil {
+		t.Fatalf("proto.Unmarshal: %v", err)
 	}
-	if bufIdx > pgIdx {
-		t.Errorf("generator_version_snapshot must be sorted by name; buf at %d, protoc-gen-go at %d", bufIdx, pgIdx)
+	want := []string{"buf", "protoc-gen-go"}
+	got := make([]string, 0, len(msg.GetInput().GetResolvedVersions()))
+	for _, v := range msg.GetInput().GetResolvedVersions() {
+		got = append(got, v.GetName())
 	}
-}
-
-func TestMarshalEndsWithSingleNewline(t *testing.T) {
-	b, err := sampleRecord().Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if len(b) == 0 || b[len(b)-1] != '\n' {
-		t.Errorf("output must end with LF, got %q", b)
-	}
-	if len(b) >= 2 && b[len(b)-2] == '\n' {
-		t.Errorf("output must end with single LF (no trailing blank line), got %q", b[len(b)-3:])
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("input.resolved_versions order mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -116,12 +95,12 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	// Output.Files / GeneratorVersionSnapshot are sorted on Marshal, so we expect sorted form back.
+	// Output.Files / Input.ResolvedVersions are sorted on Marshal, so we expect sorted form back.
 	want.Output.Files = cache.FileHashes{
 		{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
 		{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
 	}
-	want.GeneratorVersionSnapshot = cache.GeneratorVersions{
+	want.Input.ResolvedVersions = cache.ResolvedVersions{
 		{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
 		{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
 	}
@@ -144,20 +123,18 @@ func TestMarshalIsByteStable(t *testing.T) {
 		t.Fatalf("Marshal #2: %v", err)
 	}
 	if string(b1) != string(b2) {
-		t.Errorf("byte-stable round-trip violated\n--- first ---\n%s\n--- second ---\n%s", b1, b2)
+		t.Errorf("byte-stable round-trip violated:\n--- b1 (%d bytes) ---\n%x\n--- b2 (%d bytes) ---\n%x", len(b1), b1, len(b2), b2)
 	}
 }
 
-// topLevelKeys extracts top-level YAML keys (lines starting at column 0 with `key:`).
-func topLevelKeys(s string) []string {
-	var keys []string
-	for line := range strings.SplitSeq(s, "\n") {
-		if line == "" || line[0] == ' ' || line[0] == '-' || line[0] == '#' {
-			continue
-		}
-		if i := strings.IndexByte(line, ':'); i > 0 {
-			keys = append(keys, line[:i])
-		}
+// TestMarshalRejectsUnknownSchemaVersion guards that ad-hoc integer values
+// outside the proto enum cannot leak into a cache file. ADR-0009 §"schema_version
+// 移行戦略" treats unknown versions as runtime errors rather than silently
+// encoded best-effort data.
+func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
+	rec := sampleRecord()
+	rec.SchemaVersion = 999
+	if _, err := rec.Marshal(); err == nil {
+		t.Fatal("Marshal: expected error for unknown schema version, got nil")
 	}
-	return keys
 }

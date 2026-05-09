@@ -53,7 +53,7 @@ func (r *Resolver) Inputs(_ context.Context, _ string, declared *toolresolver.De
 
 // Versions implements toolresolver.Resolver. declared must be non-nil and
 // must specify Exec.
-func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ResolvedVersion, error) {
 	if err := validateDeclared(declared); err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolr
 	r.mu.Lock()
 	if cached, ok := r.cache[cacheKey]; ok {
 		r.mu.Unlock()
-		return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}, nil
+		return []toolresolver.ResolvedVersion{makeVersion(declared.Exec[0], cached)}, nil
 	}
 	r.mu.Unlock()
 
@@ -80,7 +80,7 @@ func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolr
 	r.cache[cacheKey] = captured
 	r.mu.Unlock()
 
-	return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}, nil
+	return []toolresolver.ResolvedVersion{makeVersion(declared.Exec[0], captured)}, nil
 }
 
 func validateDeclared(declared *toolresolver.DeclaredTool) error {
@@ -126,9 +126,9 @@ func applyExtract(stdout, pattern string) (string, error) {
 	}
 }
 
-func makeVersion(execHead, captured string) toolresolver.ToolVersion {
+func makeVersion(execHead, captured string) toolresolver.ResolvedVersion {
 	bin := filepath.Base(execHead)
-	return toolresolver.ToolVersion{
+	return toolresolver.ResolvedVersion{
 		Name:    bin,
 		Source:  "script:" + bin,
 		Version: "script:" + bin + "@" + captured,

@@ -1,0 +1,6 @@
+F
+speccopy8sh -c cp input.txt output.txt; printf x >> ../marker.txt«
+@73ab60e1d4ef6a1932ff05667e59703559a5084cf1131c711886c9fbcbc7c9fa@7db0309462aef122a4a6f047abcb73ed45561f1af81d32f451d9c70a9f99a604@dcb0855ca12e86fb4241e97582ca1f7cc26a4a98da16bbf12b49f3c3212d6d0c"@de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac*!
+shscript:sh@v1.0.0	script:sh"—
+@da864110e889a925e8f5922dffde448463b0bce285793d8fd3a59c90917e2a42S
+spec/output.txt@2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824*À·çÏ

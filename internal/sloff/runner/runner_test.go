@@ -296,7 +296,7 @@ func TestRunner_OutputDriftInvalidates(t *testing.T) {
 // goLocalGeneratorV2 is the post-edit body of cmd/copy/main.go used to flip the
 // go-local resolver's source hash. The generator stays valid Go and produces a
 // different output.txt so the test exercises both invalidate paths
-// (tools_hash via source change AND output_hash via content change).
+// (resolved_versions_hash via source change AND output_hash via content change).
 const goLocalGeneratorV2 = `package main
 
 import (
@@ -360,7 +360,7 @@ func TestRunner_GoLocal_NestedSpecResolvesCorrectly(t *testing.T) {
 }
 
 // pnpmLocalGeneratorV2 flips the source content the esbuild lister hashes.
-// It is dropped into packages/codegen/dist/lib.js so the tools_hash changes
+// It is dropped into packages/codegen/dist/lib.js so the resolved_versions_hash changes
 // even though input.txt and the cmd are unchanged.
 const pnpmLocalGeneratorV2 = "export const helper = 'v2';\n"
 
@@ -374,7 +374,7 @@ func TestRunner_PnpmLocal_SecondRunHits(t *testing.T) {
 
 // TestRunner_PnpmLocal_SourceChangeInvalidates is the pnpm-local equivalent
 // of the go-local source-change test: editing a transitive source file in
-// the workspace package must flip tools_hash and trigger re-execution.
+// the workspace package must flip resolved_versions_hash and trigger re-execution.
 func TestRunner_PnpmLocal_SourceChangeInvalidates(t *testing.T) {
 	runE2E(
 		t, "pnpmlocal-source-change-invalidates",

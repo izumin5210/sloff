@@ -15,7 +15,7 @@ import (
 
 // SourceLister returns the file set and external module set that contribute to
 // the logical version of an internal Go tool. The go-local resolver consumes
-// the listing to compute its tools_hash component.
+// the listing to compute its resolved_versions_hash component.
 type SourceLister interface {
 	// List returns the listing for the given entry, evaluated with the given
 	// spec directory as the working module context. specDir is repo-relative

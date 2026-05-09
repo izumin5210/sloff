@@ -1,0 +1,18 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  codegen:
+    pnpm-local: "@org/codegen"
+
+commands:
+  - name: build-codegen
+    cmd: ["sh", "-c", "true"]
+    inputs: ["packages/codegen/src/index.ts"]
+    outputs: ["packages/codegen/dist/cli.js", "packages/codegen/dist/lib.js"]
+    tools: [versioner]
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt output.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [codegen]

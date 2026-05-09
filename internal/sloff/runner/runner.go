@@ -109,14 +109,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	// (e.g. a pnpm-local entry for a workspace package missing from the
 	// current checkout); resolving them eagerly would block unrelated tasks
 	// that never use those tools.
-	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
 		return err
 	}
-	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
-		return err
-	}
-	referencedToolNames := referencedTools(r.opts.Specs)
 
 	// Preflight runs only the checkers whose resolver name matches a tool the
 	// current spec set actually references — same scoping discipline as
@@ -154,6 +150,53 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Plan resolves all discovered specs into a topologically-ordered task list
+// without running preflight or executing any cmd. It is the planning core
+// shared with `sloff graph` (and the future `sloff run --explain` once that
+// path is wired up): same registry / Inputs path as Run, so callers observe
+// the exact set of inputs / outputs the runner would orchestrate.
+//
+// Plan deliberately calls `Registry.Inputs` only (not `Versions`) because
+// the depgraph never reads ToolVersions — they only feed `tools_hash`
+// (architecture.md, ADR-0008 D6 addendum). Skipping Versions means
+// `script` resolvers don't spawn `<bin> --version` here, which keeps
+// graph-style consumers usable when prebuilt binaries aren't installed.
+//
+// Preflight is intentionally skipped for the same reason: debugging tools
+// that read the depgraph must remain useful when the install state is
+// drifted, since drift is one of the conditions users reach for the graph
+// to investigate.
+func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
+	registry, referencedToolNames, err := r.prepareRegistry()
+	if err != nil {
+		return nil, err
+	}
+	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
+	if err != nil {
+		return nil, err
+	}
+	tasks, err := r.collectTasks(inputsByTool, nil)
+	if err != nil {
+		return nil, err
+	}
+	return depgraph.Build(tasks)
+}
+
+// prepareRegistry builds the repo-wide tool registry, validates command tool
+// references against it, and collects the deduplicated set of names some
+// command actually pulls in. Both Run and Plan need this same triple, so the
+// helper keeps the two flows from diverging on the validation rules.
+func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
+	registry, err := spec.BuildToolRegistry(r.opts.Specs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return nil, nil, err
+	}
+	return registry, referencedTools(r.opts.Specs), nil
 }
 
 // runPreflight invokes only the registered Checkers whose names match a

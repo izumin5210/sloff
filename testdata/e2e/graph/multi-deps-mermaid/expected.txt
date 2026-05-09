@@ -1,0 +1,4 @@
+flowchart TD
+    n_spec_consumer["spec:consumer"]
+    n_spec_producer["spec:producer"]
+    n_spec_producer -->|"spec/a.gen.txt (+2 more)"| n_spec_consumer

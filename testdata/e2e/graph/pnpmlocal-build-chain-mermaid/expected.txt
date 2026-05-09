@@ -1,0 +1,4 @@
+flowchart TD
+    n_build_codegen["build-codegen"]
+    n_gen["gen"]
+    n_build_codegen -->|"packages/codegen/dist/cli.js (+1 more)"| n_gen

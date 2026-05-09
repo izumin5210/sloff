@@ -148,16 +148,21 @@ func TestEnvOTelEnabled(t *testing.T) {
 	}
 }
 
+// TestEnvOTelEnabled_SloffPrefixIntegration asserts envOTelEnabled honors
+// SLOFF_-prefix overrides without requiring the caller to mutate the process
+// env first — these inputs are read via effectiveEnv, so subprocesses spawned
+// later by sloff never see the SLOFF_-derived OTEL_* values.
 func TestEnvOTelEnabled_SloffPrefixIntegration(t *testing.T) {
 	t.Run("SLOFF_OTEL_TRACES_EXPORTER=none silences sloff while shell is otlp", func(t *testing.T) {
 		clearOTelEnv(t)
 		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://shell:4318")
 		t.Setenv("SLOFF_OTEL_TRACES_EXPORTER", "none")
 
-		_ = applySloffPrefixOverrides()
-
 		if envOTelEnabled() {
 			t.Fatal("envOTelEnabled() = true, want false (SLOFF_ override should silence)")
+		}
+		if got := os.Getenv("OTEL_TRACES_EXPORTER"); got != "" {
+			t.Fatalf("envOTelEnabled mutated OTEL_TRACES_EXPORTER = %q, want it untouched", got)
 		}
 	})
 
@@ -165,8 +170,6 @@ func TestEnvOTelEnabled_SloffPrefixIntegration(t *testing.T) {
 		clearOTelEnv(t)
 		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://shell:4318")
 		t.Setenv("SLOFF_OTEL_SDK_DISABLED", "true")
-
-		_ = applySloffPrefixOverrides()
 
 		if envOTelEnabled() {
 			t.Fatal("envOTelEnabled() = true, want false (SLOFF_OTEL_SDK_DISABLED should win)")
@@ -177,13 +180,11 @@ func TestEnvOTelEnabled_SloffPrefixIntegration(t *testing.T) {
 		clearOTelEnv(t)
 		t.Setenv("SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT", "http://sloff-only:4318")
 
-		_ = applySloffPrefixOverrides()
-
 		if !envOTelEnabled() {
 			t.Fatal("envOTelEnabled() = false, want true (SLOFF_ endpoint should enable)")
 		}
-		if got := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://sloff-only:4318" {
-			t.Fatalf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want SLOFF_ value populated", got)
+		if _, ok := os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
+			t.Fatal("envOTelEnabled leaked SLOFF_ value into OTEL_*; want env untouched")
 		}
 	})
 }
@@ -296,17 +297,14 @@ func TestSetupTracing_DisabledDoesNotClobberGlobal(t *testing.T) {
 	}
 }
 
-// TestSetupTracing_DisabledShutdownRestoresEnv asserts that the shutdown
-// returned from a disabled setup still reverts SLOFF_-prefix env mutations,
-// keeping subsequent in-process invocations isolated from the previous one.
-func TestSetupTracing_DisabledShutdownRestoresEnv(t *testing.T) {
+// TestSetupTracing_DisabledDoesNotMutateEnv asserts that the disabled path
+// makes no env mutation visible to anyone — including subprocesses runner
+// would later spawn via os.Environ() inheritance. The disabled path must not
+// touch OTEL_* even temporarily, otherwise tools running concurrently from
+// the same shell pick up the SLOFF_-derived value.
+func TestSetupTracing_DisabledDoesNotMutateEnv(t *testing.T) {
 	clearOTelEnv(t)
 	t.Setenv("SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT", "http://sloff-only:4318")
-	// Note: SLOFF_OTEL_TRACES_EXPORTER not set, so envOTelEnabled is still false
-	// because the only signal is an endpoint with SLOFF_ prefix... but this gets
-	// applied to OTEL_EXPORTER_OTLP_ENDPOINT which then enables. So we also need
-	// to flip envOTelEnabled off via SLOFF_OTEL_TRACES_EXPORTER=none to stay on
-	// the disabled path while still exercising the env mutation.
 	t.Setenv("SLOFF_OTEL_TRACES_EXPORTER", "none")
 	ctx := context.Background()
 
@@ -314,23 +312,23 @@ func TestSetupTracing_DisabledShutdownRestoresEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupTracing returned err = %v", err)
 	}
-	if got := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://sloff-only:4318" {
-		t.Fatalf("during run OTEL_EXPORTER_OTLP_ENDPOINT = %q, want SLOFF_ override applied", got)
-	}
+	t.Cleanup(func() { _ = shutdown(ctx) })
 
-	if err := shutdown(ctx); err != nil {
-		t.Fatalf("shutdown returned err = %v", err)
-	}
 	if _, ok := os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
-		t.Fatal("post-shutdown OTEL_EXPORTER_OTLP_ENDPOINT still set, want SLOFF_ override reverted")
+		t.Fatal("disabled setupTracing leaked SLOFF_ override into OTEL_*; subprocess inheritance would propagate it")
+	}
+	if _, ok := os.LookupEnv("OTEL_TRACES_EXPORTER"); ok {
+		t.Fatal("disabled setupTracing leaked SLOFF_ override into OTEL_*; subprocess inheritance would propagate it")
 	}
 }
 
-// TestSetupTracing_EnabledRestoresProviderAndEnv covers the enabled-path
-// mirror: sloff installs its own TracerProvider and propagator, but the
-// shutdown must put the prior provider and env back so the host process is
-// not stuck with a sloff-shut-down provider after the command returns.
-func TestSetupTracing_EnabledRestoresProviderAndEnv(t *testing.T) {
+// TestSetupTracing_EnabledDoesNotLeakEnvAfterReturn covers the enabled-path
+// counterpart: sloff still has to mutate OTEL_* transiently so the SDK
+// constructors (autoexport, resource.WithFromEnv) see the SLOFF_-overridden
+// values, but the mutation must be reverted before setupTracing returns —
+// runner subprocesses spawned by runE are spawned after that and must inherit
+// the original (shell-supplied) OTEL_* values, not sloff's overrides.
+func TestSetupTracing_EnabledDoesNotLeakEnvAfterReturn(t *testing.T) {
 	clearOTelEnv(t)
 	t.Setenv("OTEL_TRACES_EXPORTER", "console")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://shell-default:4318")
@@ -346,8 +344,8 @@ func TestSetupTracing_EnabledRestoresProviderAndEnv(t *testing.T) {
 	if got := otel.GetTracerProvider(); got == prevProvider {
 		t.Fatal("enabled setupTracing did not install a new TracerProvider; want sloff's TP active")
 	}
-	if got := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://sloff-only:4318" {
-		t.Fatalf("during run OTEL_EXPORTER_OTLP_ENDPOINT = %q, want SLOFF_ override applied", got)
+	if got := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://shell-default:4318" {
+		t.Fatalf("post-setup OTEL_EXPORTER_OTLP_ENDPOINT = %q, want shell-default (mutation must be reverted before return)", got)
 	}
 
 	if err := shutdown(ctx); err != nil {
@@ -357,6 +355,6 @@ func TestSetupTracing_EnabledRestoresProviderAndEnv(t *testing.T) {
 		t.Fatal("post-shutdown TracerProvider not restored to caller's prior value")
 	}
 	if got := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://shell-default:4318" {
-		t.Fatalf("post-shutdown OTEL_EXPORTER_OTLP_ENDPOINT = %q, want shell-default restored", got)
+		t.Fatalf("post-shutdown OTEL_EXPORTER_OTLP_ENDPOINT = %q, want shell-default preserved", got)
 	}
 }

@@ -48,9 +48,11 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 - 上記の環境で sloff だけ trace を完全に止めたい ( `SLOFF_OTEL_TRACES_EXPORTER=none` か `SLOFF_OTEL_SDK_DISABLED=true`)
 - 逆に他ツールには触らせず sloff だけに trace を有効化したい ( `SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT=...` のみ set)
 
-実装上は `os.Setenv` で in-process 適用する。 sloff から起動される child process ( task の cmd) には伝搬しない ( child は元の `OTEL_*` を見るか、 sloff が `os.Setenv` で書き換えた値を `os.Environ()` 経由で継承するかは Go runtime の挙動に従う)。 child の trace は sloff の関心外。
+**Read path (mutation 不要)**: enable / disable 判定や resource 構築前のチェック等は `effectiveEnv(otelKey)` ヘルパで「 `SLOFF_OTEL_*` が set ならそちら、 そうでなければ `OTEL_*`」 を読む。 `os.Setenv` を呼ばないので process env は変わらず、 sloff が起動する child process ( task の cmd) は元の `OTEL_*` だけを見る。
 
-**Restore 規律**: `applySloffPrefixOverrides` は touch した key のスナップショット ( `wasSet` / `prevValue`) を取り、 `restore func()` を返す。 `setupTracing` が返す shutdown は最後に必ずこの restore を呼ぶ。 これにより、 同一 process で `newRootCmd().Execute()` を複数回呼ぶ ( テスト・ embedding host) ケースで、 1 回目の `SLOFF_*` 設定が 2 回目以降の `OTEL_*` を汚染しない。
+**SDK 構築のみ短時間 mutate**: 一方 OTel SDK の `autoexport.NewSpanExporter` / `resource.WithFromEnv` 等は内部で `os.Getenv` を読むので、 SLOFF_ override をそれらに反映させるには SDK 構築の瞬間だけ `OTEL_*` を書き換える必要がある。 そのために `applySloffPrefixOverrides` は touch した key のスナップショット ( `wasSet` / `prevValue`) を取り `restore func()` を返す。 `setupTracing` の enabled パスは `defer restore()` で **その関数本体を抜ける前に必ず env を元に戻す**。 runner / subprocess が動くのは setupTracing が return したあとなので、 mutation window 中に subprocess が spawn されることは無く、 child は元の `OTEL_*` を継承する。
+
+**禁則**: 「 setupTracing で env を上書きしっぱなし、 shutdown まで持ち越し」 の素朴実装は採らない ( 採ってしまうと runner が exec.Command + os.Environ() で task を spawn する際に SLOFF_ 由来の `OTEL_*` を漏らしてしまい、 ADR の「 sloff だけ別 endpoint」 という方針と矛盾する)。
 
 ### D3. Exporter は `autoexport` で動的選択する
 
@@ -111,8 +113,8 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 - `sdktrace.WithBatcher` ( BatchSpanProcessor) を採用。 短命 CLI なので `Shutdown` で必ず flush する。
 - 各 subcommand の `RunE` ( `runE` / `graphE`) で `defer shutdown(ctx)` する。 shutdown 失敗時は stderr に warn を 1 行出すだけで **exit code には影響させない**。 exporter 障害が CLI の primary 機能 ( codegen 実行成否) を壊さない原則。
 - shutdown は `context.Background()` ベースの短い deadline を持たせる ( 親 ctx が cancel された後でも flush が走るようにするため)。
-- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻し、 `applySloffPrefixOverrides` が返した env restore も呼ぶ。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。
-- **disabled パスは global provider に一切触らない**。 host の provider をそのまま尊重し、 shutdown では env restore のみを行う ( SDK は組まない)。
+- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻す。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。 env restore は **shutdown ではなく setupTracing の defer 内で完結** ( D2' 参照) するので、 shutdown が触る global state は provider / propagator のみ。
+- **disabled パスは global provider にも env にも一切触らない**。 host の provider をそのまま尊重し、 shutdown は no-op で良い。
 
 ### D7. Propagator は TraceContext + Baggage のみ
 
@@ -140,7 +142,7 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 
 - **依存追加** ( `go.opentelemetry.io/otel` 系 + `autoexport` + semconv)。 binary size と build time に影響するが、 必要なコストと判断。
 - **resource 取得** ( `resource.WithProcess() / WithOS() / WithHost()`) で `os/exec` 系の system call が発生する。 startup latency に数 ms 載る可能性。 ただし trace 有効時のみ。
-- `os.Setenv` で `SLOFF_*` を `OTEL_*` に上書きする副作用が child process に波及する可能性 ( task の cmd が `OTEL_*` を読む場合)。 task 実行は通常 codegen subprocess ( buf / protoc / pnpm 等) で OTel 環境を読まないものが大半なので実害は低いが、 ADR-0009 の知識として明記しておく。
+- `os.Setenv` による `SLOFF_*` → `OTEL_*` の上書きは **setupTracing の関数本体内に閉じる** ように設計しており ( D2' 参照)、 runner が task を spawn するタイミングでは既に元の値に戻っている。 child process ( task の cmd) が `OTEL_*` を読んでも SLOFF_ 由来の値は漏れない。
 
 ### 将来再考の余地
 

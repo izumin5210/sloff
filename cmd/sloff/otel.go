@@ -98,9 +98,27 @@ func applySloffPrefixOverrides() (restore func()) {
 	}
 }
 
+// effectiveEnv returns the SLOFF_-prefixed value for an OTEL_ key when set,
+// otherwise the OTEL_ value (which may also be empty/unset). This is the
+// read-only path that lets envOTelEnabled honor SLOFF_ overrides without
+// touching os.Setenv — env mutation is reserved for the brief window inside
+// setupTracing where the OTel SDK constructors need to see the overridden
+// values.
+//
+// LookupEnv on the SLOFF_ key distinguishes "set to empty" from "unset", so an
+// explicit `SLOFF_OTEL_TRACES_EXPORTER=""` blanks the effective value rather
+// than falling through to OTEL_TRACES_EXPORTER.
+func effectiveEnv(otelKey string) string {
+	if v, ok := os.LookupEnv("SLOFF_" + otelKey); ok {
+		return v
+	}
+	return os.Getenv(otelKey)
+}
+
 // envOTelEnabled reports whether the user has expressed intent to export traces.
-// Callers must invoke applySloffPrefixOverrides first so SLOFF_-prefixed overrides
-// participate.
+// Reads via effectiveEnv so SLOFF_-prefix overrides participate without any
+// process-env mutation; subprocesses spawned by sloff therefore never inherit
+// SLOFF_-derived OTEL_* values just because envOTelEnabled was consulted.
 //
 // Disable signals win over enable signals so a SLOFF_-targeted opt-out can silence
 // sloff even when the surrounding shell sets a generic OTLP endpoint:
@@ -111,10 +129,10 @@ func applySloffPrefixOverrides() (restore func()) {
 // Otherwise, any of the OTLP endpoint vars or a non-"none" OTEL_TRACES_EXPORTER
 // being set to a non-empty value enables tracing.
 func envOTelEnabled() bool {
-	if strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") {
+	if strings.EqualFold(effectiveEnv("OTEL_SDK_DISABLED"), "true") {
 		return false
 	}
-	if strings.EqualFold(os.Getenv("OTEL_TRACES_EXPORTER"), "none") {
+	if strings.EqualFold(effectiveEnv("OTEL_TRACES_EXPORTER"), "none") {
 		return false
 	}
 	for _, k := range []string{
@@ -122,7 +140,7 @@ func envOTelEnabled() bool {
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_TRACES_EXPORTER",
 	} {
-		if v := os.Getenv(k); v != "" {
+		if v := effectiveEnv(k); v != "" {
 			return true
 		}
 	}
@@ -131,27 +149,33 @@ func envOTelEnabled() bool {
 
 // setupTracing wires the global TracerProvider when env signals export intent.
 //
-// On the **disabled** path the global provider is left untouched: in-process
-// hosts that already configured OpenTelemetry (e.g. tests, embedding programs)
-// keep their tracer wiring, and sloff's runner spans flow through whatever the
-// host has set up. Only the SLOFF_-prefix env mutations are reverted on
-// shutdown.
+// **Disabled path**: leaves the global provider and process env both
+// untouched. In-process hosts that already configured OpenTelemetry keep
+// their tracer wiring, and sloff's runner spans flow through whatever the
+// host has set up. Subprocesses spawned by sloff (task cmds via
+// exec.Command + os.Environ()) inherit only the original OTEL_* values.
 //
-// On the **enabled** path sloff installs its own TracerProvider and propagator
-// so the spans land on the configured OTLP exporter (regardless of what host
-// state existed). The shutdown drains the BatchSpanProcessor and restores the
-// caller's prior provider + propagator + env so the host process can keep
-// running afterwards without a shut-down provider stuck on the global.
+// **Enabled path**: sloff installs its own TracerProvider and propagator so
+// spans land on the configured OTLP exporter. SDK constructors that read
+// env (autoexport, resource.WithFromEnv) need to observe the SLOFF_-overridden
+// values, so we mutate OTEL_* transiently and revert before returning. The
+// mutation window is bounded to setupTracing's body — runner code (which is
+// what spawns subprocesses) only runs after we return, so child processes
+// see the original env. The returned shutdown drains the BatchSpanProcessor
+// and restores the caller's prior provider + propagator.
 //
 // The returned shutdown is always non-nil and safe to call once.
 func setupTracing(ctx context.Context) (func(context.Context) error, error) {
-	restoreEnv := applySloffPrefixOverrides()
 	if !envOTelEnabled() {
-		return func(context.Context) error {
-			restoreEnv()
-			return nil
-		}, nil
+		return func(context.Context) error { return nil }, nil
 	}
+
+	// applySloffPrefixOverrides + defer restore() confines the env mutation to
+	// this function's lifetime. Subprocesses spawned by runner.Run after
+	// setupTracing returns therefore inherit the original (shell-supplied)
+	// OTEL_* values, never the SLOFF_-derived ones.
+	restoreEnv := applySloffPrefixOverrides()
+	defer restoreEnv()
 
 	res, err := resource.New(
 		ctx,
@@ -168,13 +192,11 @@ func setupTracing(ctx context.Context) (func(context.Context) error, error) {
 	// produced usable attributes; partial resource info is preferable to aborting
 	// tracing setup, so only hard-fail on non-partial errors.
 	if err != nil && !errors.Is(err, resource.ErrPartialResource) {
-		restoreEnv()
 		return nil, fmt.Errorf("otel: build resource: %w", err)
 	}
 
 	exp, err := autoexport.NewSpanExporter(ctx)
 	if err != nil {
-		restoreEnv()
 		return nil, fmt.Errorf("otel: build span exporter: %w", err)
 	}
 
@@ -194,7 +216,6 @@ func setupTracing(ctx context.Context) (func(context.Context) error, error) {
 		err := tp.Shutdown(ctx)
 		otel.SetTracerProvider(prevProvider)
 		otel.SetTextMapPropagator(prevPropagator)
-		restoreEnv()
 		return err
 	}, nil
 }

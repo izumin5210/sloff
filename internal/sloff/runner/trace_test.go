@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,11 +146,11 @@ func attrBool(s sdktrace.ReadOnlySpan, key string) (bool, bool) {
 // dumpSpans renders the span list as parent → child relationships for fixture
 // debugging. Only printed when an assertion fails.
 func dumpSpans(spans []sdktrace.ReadOnlySpan) string {
-	out := ""
+	var out strings.Builder
 	for _, s := range spans {
-		out += fmt.Sprintf("  %s parent=%s\n", s.Name(), s.Parent().SpanID())
+		out.WriteString(fmt.Sprintf("  %s parent=%s\n", s.Name(), s.Parent().SpanID()))
 	}
-	return out
+	return out.String()
 }
 
 func TestTrace_FirstRunCacheMiss(t *testing.T) {

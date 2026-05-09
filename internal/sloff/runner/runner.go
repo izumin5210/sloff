@@ -154,23 +154,30 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // Plan resolves all discovered specs into a topologically-ordered task list
 // without running preflight or executing any cmd. It is the planning core
-// shared with `sloff graph` (and the future `sloff run --explain`): same
-// registry / resolver path as Run, so callers observe the exact set of
-// inputs / outputs the runner would orchestrate.
+// shared with `sloff graph` (and the future `sloff run --explain` once that
+// path is wired up): same registry / Inputs path as Run, so callers observe
+// the exact set of inputs / outputs the runner would orchestrate.
 //
-// Preflight is intentionally skipped here. Debugging tools that read the
-// depgraph must remain usable when the install state is drifted, since
-// drift is one of the conditions users reach for the graph to investigate.
+// Plan deliberately calls `Registry.Inputs` only (not `Versions`) because
+// the depgraph never reads ToolVersions — they only feed `tools_hash`
+// (architecture.md, ADR-0008 D6 addendum). Skipping Versions means
+// `script` resolvers don't spawn `<bin> --version` here, which keeps
+// graph-style consumers usable when prebuilt binaries aren't installed.
+//
+// Preflight is intentionally skipped for the same reason: debugging tools
+// that read the depgraph must remain useful when the install state is
+// drifted, since drift is one of the conditions users reach for the graph
+// to investigate.
 func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
 	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := r.resolveReferencedTools(ctx, registry, referencedToolNames)
+	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := r.collectTasks(resolved)
+	tasks, err := r.collectTasks(inputsByTool, nil)
 	if err != nil {
 		return nil, err
 	}

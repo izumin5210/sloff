@@ -34,9 +34,13 @@ files in the producer's outputs ∩ consumer's inputs intersection,
 so "why does B depend on A?" can be answered without reading every
 spec.
 
-Preflight checks are skipped on purpose: the subcommand is also
-useful when the install state is drifted, since drift is one of
-the things users reach for the graph to investigate.`,
+The subcommand is meant to remain useful in broken environments:
+preflight (install drift) and resolver Versions (e.g. <bin> --version
+for the script channel) are both skipped, since their failures don't
+affect the graph and drift / missing binaries are exactly what the
+user is trying to debug. Resolver Inputs are still resolved — failures
+there mean the depgraph would be incomplete (missing edges from
+resolver-contributed sources), so they fail loud.`,
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
 			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), root, pattern, format)
 		},

@@ -404,6 +404,17 @@ func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
 	runE2E(t, "cross-dir-outputs", runStep(), runStep())
 }
 
+// TestRunner_PerSpecDistinctOutputsDoNotCollide is the IZU-18 regression guard at the
+// E2E layer: two service-local sloff.yml files each declare `outputs:
+// ["internal/foo.gen.go"]`, which resolve to distinct repo-relative paths
+// (services/a/internal/foo.gen.go vs services/b/...). Before the fix the runner keyed
+// detectOutputPatternConflicts by raw pattern string and refused to start with
+// "duplicate output pattern producers". After the fix both tasks run, each generator
+// lands its own file, and the cache stores one record per spec.
+func TestRunner_PerSpecDistinctOutputsDoNotCollide(t *testing.T) {
+	runE2E(t, "per-spec-distinct-outputs", runStep())
+}
+
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and

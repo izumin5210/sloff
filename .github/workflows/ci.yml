@@ -17,16 +17,14 @@ jobs:
             run: go build -v ./cmd/sloff
           - name: fix
             run: go fix -v ./...
-          - name: format
+          - name: fmt-go
             run: go tool gofumpt -l -w -- .
           - name: lint
             run: go vet -v ./...
           - name: tidy
             run: go mod tidy
           - name: gen
-            run: |
-              go tool buf generate
-              go tool gofumpt -l -w -- .
+            run: go tool buf generate && go tool gofumpt -l -w -- .
       fail-fast: false
     permissions:
       contents: read

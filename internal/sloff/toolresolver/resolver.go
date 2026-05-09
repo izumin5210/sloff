@@ -2,38 +2,48 @@
 // (script for prebuilt binaries — including external npm / Go OSS packages, see
 // ADR-0007 — and go-local / pnpm-local for internal sources) and produces the
 // OS-neutral logical version strings that feed the cache record's tools_hash
-// component.
+// component, plus the ExtraInputs that feed the runner's depgraph derivation.
 package toolresolver
 
 import "context"
 
-// Resolver is implemented by each distribution channel.
+// Resolver is implemented by each distribution channel. Each resolver exposes
+// two intentionally separate contribution channels for a declared tool, so
+// callers that only need one (`sloff graph` consumes Inputs but not Versions;
+// `sloff run` consumes both) don't pay for the other:
 //
-// Resolve returns a Result that combines two contributions:
-//   - Versions: OS-neutral tool version entries that feed tools_hash
-//   - ExtraInputs: repo-relative file paths that should be folded into the
-//     task's input glob expansion before depgraph computes ordering. The
-//     pnpm-local resolver uses this so workspace tool sources land in the
-//     consuming task's inputs and depgraph wires up the build task by
-//     output overlap; resolvers that only need to influence tools_hash
-//     leave ExtraInputs nil.
+//   - Inputs returns repo-relative file paths the runner folds into the
+//     consuming task's input set before depgraph computes ordering. The
+//     pnpm-local and go-local resolvers use this so workspace / repo-local
+//     tool sources land in consumer task inputs and depgraph wires up
+//     upstream codegen by output overlap. Resolvers whose channel inherently
+//     has no source contribution (script — the version is captured by
+//     spawning `<bin> --version`) return nil.
+//   - Versions returns OS-neutral logical version entries that feed
+//     tools_hash. Resolvers that only contribute via Inputs (none today, but
+//     the interface admits it) return nil.
 //
-// Per ADR-0005 sloff runs every resolver through the spec's tools[] declarations only;
-// there is no cmd-shape auto-dispatch. declared is therefore always non-nil and carries
-// the fields the user wrote.
+// Splitting the two contributions makes graph-style consumers honest about
+// their needs: `sloff graph` only invokes Inputs, so a missing prebuilt
+// binary doesn't fail graph rendering even though it would fail `sloff run`.
+//
+// Implementations are expected to memoise any shared discovery work between
+// Inputs and Versions for the same declared tool (lockfile walks,
+// packages.Load, etc.) so successive calls don't double-pay (ADR-0008).
+//
+// Per ADR-0005 sloff runs every resolver through the spec's tools[]
+// declarations only; there is no cmd-shape auto-dispatch. declared is
+// therefore always non-nil and carries the fields the user wrote.
 type Resolver interface {
-	// Name is the resolver identifier (e.g. "script") that DeclaredTool.Resolver refers to.
+	// Name is the resolver identifier (e.g. "script") that
+	// DeclaredTool.Resolver refers to.
 	Name() string
 
-	// Resolve returns the version + extra-input contribution for one declared tool.
-	Resolve(ctx context.Context, specDir string, cmd []string, declared *DeclaredTool) (Result, error)
-}
+	// Inputs returns the ExtraInputs contribution for one declared tool.
+	Inputs(ctx context.Context, specDir string, declared *DeclaredTool) ([]string, error)
 
-// Result is one resolver's combined contribution to a task's cache key and
-// input set. ExtraInputs are repo-relative slash-form paths.
-type Result struct {
-	Versions    []ToolVersion
-	ExtraInputs []string
+	// Versions returns the ToolVersion contribution for one declared tool.
+	Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ToolVersion, error)
 }
 
 // ToolVersion is the OS-neutral logical version of a single tool.
@@ -43,10 +53,11 @@ type ToolVersion struct {
 	Version string // logical version string, e.g. "script:buf@1.30.0"
 }
 
-// DeclaredTool mirrors one tools[] entry of a spec. The runner translates spec.DeclaredTool
-// into this type before calling Registry.Resolve. Field semantics are resolver-specific:
-// the script resolver consumes Exec and Extract; the go-local resolver consumes Entry;
-// the pnpm-local resolver consumes PackageName; future resolvers add their own fields.
+// DeclaredTool mirrors one tools[] entry of a spec. The runner translates
+// spec.DeclaredTool into this type before calling resolver methods. Field
+// semantics are resolver-specific: the script resolver consumes Exec and
+// Extract; the go-local resolver consumes Entry; the pnpm-local resolver
+// consumes PackageName; future resolvers add their own fields.
 type DeclaredTool struct {
 	Resolver string
 

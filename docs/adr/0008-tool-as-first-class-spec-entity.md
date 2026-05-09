@@ -120,9 +120,19 @@ YAML 表記揺れや shell-like 解釈の事故を避けるため、 lower-case 
 
 ### D6. **resolver pre-pass で tool あたり 1 回 resolve**
 
-Runner は `Run` の冒頭で discover 済み spec から `ToolRegistry` を構築 → 各 tool に対して **1 回だけ** `Resolver.Resolve` を呼んで `toolresolver.Result` を name 別キャッシュ。 task は cache から自分の参照する tool の Result を pick するだけ。
+Runner は `Run` の冒頭で discover 済み spec から `ToolRegistry` を構築 → 各 tool に対して **1 回だけ** `Resolver.Inputs` / `Resolver.Versions` を呼んで結果を name 別キャッシュ。 task は cache から自分の参照する tool の contribution を pick するだけ。
 
 これで O1 の効率問題は構造的に消える ( N task が同じ tool を参照しても resolver 呼び出しは 1 回)。
+
+#### IZU-16 補遺: Inputs / Versions 分割と内部メモ化
+
+resolver の公開 API は `Inputs` ( task inputs に union される repo-relative path 集合) と `Versions` ( tools_hash に投入される ToolVersion 集合) の 2 メソッドに分割されている ( IZU-16)。 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心を別経路に分離するための切り分けで、 ここで言う「 1 回 resolve」 は **同一 tool に対する Inputs と Versions の連続呼び出しが内部の発見作業を共有する** ことを意味する:
+
+- **`script`**: `Inputs` は常に `nil` を即返す ( source contribution なし)。 `Versions` のみが既存の `<bin> --version` cache を消費する。
+- **`go-local`**: 両メソッドとも `lister.NewMemoized` 経由で `packages.Load` を呼ぶ。 memoize により 1 entry あたり 1 回の `packages.Load` で済み、 Inputs ( InternalFiles 抽出) / Versions ( ExternalModules 抽出) 双方が同じ Listing を slice する。
+- **`pnpm-local`**: per-package の `pkgComputation` を `sync.Once` で初期化 ( WalkDeps + FileEnumerator)。 Inputs / Versions のどちらが先に呼ばれても 1 回の lockfile walk + 1 回の git ls-files で完結する。
+
+この分割により、 graph 系 caller ( 例: `sloff graph`) は Versions の取得コスト ( script なら subprocess spawn) を払わずに depgraph を構築できる。 「 graph 構築 → execution」 のフェーズ分離はパフォーマンスを犠牲にしないのが肝で、 各 resolver が同じ declared tool への 2 メソッド呼び出しを「 1 回分の発見コスト + 結果 slice」 に縮める責務を負う。
 
 ### D7. **internal-source tool の build / run は cmd 内責務**
 

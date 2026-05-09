@@ -322,11 +322,11 @@ SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
 ```mermaid
 flowchart LR
     YAML["**/sloff.yml<br/>(tools: + commands:)"] --> REG["spec.ToolRegistry<br/>name → DeclaredTool<br/>( repo-wide flat namespace,<br/>ADR-0008)"]
-    REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Resolver.Resolve 1 回)"]
+    REG --> PRE["pre-resolve pass<br/>(tool 1 つ × Inputs / Versions 1 ペア)"]
     PRE -->|"exec: [...]"| SCRIPT["scriptResolver<br/>(protoc-gen-go / buf /<br/>pnpm exec / go tool ... 等)"]
     PRE -->|"go-local: ./cmd/..."| GOLOC["goLocalResolver<br/>internal: goPackagesLister<br/>(ExtraInputs + go-deps versions)"]
     PRE -->|"pnpm-local: ..."| PNPMLOC["pnpmLocalResolver<br/>internal: git ls-files<br/>(ExtraInputs + pnpm-deps versions)"]
-    SCRIPT --> CACHE["resolved cache<br/>name → toolresolver.Result"]
+    SCRIPT --> CACHE["resolved cache<br/>name → ( Inputs, Versions)"]
     GOLOC --> CACHE
     PNPMLOC --> CACHE
     CACHE --> COMBINE["combine per task ( commands[*].tools の順)"]
@@ -420,23 +420,24 @@ package toolresolver
 
 import "context"
 
-// Resolver は単一の distribution channel ( script / go-local / pnpm-local 等) を担当する
+// Resolver は単一の distribution channel ( script / go-local / pnpm-local 等) を担当する。
+// 各 resolver は declared tool に対する 2 つの contribution channel を **意図的に分割
+// された 2 メソッド** で公開する。 `sloff graph` のように Inputs しか必要としない
+// caller が Versions の取得コスト ( script なら `<bin> --version` の subprocess) を
+// 払わずに済むことが目的 ( IZU-16)。
 type Resolver interface {
-    // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される
+    // Name は resolver 識別子。 spec の `tools: - <name>: <key>` で参照される。
     Name() string
 
-    // Resolve は declared tool 宣言と cmd から Result を返す。 Result.Versions が
-    // tools_hash に乗る OS 非依存版数、 Result.ExtraInputs は task の inputs に
-    // union される repo-relative path 集合 ( pnpm-local が workspace tool の
-    // transitive ソースを contribute する用途)。
-    // declared は spec の `tools:` entry そのままで、 必ず非 nil ( ADR-0005 で
-    // declared-only に統一)。
-    Resolve(ctx context.Context, specDir string, cmd []string, declared *DeclaredTool) (Result, error)
-}
+    // Inputs は task の inputs に union される repo-relative path 集合を返す。
+    // pnpm-local が workspace tool の transitive ソースを contribute する経路は
+    // ここに集約される。 source contribution を持たない channel ( script) は
+    // nil を返す。
+    Inputs(ctx context.Context, specDir string, declared *DeclaredTool) ([]string, error)
 
-type Result struct {
-    Versions    []ToolVersion // tools_hash に投入される
-    ExtraInputs []string      // task の inputs glob 展開済み集合に union される
+    // Versions は tools_hash に乗る OS 非依存な ToolVersion 集合を返す。
+    // Inputs しか contribute しない resolver ( 現状なし) は nil を返す。
+    Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ToolVersion, error)
 }
 
 type ToolVersion struct {
@@ -446,9 +447,11 @@ type ToolVersion struct {
 }
 ```
 
-`Result.ExtraInputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた ExtraInputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する `dist/cli.js` 等) が consumer task の inputs に乗り、 それを output に持つ build task との依存が **既存の output-overlap depgraph 規則だけで自動成立** する ( Turborepo の `dependsOn` を file overlap でやる版)。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
+`Inputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた Inputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する `dist/cli.js` 等) が consumer task の inputs に乗り、 それを output に持つ build task との依存が **既存の output-overlap depgraph 規則だけで自動成立** する ( Turborepo の `dependsOn` を file overlap でやる版)。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
 
-組み込み実装: `scriptResolver` ( prebuilt binary 全般、 外部公開 npm / Go OSS パッケージも吸収)、 `goLocalResolver` (内製 Go CLI), `pnpmLocalResolver` (pnpm workspace 内 内製)。 各 Resolver の実装詳細は対応する独立 doc を参照。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージ全般については [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により専用 resolver を持たない。
+`Inputs` / `Versions` を別メソッドにしているのは、 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心が異なるため ( IZU-16)。 内部で発見コスト ( lockfile walk / `packages.Load`) を共有する resolver は ADR-0008 のメモ化方針に従って「同じ declared tool への Inputs / Versions 連続呼び出しが 1 回分の発見作業で済む」ことを実装側で保証する。
+
+組み込み実装: `scriptResolver` ( prebuilt binary 全般、 外部公開 npm / Go OSS パッケージも吸収。 Inputs は常に nil)、 `goLocalResolver` (内製 Go CLI), `pnpmLocalResolver` (pnpm workspace 内 内製)。 各 Resolver の実装詳細は対応する独立 doc を参照。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージ全般については [ADR-0007](../adr/0007-no-external-dependency-resolver.md) により専用 resolver を持たない。
 
 Registry:
 
@@ -460,12 +463,11 @@ type Registry struct {
 
 func (r *Registry) Register(rs Resolver) { /* ... */ }
 
-func (r *Registry) Resolve(ctx context.Context, specDir string, cmd []string, declared []DeclaredTool) ([]ToolVersion, error) {
-    // declared の各 entry について resolver name で byName lookup し、
-    // 各 resolver の Resolve を呼んで結果を結合する。
-    // declared が空の経路は spec.validate ( ADR-0004 D1) で弾かれているため
-    // 到達しない。
-}
+// Inputs / Versions は declared 各 entry を resolver name で byName lookup し、
+// 対応する Resolver メソッドを呼んだ結果を declared 順で concatenate する。
+// declared が空の経路は spec.validate ( ADR-0004 D1) で弾かれているため到達しない。
+func (r *Registry) Inputs(ctx context.Context, specDir string, declared []DeclaredTool) ([]string, error)
+func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ToolVersion, error)
 ```
 
 新 channel ( 例: 既存と異なる lockfile-based エコシステム) を追加するときは、 対応 `Resolver` を実装し `Registry.Register` で登録するだけで済む。 prebuilt binary 系の追加対応は基本 `scriptResolver` で吸収できるため、 新 Resolver の追加は本質的に新しい lockfile / 新しい source-hash 戦略を必要とするケースに限られる。

@@ -39,13 +39,23 @@ func New(repoRoot string) *Resolver {
 // Name implements toolresolver.Resolver.
 func (r *Resolver) Name() string { return Name }
 
-// Resolve implements toolresolver.Resolver. declared must be non-nil and must specify Exec.
-func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, declared *toolresolver.DeclaredTool) (toolresolver.Result, error) {
-	if declared == nil {
-		return toolresolver.Result{}, errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
+// Inputs implements toolresolver.Resolver. The script channel never folds
+// any source files into the consuming task — version is captured by spawning
+// `<bin> --version` — so this returns nil after the same declared-shape
+// validation Versions performs. Validating shape on both sides keeps a
+// caller that only calls Inputs (e.g. `sloff graph`) honest about typos.
+func (r *Resolver) Inputs(_ context.Context, _ string, declared *toolresolver.DeclaredTool) ([]string, error) {
+	if err := validateDeclared(declared); err != nil {
+		return nil, err
 	}
-	if len(declared.Exec) == 0 {
-		return toolresolver.Result{}, errors.New("script: exec is required")
+	return nil, nil
+}
+
+// Versions implements toolresolver.Resolver. declared must be non-nil and
+// must specify Exec.
+func (r *Resolver) Versions(ctx context.Context, specDir string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+	if err := validateDeclared(declared); err != nil {
+		return nil, err
 	}
 
 	cacheKey := strings.Join(declared.Exec, "\x00") + "\x01" + declared.Extract
@@ -53,24 +63,34 @@ func (r *Resolver) Resolve(ctx context.Context, specDir string, _ []string, decl
 	r.mu.Lock()
 	if cached, ok := r.cache[cacheKey]; ok {
 		r.mu.Unlock()
-		return toolresolver.Result{Versions: []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}}, nil
+		return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], cached)}, nil
 	}
 	r.mu.Unlock()
 
 	stdout, err := r.runVersion(ctx, specDir, declared.Exec)
 	if err != nil {
-		return toolresolver.Result{}, err
+		return nil, err
 	}
 	captured, err := applyExtract(stdout, declared.Extract)
 	if err != nil {
-		return toolresolver.Result{}, err
+		return nil, err
 	}
 
 	r.mu.Lock()
 	r.cache[cacheKey] = captured
 	r.mu.Unlock()
 
-	return toolresolver.Result{Versions: []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}}, nil
+	return []toolresolver.ToolVersion{makeVersion(declared.Exec[0], captured)}, nil
+}
+
+func validateDeclared(declared *toolresolver.DeclaredTool) error {
+	if declared == nil {
+		return errors.New("script: requires explicit tools[] declaration; auto-dispatch is not supported")
+	}
+	if len(declared.Exec) == 0 {
+		return errors.New("script: exec is required")
+	}
+	return nil
 }
 
 func (r *Resolver) runVersion(ctx context.Context, specDir string, argv []string) (string, error) {

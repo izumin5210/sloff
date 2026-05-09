@@ -40,7 +40,7 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 
 ### D2'. `SLOFF_` prefix の override 規則を提供する
 
-`OTEL_*` 系の env var に対し、 同じ key に `SLOFF_` prefix を付けたもの ( `SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT` / `SLOFF_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `SLOFF_OTEL_EXPORTER_OTLP_PROTOCOL` / `SLOFF_OTEL_EXPORTER_OTLP_HEADERS` / `SLOFF_OTEL_TRACES_EXPORTER` / `SLOFF_OTEL_SERVICE_NAME` / `SLOFF_OTEL_RESOURCE_ATTRIBUTES` / `SLOFF_OTEL_SDK_DISABLED`) が set されていれば、 同名の `OTEL_*` を **process 起動直後に in-process で上書き** してから SDK を初期化する。
+`OTEL_*` 系の env var に対し、 同じ key に `SLOFF_` prefix を付けたもの ( `SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT` / `SLOFF_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `SLOFF_OTEL_EXPORTER_OTLP_PROTOCOL` / `SLOFF_OTEL_EXPORTER_OTLP_HEADERS` / `SLOFF_OTEL_TRACES_EXPORTER` / `SLOFF_OTEL_SERVICE_NAME` / `SLOFF_OTEL_RESOURCE_ATTRIBUTES` / `SLOFF_OTEL_SDK_DISABLED`) が set されていれば、 設定値として優先する。
 
 ユースケース:
 
@@ -48,30 +48,40 @@ sloff は cache-aware codegen orchestrator として、 1 run の中に多段の
 - 上記の環境で sloff だけ trace を完全に止めたい ( `SLOFF_OTEL_TRACES_EXPORTER=none` か `SLOFF_OTEL_SDK_DISABLED=true`)
 - 逆に他ツールには触らせず sloff だけに trace を有効化したい ( `SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT=...` のみ set)
 
-**Read path (mutation 不要)**: enable / disable 判定や resource 構築前のチェック等は `effectiveEnv(otelKey)` ヘルパで「 `SLOFF_OTEL_*` が set ならそちら、 そうでなければ `OTEL_*`」 を読む。 `os.Setenv` を呼ばないので process env は変わらず、 sloff が起動する child process ( task の cmd) は元の `OTEL_*` だけを見る。
+**実装**: `effectiveEnv(otelKey)` ヘルパで「 `SLOFF_OTEL_*` が set ならそちら、 そうでなければ `OTEL_*`」 を読み取り、 SDK 構築時には **explicit な options** ( `otlptracehttp.WithEndpointURL`, `otlptracehttp.WithHeaders`, `semconv.ServiceName`, `resource.WithAttributes` 等) として渡す。 `os.Setenv` は一切呼ばない。
 
-**SDK 構築のみ短時間 mutate**: 一方 OTel SDK の `autoexport.NewSpanExporter` / `resource.WithFromEnv` 等は内部で `os.Getenv` を読むので、 SLOFF_ override をそれらに反映させるには SDK 構築の瞬間だけ `OTEL_*` を書き換える必要がある。 そのために `applySloffPrefixOverrides` は touch した key のスナップショット ( `wasSet` / `prevValue`) を取り `restore func()` を返す。 `setupTracing` の enabled パスは `defer restore()` で **その関数本体を抜ける前に必ず env を元に戻す**。 runner / subprocess が動くのは setupTracing が return したあとなので、 mutation window 中に subprocess が spawn されることは無く、 child は元の `OTEL_*` を継承する。
+**禁則**: 「 `os.Setenv` で `SLOFF_*` の値を `OTEL_*` に書き戻して SDK に env 経由で読ませる」 アプローチは採らない。 そうすると以下の問題が出る:
 
-**禁則**: 「 setupTracing で env を上書きしっぱなし、 shutdown まで持ち越し」 の素朴実装は採らない ( 採ってしまうと runner が exec.Command + os.Environ() で task を spawn する際に SLOFF_ 由来の `OTEL_*` を漏らしてしまい、 ADR の「 sloff だけ別 endpoint」 という方針と矛盾する)。
+- env mutation が `setupTracing` 〜 `shutdown` の間続くと、 runner が `exec.Command + os.Environ()` で task を spawn するときに SLOFF_ 由来の `OTEL_*` を child process が継承してしまう ( 「 sloff だけ別 endpoint」 という方針に反する)
+- 「 SDK 構築直後に restore」 する短時間 mutate でも、 process env を一時的にせよ書き換える設計はテスト不能・並行不能・読みづらく、 否応なく fragile
 
-### D3. Exporter は `autoexport` で動的選択する
+代わりに、 **SDK が options を受ける** という事実を全面的に活用する。 OTel exporter / resource 系 API は env 読みと options が両方サポートされており、 options が常に env を override するので、 effective 値を options として渡せば env を一切触らずに SLOFF_ 優先を実現できる。
 
-`go.opentelemetry.io/contrib/exporters/autoexport` の `NewSpanExporter` を採用する。 これは `OTEL_TRACES_EXPORTER` を読み `otlp` ( gRPC または HTTP、 さらに `OTEL_EXPORTER_OTLP_PROTOCOL` で切替) / `console` ( stdout) / `none` を出し分ける標準パターン。
+### D3. Exporter は SLOFF_ 値を options で渡せるよう自前 dispatch する
 
-利点:
+autoexport (`go.opentelemetry.io/contrib/exporters/autoexport`) は env だけで exporter を選び設定する設計で、 options による override の口が無い。 このため D2' で求められる「 env 不変で SLOFF_ override」 を実現できない。 代わりに sloff 側で `effectiveEnv("OTEL_TRACES_EXPORTER")` の値を見て自前 dispatch する:
 
-- ローカル動作確認が `OTEL_TRACES_EXPORTER=console` 一発でできる ( Collector / Jaeger 不要)
-- gRPC と HTTP の選択が env で完結
-- 後で他 exporter ( Zipkin 等) を追加したくなっても autoexport の対応に追従できる
+| OTEL_TRACES_EXPORTER | dispatch 先 | options |
+|---|---|---|
+| `console` | `stdouttrace.New()` | なし ( stdout 固定) |
+| `""` / `otlp` ( default) | OTLP HTTP/gRPC を protocol で振り分け | `WithEndpointURL` / `WithHeaders` |
+| `none` | -- ( `envOTelEnabled` が false を返すので到達しない) | -- |
+| その他 | 起動エラー ( unsupported) | -- |
 
-### D4. Resource は OTel SDK 標準フィールドを尊重する
+OTLP の protocol は `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` > `OTEL_EXPORTER_OTLP_PROTOCOL` > default `http/protobuf` の順に解決し、 `grpc` / `http/protobuf` / `http/json` を受け付ける。 endpoint と headers は signal-specific ( `_TRACES_`) を generic より優先 ( OTel spec 準拠) し、 effective 値が非空なら `WithEndpointURL` / `WithHeaders` で渡す ( exporter 内部の env 読みは options で必ず上書きされる)。
 
-Resource attributes:
+OTel spec に書かれているが本実装が **直接サポートしていない** OTEL_ 変数 ( `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, TLS 関連等) は exporter が env を直接読むので shell 設定はそのまま効く。 ただし SLOFF_ prefix の override は届かない。 必要になれば options 経由のサポートを足す。
 
-- `service.name`: デフォルト `sloff` ( `OTEL_SERVICE_NAME` で override)
-- `service.version`: package-level 変数 `buildVersion` ( デフォルト `dev`、 release pipeline で `-ldflags "-X main.buildVersion=v0.x.y"` 注入予定)
-- `OTEL_RESOURCE_ATTRIBUTES` ( `host.name=...,user.name=...` 等) は `resource.WithFromEnv()` 経由で取り込む
-- process / OS / host 情報は `resource.WithProcess() / WithOS() / WithHost()` で標準 attribute を埋める
+### D4. Resource は SLOFF_ 値を attribute で組み立てる
+
+`resource.WithFromEnv()` も env-only で options 経路が無い。 そこで:
+
+- `OTEL_SERVICE_NAME` → `effectiveEnv` で読み `semconv.ServiceName(...)` として attribute 化
+- `OTEL_RESOURCE_ATTRIBUTES` → `effectiveEnv` で読み、 自前パーサで `key=value,...` を `attribute.KeyValue` slice に展開 ( URL-decode を含む、 OTel spec 準拠)
+- 上記を `resource.WithAttributes(...)` で渡す
+- process / OS / host 情報は `resource.WithProcess() / WithOS() / WithHost()` で標準 attribute を埋める ( これらは OTEL_ env を読まず system info を取るだけなので env mutation の懸念なし)
+
+`buildVersion` ( ldflags で injectable な package-level 変数) を `service.version` として常に attribute に追加する ( `OTEL_SERVICE_NAME` で上書き可能だが `service.version` は OTEL_ env で出ないので常に sloff 側で埋める)。
 
 ### D5. Span 粒度: phase + per-tool resolver + per-task の 3 階層
 
@@ -113,7 +123,8 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 - `sdktrace.WithBatcher` ( BatchSpanProcessor) を採用。 短命 CLI なので `Shutdown` で必ず flush する。
 - 各 subcommand の `RunE` ( `runE` / `graphE`) で `defer shutdown(ctx)` する。 shutdown 失敗時は stderr に warn を 1 行出すだけで **exit code には影響させない**。 exporter 障害が CLI の primary 機能 ( codegen 実行成否) を壊さない原則。
 - shutdown は `context.Background()` ベースの短い deadline を持たせる ( 親 ctx が cancel された後でも flush が走るようにするため)。
-- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻す。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。 env restore は **shutdown ではなく setupTracing の defer 内で完結** ( D2' 参照) するので、 shutdown が触る global state は provider / propagator のみ。
+- **enabled パスの shutdown は global state を restore する**: 起動時に snapshot した `prevTracerProvider` / `prevTextMapPropagator` に戻す。 これがないと、 in-process な host が事前に設定していた provider / propagator が sloff の shut-down 済み TP に置換されたまま残り、 host 側の以後のトレーシングが壊れる。
+- **env は一切 mutate しない** ( D2' / D3 / D4 参照)。 SLOFF_ override は effectiveEnv → options で SDK に渡るので、 `os.Setenv` を使わず process env は不変。 結果として shutdown で env restore する必要も無い。
 - **disabled パスは global provider にも env にも一切触らない**。 host の provider をそのまま尊重し、 shutdown は no-op で良い。
 
 ### D7. Propagator は TraceContext + Baggage のみ
@@ -140,9 +151,9 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 
 ### 負の影響 / 注意点
 
-- **依存追加** ( `go.opentelemetry.io/otel` 系 + `autoexport` + semconv)。 binary size と build time に影響するが、 必要なコストと判断。
+- **依存追加** ( `go.opentelemetry.io/otel` 系 ( otel / sdk / trace / exporters/otlp/otlptrace/{otlptracehttp,otlptracegrpc} / exporters/stdout/stdouttrace) + semconv)。 autoexport は採用しなかった ( D3 参照) ので prometheus / log bridge 系のトランジティブ依存が削れている。
 - **resource 取得** ( `resource.WithProcess() / WithOS() / WithHost()`) で `os/exec` 系の system call が発生する。 startup latency に数 ms 載る可能性。 ただし trace 有効時のみ。
-- `os.Setenv` による `SLOFF_*` → `OTEL_*` の上書きは **setupTracing の関数本体内に閉じる** ように設計しており ( D2' 参照)、 runner が task を spawn するタイミングでは既に元の値に戻っている。 child process ( task の cmd) が `OTEL_*` を読んでも SLOFF_ 由来の値は漏れない。
+- **SLOFF_ override は env を一切汚染しない**。 child process ( task の cmd) が `OTEL_*` を読んでも、 user の shell が設定した値だけを見る。 「 sloff だけ別 endpoint」 という方針が subprocess に対しても矛盾なく成り立つ。
 
 ### 将来再考の余地
 

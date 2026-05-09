@@ -238,16 +238,45 @@ func buildOTLPSpanExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
 	switch protocol {
 	case "grpc":
 		return otlptracegrpc.New(ctx, grpcSpanExporterOpts()...)
-	case "http/protobuf", "http/json":
+	case "http/protobuf":
 		return otlptracehttp.New(ctx, httpSpanExporterOpts()...)
+	case "http/json":
+		// OTel spec advertises http/json, but otel-go's otlptracehttp emits
+		// OTLP/protobuf bytes regardless of this setting. Silently sending
+		// protobuf when the user asked for JSON would break collectors that
+		// expect JSON; reject upfront with a clear message instead.
+		return nil, fmt.Errorf("otel: OTLP protocol %q is not implemented by otel-go's otlptracehttp; use http/protobuf or grpc", protocol)
 	default:
-		return nil, fmt.Errorf("otel: unsupported OTLP protocol %q (supported: grpc, http/protobuf, http/json)", protocol)
+		return nil, fmt.Errorf("otel: unsupported OTLP protocol %q (supported: grpc, http/protobuf)", protocol)
 	}
+}
+
+// resolveOTLPHTTPEndpoint computes the full URL the OTLP/HTTP exporter
+// should POST traces to, following the OTel env-config spec:
+//
+//   - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (signal-specific) is taken as-is.
+//   - OTEL_EXPORTER_OTLP_ENDPOINT (generic) is a base URL; the traces
+//     signal MUST append "/v1/traces" to it.
+//
+// Returns "" when neither is set so the caller can omit WithEndpointURL and
+// let otlptracehttp default to its built-in localhost endpoint.
+//
+// Without this append, the most common HTTP setup
+// (`OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318`) would POST to "/"
+// and most collectors would reject the export.
+func resolveOTLPHTTPEndpoint() string {
+	if v := effectiveEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); v != "" {
+		return v
+	}
+	if v := effectiveEnv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		return strings.TrimRight(v, "/") + "/v1/traces"
+	}
+	return ""
 }
 
 func httpSpanExporterOpts() []otlptracehttp.Option {
 	var opts []otlptracehttp.Option
-	if endpoint := firstNonEmpty("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+	if endpoint := resolveOTLPHTTPEndpoint(); endpoint != "" {
 		opts = append(opts, otlptracehttp.WithEndpointURL(endpoint))
 	}
 	if rawHeaders := firstNonEmpty("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"); rawHeaders != "" {

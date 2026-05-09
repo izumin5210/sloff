@@ -68,7 +68,14 @@ autoexport (`go.opentelemetry.io/contrib/exporters/autoexport`) は env だけ�
 | `none` | -- ( `envOTelEnabled` が false を返すので到達しない) | -- |
 | その他 | 起動エラー ( unsupported) | -- |
 
-OTLP の protocol は `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` > `OTEL_EXPORTER_OTLP_PROTOCOL` > default `http/protobuf` の順に解決し、 `grpc` / `http/protobuf` / `http/json` を受け付ける。 endpoint と headers は signal-specific ( `_TRACES_`) を generic より優先 ( OTel spec 準拠) し、 effective 値が非空なら `WithEndpointURL` / `WithHeaders` で渡す ( exporter 内部の env 読みは options で必ず上書きされる)。
+OTLP の protocol は `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` > `OTEL_EXPORTER_OTLP_PROTOCOL` > default `http/protobuf` の順に解決し、 `grpc` / `http/protobuf` のみ受け付ける。 OTel spec 上は `http/json` も列挙されているが otel-go の `otlptracehttp` は **常に protobuf を吐く** 実装であり、 「 JSON を選んだのに protobuf を送る」 silent な不整合を避けるため `http/json` は **起動時に明示的に拒否** する ( 実装が追従したらサポート再開)。 endpoint と headers は signal-specific ( `_TRACES_`) を generic より優先 ( OTel spec 準拠) し、 effective 値が非空なら `WithEndpointURL` / `WithHeaders` で渡す ( exporter 内部の env 読みは options で必ず上書きされる)。
+
+**HTTP endpoint の path 解決**: OTel spec は generic と signal-specific で path 規則を区別する:
+
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` ( signal-specific) は **as-is** で使う。 例: `http://traces.example.com/api/v1/traces` がそのまま POST 先になる。
+- `OTEL_EXPORTER_OTLP_ENDPOINT` ( generic) は **base URL** とみなし、 traces 信号には `/v1/traces` を **append** する。 例: `http://collector:4318` は `http://collector:4318/v1/traces` として POST される。
+
+`otlptracehttp.WithEndpointURL` は渡した URL をそのまま使うので、 path append は sloff 側 ( `resolveOTLPHTTPEndpoint`) で実装する。 これがないと最も一般的な `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` 設定で `/` に POST されて collector に拒否される。 gRPC は path を持たないので append 不要。
 
 OTel spec に書かれているが本実装が **直接サポートしていない** OTEL_ 変数 ( `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, TLS 関連等) は exporter が env を直接読むので shell 設定はそのまま効く。 ただし SLOFF_ prefix の override は届かない。 必要になれば options 経由のサポートを足す。
 

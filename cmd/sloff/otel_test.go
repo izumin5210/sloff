@@ -258,6 +258,20 @@ func TestBuildSpanExporter_Dispatch(t *testing.T) {
 		}
 	})
 
+	// http/json is in the OTel SDK config spec but otel-go's otlptracehttp
+	// emits OTLP/protobuf bytes regardless. Silently sending protobuf when the
+	// user asked for JSON breaks collectors that expect JSON, so reject the
+	// value at startup with a clear message.
+	t.Run("http/json rejected (otel-go SDK does not implement)", func(t *testing.T) {
+		clearOTelEnv(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+		t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+		_, err := buildSpanExporter(context.Background())
+		if err == nil {
+			t.Fatal("expected error for http/json, got nil")
+		}
+	})
+
 	t.Run("unsupported protocol rejected", func(t *testing.T) {
 		clearOTelEnv(t)
 		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
@@ -267,6 +281,72 @@ func TestBuildSpanExporter_Dispatch(t *testing.T) {
 			t.Fatal("expected error for unsupported protocol, got nil")
 		}
 	})
+}
+
+// TestResolveOTLPHTTPEndpoint locks in the OTel env-config rule that
+// OTEL_EXPORTER_OTLP_ENDPOINT is a *base* URL with /v1/traces appended for
+// the traces signal, while OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is taken
+// as-is. Without this, a perfectly normal `http://collector:4318` setup
+// would POST to "/" instead of "/v1/traces" and most collectors would
+// reject the export.
+func TestResolveOTLPHTTPEndpoint(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "no env returns empty (exporter uses its own default)",
+			env:  nil,
+			want: "",
+		},
+		{
+			name: "generic appends /v1/traces",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"},
+			want: "http://collector:4318/v1/traces",
+		},
+		{
+			name: "generic strips trailing slash before appending",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318/"},
+			want: "http://collector:4318/v1/traces",
+		},
+		{
+			name: "signal-specific used as-is (not modified)",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "https://traces.example.com/api/v1/traces"},
+			want: "https://traces.example.com/api/v1/traces",
+		},
+		{
+			name: "signal-specific wins over generic",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://generic:4318",
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://signal:4318/v1/traces",
+			},
+			want: "http://signal:4318/v1/traces",
+		},
+		{
+			name: "SLOFF generic override appends /v1/traces",
+			env:  map[string]string{"SLOFF_OTEL_EXPORTER_OTLP_ENDPOINT": "http://sloff-only:4318"},
+			want: "http://sloff-only:4318/v1/traces",
+		},
+		{
+			name: "SLOFF signal-specific override used as-is",
+			env: map[string]string{
+				"SLOFF_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://sloff-traces:4318/v1/traces",
+			},
+			want: "http://sloff-traces:4318/v1/traces",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearOTelEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := resolveOTLPHTTPEndpoint(); got != tc.want {
+				t.Fatalf("resolveOTLPHTTPEndpoint() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSetupTracing_DisabledIsZeroCost(t *testing.T) {

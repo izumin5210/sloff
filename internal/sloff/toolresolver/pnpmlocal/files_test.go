@@ -69,8 +69,8 @@ func TestGitLsFiles_HonoursTrackedFilesEvenWhenNowIgnored(t *testing.T) {
 
 // TestGitLsFiles_DropsSloffStateDir guards a self-invalidation foot-gun:
 // when a pnpm-local tool's importer is the repo root (importer dir = "."),
-// git ls-files would otherwise return .sloff/cache/** alongside the
-// user's files. sloff rewrites .sloff/cache/ on every run, so feeding
+// git ls-files would otherwise return .sloff/fingerprints/** alongside the
+// user's files. sloff rewrites .sloff/fingerprints/ on every run, so feeding
 // those paths into ExtraInputs would flip files_hash on every subsequent
 // run and miss the cache forever. Both tracked and untracked entries
 // under .sloff/ must be dropped — the directory is sloff's
@@ -78,12 +78,12 @@ func TestGitLsFiles_HonoursTrackedFilesEvenWhenNowIgnored(t *testing.T) {
 func TestGitLsFiles_DropsSloffStateDir(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "src", "cli.ts"), "x\n")
-	// Tracked record: simulate the ADR-0003 "commit cache records" workflow.
-	mustWrite(t, filepath.Join(root, ".sloff", "cache", "spec", "task", "tracked.yml"), "{}")
+	// Tracked record: simulate the ADR-0003 "commit fingerprints" workflow.
+	mustWrite(t, filepath.Join(root, ".sloff", "fingerprints", "spec", "task", "tracked.yml"), "{}")
 	// Untracked record: a fresh run wrote one and the user hasn't `git add`-ed yet.
 	gitInit(t, root)
-	gitRun(t, root, "add", "src/cli.ts", ".sloff/cache/spec/task/tracked.yml")
-	mustWrite(t, filepath.Join(root, ".sloff", "cache", "spec", "task", "untracked.yml"), "{}")
+	gitRun(t, root, "add", "src/cli.ts", ".sloff/fingerprints/spec/task/tracked.yml")
+	mustWrite(t, filepath.Join(root, ".sloff", "fingerprints", "spec", "task", "untracked.yml"), "{}")
 
 	got, err := pnpmlocal.GitLsFiles(context.Background(), root, ".")
 	if err != nil {

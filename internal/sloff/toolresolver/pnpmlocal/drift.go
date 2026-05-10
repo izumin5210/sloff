@@ -19,7 +19,7 @@ const installSnapshotPath = "node_modules/.pnpm/lock.yaml"
 // with pnpm-lock.yaml — either because pnpm install was never run or because
 // pnpm-lock.yaml has been updated since the last install. The runner surfaces
 // this through the resolver error chain so the user sees a clear "run pnpm
-// install" message instead of a confused stale-output cache hit later.
+// install" message instead of a confused stale-output fingerprint hit later.
 var ErrInstallStale = errors.New("pnpm-local: node_modules is out of sync with pnpm-lock.yaml")
 
 // AssertInstallInSync verifies that pnpm install has been run against the

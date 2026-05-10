@@ -10,9 +10,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
-	"github.com/izumin5210/sloff/internal/sloff/cache"
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 )
 
 var fixedClock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
@@ -21,12 +21,12 @@ func newStorage(root string, now time.Time) *local.Storage {
 	return local.New(root, local.WithClock(func() time.Time { return now }))
 }
 
-func newRecord(taskID string) *cachev1.Record {
-	return &cachev1.Record{
-		Input:         &cachev1.Input{Hash: "deadbeef"},
-		Output:        &cachev1.Output{Hash: "cafebabe"},
-		SchemaVersion: cache.SchemaVersion,
-		Spec: &cachev1.Spec{
+func newRecord(taskID string) *fingerprintv1.Record {
+	return &fingerprintv1.Record{
+		Input:         &fingerprintv1.Input{Hash: "deadbeef"},
+		Output:        &fingerprintv1.Output{Hash: "cafebabe"},
+		SchemaVersion: fingerprint.SchemaVersion,
+		Spec: &fingerprintv1.Spec{
 			Cmd:    "echo hi",
 			Dir:    "path/to/spec",
 			TaskId: taskID,
@@ -39,7 +39,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "deadbeef"}
+	key := fingerprint.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "deadbeef"}
 	rec := newRecord("gen")
 
 	if err := st.Save(ctx, key, rec); err != nil {
@@ -62,7 +62,7 @@ func TestLoad_MissReturnsFalse(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	got, ok, err := st.Load(ctx, cache.Key{SpecRelpath: "x", TaskID: "y", InputHash: "z"})
+	got, ok, err := st.Load(ctx, fingerprint.Key{SpecRelpath: "x", TaskID: "y", InputHash: "z"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSave_PreservesSpecRelpathHierarchyAndTimestampPrefix(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "abc123"}
+	key := fingerprint.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "abc123"}
 	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSave_PreservesSpecRelpathHierarchyAndTimestampPrefix(t *testing.T) {
 	// optional "_" substitution so List can losslessly recover the spec_relpath).
 	// The filename carries a YYYYMMDDHHMMSSsss timestamp prefix per ADR-0010;
 	// fixedClock = 2026-05-05 12:00:00.000 UTC.
-	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "20260505120000000-abc123.pb")
+	want := filepath.Join(root, ".sloff", "fingerprints", "path", "to", "spec", "gen", "20260505120000000-abc123.pb")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("expected record at %s, got err=%v", want, err)
 	}
@@ -98,11 +98,11 @@ func TestSave_PreservesPrefixOnInPlaceOverwrite(t *testing.T) {
 	st := local.New(root, local.WithClock(clockFn))
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
 	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
 		t.Fatal(err)
 	}
-	first := filepath.Join(root, ".sloff", "cache", "spec", "gen", "20260505120000000-h.pb")
+	first := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen", "20260505120000000-h.pb")
 	if _, err := os.Stat(first); err != nil {
 		t.Fatalf("first save missing: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSave_PreservesPrefixOnInPlaceOverwrite(t *testing.T) {
 	if _, err := os.Stat(first); err != nil {
 		t.Errorf("expected prefix preserved at %s, got err=%v", first, err)
 	}
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -141,15 +141,15 @@ func TestSave_CollapsesPostMergeDuplicates(t *testing.T) {
 
 	// Pre-seed two duplicate timestamp variants of the same Key, as if two
 	// branches independently produced first-writes that were later merged.
-	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	older := filepath.Join(dir, "20260101000000000-h.pb")
 	newer := filepath.Join(dir, "20260601000000000-h.pb")
 	rec := newRecord("gen")
-	bytes, err := cache.Marshal(rec)
+	bytes, err := fingerprint.Marshal(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +177,8 @@ func TestLoad_ReturnsLatestAmongDuplicates(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -187,11 +187,11 @@ func TestLoad_ReturnsLatestAmongDuplicates(t *testing.T) {
 	older.Output.Hash = "older"
 	newer := newRecord("gen")
 	newer.Output.Hash = "newer"
-	for path, rec := range map[string]*cachev1.Record{
+	for path, rec := range map[string]*fingerprintv1.Record{
 		filepath.Join(dir, "20260101000000000-h.pb"): older,
 		filepath.Join(dir, "20260601000000000-h.pb"): newer,
 	} {
-		b, err := cache.Marshal(rec)
+		b, err := fingerprint.Marshal(rec)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -217,7 +217,7 @@ func TestDelete_RemovesFile(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
 	if err := st.Save(ctx, key, newRecord("task")); err != nil {
 		t.Fatal(err)
 	}
@@ -238,12 +238,12 @@ func TestDelete_RemovesAllTimestampVariants(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "task")
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "task")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := cache.Marshal(newRecord("task"))
+	bytes, err := fingerprint.Marshal(newRecord("task"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestDelete_MissingKeyIsNoop(t *testing.T) {
 	root := t.TempDir()
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
-	if err := st.Delete(ctx, cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "h"}); err != nil {
+	if err := st.Delete(ctx, fingerprint.Key{SpecRelpath: "s", TaskID: "t", InputHash: "h"}); err != nil {
 		t.Errorf("Delete on missing should be noop, got %v", err)
 	}
 }
@@ -280,7 +280,7 @@ func TestList_AllAndFiltered(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	keys := []cache.Key{
+	keys := []fingerprint.Key{
 		{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"},
 		{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h2"},
 		{SpecRelpath: "spec/b", TaskID: "other", InputHash: "h3"},
@@ -291,7 +291,7 @@ func TestList_AllAndFiltered(t *testing.T) {
 		}
 	}
 
-	all, err := st.List(ctx, cache.ListFilter{})
+	all, err := st.List(ctx, fingerprint.ListFilter{})
 	if err != nil {
 		t.Fatalf("List all: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestList_AllAndFiltered(t *testing.T) {
 		t.Errorf("expected 3 keys, got %d: %+v", len(all), all)
 	}
 
-	bySpec, err := st.List(ctx, cache.ListFilter{SpecRelpath: "spec/a"})
+	bySpec, err := st.List(ctx, fingerprint.ListFilter{SpecRelpath: "spec/a"})
 	if err != nil {
 		t.Fatalf("List bySpec: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestList_AllAndFiltered(t *testing.T) {
 		t.Errorf("expected 2 keys for spec/a, got %d: %+v", len(bySpec), bySpec)
 	}
 
-	byTask, err := st.List(ctx, cache.ListFilter{TaskID: "other"})
+	byTask, err := st.List(ctx, fingerprint.ListFilter{TaskID: "other"})
 	if err != nil {
 		t.Fatalf("List byTask: %v", err)
 	}
@@ -321,12 +321,12 @@ func TestList_DedupesPostMergeDuplicates(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := cache.Marshal(newRecord("gen"))
+	bytes, err := fingerprint.Marshal(newRecord("gen"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestList_DedupesPostMergeDuplicates(t *testing.T) {
 		}
 	}
 
-	got, err := st.List(ctx, cache.ListFilter{})
+	got, err := st.List(ctx, fingerprint.ListFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,25 +350,25 @@ func TestList_OlderThan(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	old := cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "old"}
+	old := fingerprint.Key{SpecRelpath: "s", TaskID: "t", InputHash: "old"}
 	if err := st.Save(ctx, old, newRecord("t")); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate the on-disk mtime to something definitively older.
-	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "20260505120000000-old.pb")
+	oldFile := filepath.Join(root, ".sloff", "fingerprints", "s", "t", "20260505120000000-old.pb")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldFile, past, past); err != nil {
 		t.Fatal(err)
 	}
 
 	// new record after the cutoff
-	newKey := cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "new"}
+	newKey := fingerprint.Key{SpecRelpath: "s", TaskID: "t", InputHash: "new"}
 	if err := st.Save(ctx, newKey, newRecord("t")); err != nil {
 		t.Fatal(err)
 	}
 
 	cutoff := time.Now().Add(-1 * time.Hour)
-	got, err := st.List(ctx, cache.ListFilter{OlderThan: cutoff})
+	got, err := st.List(ctx, fingerprint.ListFilter{OlderThan: cutoff})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -382,11 +382,11 @@ func TestCollapseDuplicates(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := cache.Marshal(newRecord("gen"))
+	bytes, err := fingerprint.Marshal(newRecord("gen"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,14 +432,14 @@ func TestNew_DefaultClockUsesNow(t *testing.T) {
 	st := local.New(root)
 	ctx := context.Background()
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "deadbeef"}
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "deadbeef"}
 	before := time.Now().UTC().Add(-time.Second)
 	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	after := time.Now().UTC().Add(time.Second)
 
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("expected single record, got entries=%v err=%v", entries, err)
@@ -466,11 +466,11 @@ func TestList_IgnoresForeignFiles(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := cache.Marshal(newRecord("gen"))
+	bytes, err := fingerprint.Marshal(newRecord("gen"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestList_IgnoresForeignFiles(t *testing.T) {
 		}
 	}
 
-	got, err := st.List(ctx, cache.ListFilter{})
+	got, err := st.List(ctx, fingerprint.ListFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,11 +508,11 @@ func TestCollapseDuplicates_RespectsCtx(t *testing.T) {
 	root := t.TempDir()
 	st := newStorage(root, fixedClock)
 
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := cache.Marshal(newRecord("gen"))
+	bytes, err := fingerprint.Marshal(newRecord("gen"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,15 +551,15 @@ func TestSave_ErrorOnUnwritableDir(t *testing.T) {
 
 	// Create a file at the path where Save would otherwise create a
 	// directory; MkdirAll then fails because a non-dir occupies the path.
-	cacheRoot := filepath.Join(root, ".sloff", "cache", "spec")
-	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+	fingerprintRoot := filepath.Join(root, ".sloff", "fingerprints", "spec")
+	if err := os.MkdirAll(fingerprintRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheRoot, "task"), []byte("not a dir"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fingerprintRoot, "task"), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
 	if err := st.Save(ctx, key, newRecord("task")); err == nil {
 		t.Error("expected Save to fail when parent path is occupied by a regular file")
 	}
@@ -574,14 +574,14 @@ func TestLoad_PropagatesUnmarshalError(t *testing.T) {
 	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
-	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "20260505120000000-h.pb"), []byte("not a proto"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := st.Load(ctx, cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"})
+	_, _, err := st.Load(ctx, fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"})
 	if err == nil {
 		t.Error("expected Load to surface decode error for corrupt record")
 	}

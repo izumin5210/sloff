@@ -213,7 +213,7 @@ func validateCommands(cmds []Command) error {
 			return fmt.Errorf("commands[%d] (%s): outputs is required", i, c.Name)
 		}
 		// tools is required because sloff mixes resolved tool contributions into
-		// the cache key (ADR-0004 D1). Empty tools means the task has no version
+		// the fingerprint key (ADR-0004 D1). Empty tools means the task has no version
 		// signal at all and stale outputs could be served indefinitely.
 		if len(c.Tools) == 0 {
 			return fmt.Errorf("commands[%d] (%s): tools is required", i, c.Name)

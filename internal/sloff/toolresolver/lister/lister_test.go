@@ -55,7 +55,7 @@ func TestMemoized_CachesByKey(t *testing.T) {
 	if _, err := m.List(context.Background(), "", "./cmd/b"); err != nil {
 		t.Fatalf("List b: %v", err)
 	}
-	// Same entry under a different specDir is a distinct cache key.
+	// Same entry under a different specDir is a distinct fingerprint key.
 	if _, err := m.List(context.Background(), "sub", "./cmd/a"); err != nil {
 		t.Fatalf("List sub/a: %v", err)
 	}

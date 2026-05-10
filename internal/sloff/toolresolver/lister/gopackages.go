@@ -44,7 +44,7 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	cfg := &packages.Config{
 		// NeedEmbedFiles surfaces //go:embed targets in pkg.EmbedFiles. Without it,
 		// edits to embedded templates / schemas / data files would not change the
-		// resolved_versions_hash and sloff would serve stale cache hits even though `go run`
+		// resolved_versions_hash and sloff would serve stale fingerprint hits even though `go run`
 		// rebuilds the binary on every embed change.
 		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedModule,

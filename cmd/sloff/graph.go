@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 	"github.com/izumin5210/sloff/internal/sloff/explain"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
 	"github.com/izumin5210/sloff/internal/sloff/spec"
 )

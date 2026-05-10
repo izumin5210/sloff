@@ -2,7 +2,7 @@
 //
 // It applies to tools that are built from sources living inside the repository
 // (typical examples: bespoke protoc plugins, code generators wired up via
-// `go run ./cmd/...`). These tools have no SemVer to read, so the cache key
+// `go run ./cmd/...`). These tools have no SemVer to read, so the fingerprint key
 // is split across two of sloff's hash buckets:
 //
 //   - Internal source files (main module / repo-local sources) become

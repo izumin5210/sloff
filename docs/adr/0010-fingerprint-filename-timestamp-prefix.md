@@ -1,10 +1,10 @@
-# ADR-0010: キャッシュレコード filename への timestamp prefix
+# ADR-0010: fingerprint filename への timestamp prefix
 
 ## Context
 
 ### 背景
 
-[ADR-0003](./0003-record-storage-strategy.md) で record を git per-task per-input ファイル方式 (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb`) で配置することを確定し、 R5 「コンフリクト無し」 を採用根拠の中核に据えた。 [ADR-0009](./0009-cache-record-binary-serialization.md) で proto binary 直列化に切替えた際、 R5 の達成手段は実質的に **「同一 input から同一 byte 列を生成する規約」 + 既存 record に対する書き戻しスキップルール** に依存する形となった。
+[ADR-0003](./0003-fingerprint-storage-strategy.md) で record を git per-task per-input ファイル方式 (`.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb`) で配置することを確定し、 R5 「コンフリクト無し」 を採用根拠の中核に据えた。 [ADR-0009](./0009-fingerprint-binary-serialization.md) で proto binary 直列化に切替えた際、 R5 の達成手段は実質的に **「同一 input から同一 byte 列を生成する規約」 + 既存 record に対する書き戻しスキップルール** に依存する形となった。
 
 しかしこの依存構造には別 branch で independently に initial write される ケースの穴が残っている:
 
@@ -21,14 +21,14 @@ ADR-0009 §"byte stability の担保" の write-skip ルールは「既に local
 - **R5 (コンフリクト無し)**: 別 branch で independently に initial write された record が衝突しない
 - **ファイル数の有界性**: 同一 (spec, task, input) Key に対して record ファイルが累積しない
 - **schema 進化への robust 性**: 将来 field 追加で R5 が再度規約依存に戻らない
-- **外部 contract の維持**: `cache.Key` (3-tuple) → record の lookup 契約は変えない
+- **外部 contract の維持**: `fingerprint.Key` (3-tuple) → record の lookup 契約は変えない
 - **debug 容易性**: filename から initial creation 時刻が判別できる
 - **test 容易性**: clock を test で固定可能
 
 ### References
 
-- [ADR-0003: キャッシュレコードのストレージ方式](./0003-record-storage-strategy.md)
-- [ADR-0009: キャッシュレコードの直列化形式 (protobuf binary)](./0009-cache-record-binary-serialization.md)
+- [ADR-0003: fingerprint のストレージ方式](./0003-fingerprint-storage-strategy.md)
+- [ADR-0009: fingerprint の直列化形式 (protobuf binary)](./0009-fingerprint-binary-serialization.md)
 - [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
@@ -53,7 +53,7 @@ ADR-0009 §"byte stability の担保" の write-skip ルールは「既に local
 
 - 現 schema には `ResolvedVersion.source` という別の drift 源が残る (e.g. aqua → mise 乗り換えで version 文字列は同じだが source 表記が変わる、 ADR-0009 §"byte stability の担保" §4 で述べた exception ケース)。 完全に conflict-free にするには `source` も削除が必要
 - proto runtime の minor / patch 差で micro byte drift が発生しうる ( ADR-0009 §"byte stability の担保" §5 の write-skip ルールは local 既存 record でしか効かない)
-- 将来の field 追加で「これは drift しないか」 の review 圧力が恒久的に発生する。 一度の見落としで cache 全体のマージコンフリクトが復活する
+- 将来の field 追加で「これは drift しないか」 の review 圧力が恒久的に発生する。 一度の見落としで fingerprint 全体のマージコンフリクトが復活する
 
 R5 を 「規約」 で守り続ける構造は、 sloff の成長に伴って恒常コストとして積み上がる。
 
@@ -78,14 +78,14 @@ Save 毎に `{ts}-{hash}.pb` を新規作成する案。 R5 / schema robust 性�
 
 1. **R5 の達成手段を規約 → layout 不変条件に格上げ**。 schema 進化に robust になる
 2. **`generated_at` field を proto schema から削除可能**になる。 ADR-0009 で informational として残していた wall-clock field が filename に migration され、 wire bytes に壁時計が乗らない構造になる
-3. **外部 contract (`cache.Key` 3-tuple) は変えない**。 latest-wins ルールで「同 Key → 1 record」 という呼び出し側の契約を維持
+3. **外部 contract (`fingerprint.Key` 3-tuple) は変えない**。 latest-wins ルールで「同 Key → 1 record」 という呼び出し側の契約を維持
 4. **deterministic generator scope 下で latest-wins は correctness を損なわない**。 同 input から作られた複数 record は意味的に等価
 5. **ファイル累積を回避**: in-place 上書きで通常時は Key あたり 1 件、 merge 直後の一時的併存は GC で収斂
 
 ### Filename format
 
 ```
-.sloff/cache/<spec_relpath>/<task_id>/{YYYYMMDDHHMMSSsss}-{hash}.pb
+.sloff/fingerprints/<spec_relpath>/<task_id>/{YYYYMMDDHHMMSSsss}-{hash}.pb
 ```
 
 - `YYYYMMDDHHMMSSsss` は millisecond 精度の固定桁 (17 桁)。 lexicographic 比較で chronological 順になる
@@ -130,15 +130,15 @@ debug 上の生成時刻情報が必要なら filename と git log から取得�
 
 `generated_at` 削除は wire-incompatible 変更のため、 `schema_version` を V2 → V3 に bump する。 ADR-0009 同様 「migration logic は実装しない」 方針を踏襲し、 V2 record は invalid として扱う ( 利用者ゼロ前提下では実質ゼロコスト)。
 
-### `cache.Key` および Storage interface
+### `fingerprint.Key` および Storage interface
 
-`cache.Key` 構造体 (`SpecRelpath`, `TaskID`, `InputHash`) は **変更しない**。 timestamp は Storage 実装内部で生成・ 保持し、 外部からは 3-tuple → record の lookup として振る舞う。
+`fingerprint.Key` 構造体 (`SpecRelpath`, `TaskID`, `InputHash`) は **変更しない**。 timestamp は Storage 実装内部で生成・ 保持し、 外部からは 3-tuple → record の lookup として振る舞う。
 
 ```go
-// cache/storage.go (interface 不変)
+// fingerprint/storage.go (interface 不変)
 type Storage interface {
-    Save(ctx context.Context, key Key, record *cachev1.Record) error  // timestamp は実装内で生成
-    Load(ctx context.Context, key Key) (*cachev1.Record, bool, error) // latest を返す
+    Save(ctx context.Context, key Key, record *fingerprintv1.Record) error  // timestamp は実装内で生成
+    Load(ctx context.Context, key Key) (*fingerprintv1.Record, bool, error) // latest を返す
     Delete(ctx context.Context, key Key) error                        // 全 timestamp 分削除
     List(ctx context.Context, filter ListFilter) ([]Key, error)       // duplicate は dedupe して返す
     Name() string
@@ -152,7 +152,7 @@ Storage local 実装内部に **clock 抽象** を持たせ、 test で固定可
 merge 直後に複数 `*-{hash}.pb` が併存した状態は、 deterministic generator 前提下では Save 経路 (output 変化) が発火しないため Save 内 collapse では収斂しないことが多い。 そのため:
 
 - **Save 経路の collapse は defensive**: たまたま Save が fire したらついでに collapse
-- **`sloff cache gc` が primary な収斂経路**: 同 Key の `*-{hash}.pb` を最古 1 件に collapse する処理を追加する
+- **`sloff fingerprint gc` が primary な収斂経路**: 同 Key の `*-{hash}.pb` を最古 1 件に collapse する処理を追加する
 
 input が変わって別 hash に移行した場合、 旧 hash の duplicate は孤立した stale record として残るが、 これは既存 mtime-based GC ポリシーの責務 ( ADR-0003 §ゴミ ( 古い record) の扱い)。
 
@@ -186,30 +186,30 @@ clock 注入は test だけでなく将来の reproducibility 検証にも使え
 
 ### 負の影響
 
-- `cache.Storage` の Local 実装が directory listing ベースになり、 計算量が dir 内ファイル数に対して O(N) になる。 通常運用では Key あたり 1 ファイルなので影響は無視可能
+- `fingerprint.Storage` の Local 実装が directory listing ベースになり、 計算量が dir 内ファイル数に対して O(N) になる。 通常運用では Key あたり 1 ファイルなので影響は無視可能
 - E2E goldens の filename に timestamp が含まれ、 clock 注入 (or mask) が必須に。 既存 testdata の再生成が必要
-- `sloff cache gc` に duplicate collapse 処理を追加する必要がある
+- `sloff fingerprint gc` に duplicate collapse 処理を追加する必要がある
 - merge 直後の一時的な ファイル併存状態が PR diff に現れる (集合論的には R5 違反ではないが、 視覚的ノイズ)。 GC で収斂するため恒常的にはならない
 
 ### schema_version 移行
 
-ADR-0009 同様、 V2 → V3 の migration logic は実装しない。 既存 V2 record は invalid として扱い、 利用者は再生成で V3 に移行する ( cache miss → 通常 generator 実行)。
+ADR-0009 同様、 V2 → V3 の migration logic は実装しない。 既存 V2 record は invalid として扱い、 利用者は再生成で V3 に移行する ( fingerprint miss → 通常 generator 実行)。
 
 ### 後続の更新
 
 本 ADR の決定を受けて以下を更新する:
 
-1. [ADR-0003](./0003-record-storage-strategy.md) §"Decision" §"PR ノイズ / grep ノイズの懸念": R5 の達成手段が path uniqueness に格上げされた旨を追記
-2. [ADR-0009](./0009-cache-record-binary-serialization.md): `generated_at` 削除、 schema_version V3 bump、 §"byte stability の担保" の write-skip ルールを「primary が本 ADR の path uniqueness、 micro drift 救済が write-skip」 に再整理
+1. [ADR-0003](./0003-fingerprint-storage-strategy.md) §"Decision" §"PR ノイズ / grep ノイズの懸念": R5 の達成手段が path uniqueness に格上げされた旨を追記
+2. [ADR-0009](./0009-fingerprint-binary-serialization.md): `generated_at` 削除、 schema_version V3 bump、 §"byte stability の担保" の write-skip ルールを「primary が本 ADR の path uniqueness、 micro drift 救済が write-skip」 に再整理
 3. [Design Doc](../design/architecture.md):
     - §"ファイル配置規則" の filename を `{YYYYMMDDHHMMSSsss}-{hash}.pb` に更新
     - §"Schema (protobuf)" の JSON 例から `generated_at` を削除
     - §"Cache lookup アルゴリズム" の filename 表現を更新
     - §"Storage interface" のコメントに clock 注入 / list-based Save / Load を反映
-4. proto schema (`proto/sloff/cache/v1/cache.proto`): `generated_at` field 削除、 `SCHEMA_VERSION_V3` 追加
-5. Storage local 実装 (`internal/sloff/cache/local/local.go`): clock 抽象、 list-based Save / Load、 collapse ロジック
+4. proto schema (`proto/sloff/fingerprint/v1/fingerprint.proto`): `generated_at` field 削除、 `SCHEMA_VERSION_V3` 追加
+5. Storage local 実装 (`internal/sloff/fingerprint/local/local.go`): clock 抽象、 list-based Save / Load、 collapse ロジック
 6. runner (`internal/sloff/runner/runner.go`): `Record.GeneratedAt` assignment 削除、 write-skip rule のコメント更新
-7. `sloff cache gc` (`cmd/sloff/cache.go`): duplicate collapse 処理追加
+7. `sloff fingerprint gc` (`cmd/sloff/fingerprint.go`): duplicate collapse 処理追加
 8. E2E ( `internal/sloff/runner/runner_test.go` ほか): clock 注入経路を E2E にも通す、 全 goldens を `-update` で再生成、 新規 case `concurrent-first-write-merge` を追加
 
 ### 撤回時の影響

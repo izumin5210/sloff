@@ -1,10 +1,10 @@
-# ADR-0003: キャッシュレコードのストレージ方式
+# ADR-0003: fingerprint のストレージ方式
 
 ## Context
 
 ### 背景
 
-[ADR-0001](./0001-cache-aware-codegen-orchestrator-decision.md) で「自作」、 [ADR-0002](./0002-cache-hit-decision-model.md) で「output-comparison」が確定した。 自作する以上、 cache record (= input_hash → output_hash + output ファイル一覧の mapping) を **どこに置くか** を決める必要がある。
+[ADR-0001](./0001-fingerprint-aware-codegen-orchestrator-decision.md) で「自作」、 [ADR-0002](./0002-fingerprint-hit-decision-model.md) で「output-comparison」が確定した。 自作する以上、 fingerprint (= input_hash → output_hash + output ファイル一覧の mapping) を **どこに置くか** を決める必要がある。
 
 選択肢は git 内に置くか、 リポジトリ外 (S3 等) に置くかの大きく 2 軸、 さらに artifact 本体を含めるか含めないかで分岐する。 本 ADR ではこの選定を確定する。
 
@@ -20,8 +20,8 @@
 
 ### References
 
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
-- [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](./0001-fingerprint-aware-codegen-orchestrator-decision.md)
+- [ADR-0002: fingerprint hit 判定モデル](./0002-fingerprint-hit-decision-model.md)
 - [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
@@ -40,14 +40,14 @@
 
 ### Option A: git に per-task per-input ファイル (採用)
 
-`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb` の 1 ファイル / 1 record で git 管理する ( 拡張子と直列化 format は ADR-0009 で proto binary に確定)。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
+`.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb` の 1 ファイル / 1 record で git 管理する ( 拡張子と直列化 format は ADR-0009 で proto binary に確定)。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
 
 👍 **Pros**
 
 - 物理的に分割されているため構造的にコンフリクトしない (R5)
 - git の同一コミットで完結するため認証 / 外部 infra / ネットワーク不要 (R1 を最も素直に満たす)
 - artifact を含まないため record サイズが小さい (1 record 数 KB レンジ、 全体で数 MB 試算)
-- `git pull` すれば自動的に最新の cache 状態が手元に揃うシンプルなメンタルモデル
+- `git pull` すれば自動的に最新の fingerprint 状態が手元に揃うシンプルなメンタルモデル
 
 👎 **Cons**
 
@@ -81,15 +81,15 @@ record を S3 / R2 等に put / get する。 turbo Remote Cache や bazel Build
 
 👎 **Cons**
 
-- ネットワーク必須。 オフライン環境 (出張中、 飛行機内、 ネット不安定な状況) で生成を走らせると cache fetch に失敗する。 ただし「過去にダウンロード済みの record を ローカルに 2 段キャッシュする」ことで頻度は緩和できる
+- ネットワーク必須。 オフライン環境 (出張中、 飛行機内、 ネット不安定な状況) で生成を走らせると fingerprint fetch に失敗する。 ただし「過去にダウンロード済みの record を ローカルに 2 段キャッシュする」ことで頻度は緩和できる
 - bucket / lifecycle policy / アクセス制御 / metrics の運用責務が新たに発生する
-- record の状態がリポジトリ外に置かれるため、 cache 起因の挙動を git history から追跡できない ( bisect で再現性を取りづらい)
+- record の状態がリポジトリ外に置かれるため、 fingerprint 起因の挙動を git history から追跡できない ( bisect で再現性を取りづらい)
 
 > **クラウド認証** ( AWS / GCP / Azure 等) が組織内で既に確立されているチームでは、 セットアップコストはほぼ追加発生しない。 一方で OSS として配布する場合、 利用組織ごとの認証セットアップが必要なため初期導入のハードルになりうる。
 
 ### Option D: hash をファイル名に artifact 直コミット
 
-input_hash をファイル名にして、 生成物本体を `.sloff/cache/` 配下にそのまま git commit する。
+input_hash をファイル名にして、 生成物本体を `.sloff/fingerprints/` 配下にそのまま git commit する。
 
 👍 **Pros**
 
@@ -129,38 +129,38 @@ git に小さな mapping (record) を持ち、 artifact を S3 に置く。
 3. **E は artifact を S3 に置くが、 そもそも artifact 共有自体のメリットが ADR-0002 の Option 3 棄却ロジックで小さいと判断されており、 record の git 管理に S3 依存を上乗せする実装複雑度に見合わない**
 4. **残った A vs C は「git で完結する素朴さ」 vs 「外部ストレージで GC を自動化する clean さ」のトレードオフ**
    - 一般的 monorepo 規模試算 (record 1 つ 約 2 KB × タスク数 200 × 並走世代 10 ≒ 4 MB) では、 git に置いて困る容量ではない
-   - GC は CI nightly sweep / `cache gc` サブコマンド / pre-commit hook で実装可能
-   - C の主たるデメリットは「ネットワーク必須」と「外部 infra 運用責務」。 ローカル 2 段キャッシュで前者は緩和できるが、 後者 (bucket 運用、 lifecycle policy、 metrics) は恒常的なコスト
+   - GC は CI nightly sweep / `fingerprint gc` サブコマンド / pre-commit hook で実装可能
+   - C の主たるデメリットは「ネットワーク必須」と「外部 infra 運用責務」。 ローカル 2 段 fingerprint storeで前者は緩和できるが、 後者 (bucket 運用、 lifecycle policy、 metrics) は恒常的なコスト
    - C の主たるメリットは「PR diff にノイズが現れない」「容量無制限」だが、 一般的 monorepo 規模ではどちらも決定的ではない
 5. **結果、 A の素朴さ ( git pull で完結、 ネットワーク不要、 外部 infra ゼロ) が、 一般的 monorepo の規模と運用フローに最も適合する**
 
 PR ノイズ / grep ノイズの懸念 (A の Cons) については、 二段階で緩和する:
 
 - record 直列化を proto binary にする ( ADR-0009)。 これにより grep / 各種エディタ search index / file indexer に対して **format レベルで opaque** になり、 ツール別の ignore 設定配布が不要になる
-- `.sloff/cache/**` を `.gitattributes` で `linguist-generated` 指定し、 GitHub PR diff の default collapsed にする
-- `git config diff.sloff-cache.textconv "sloff cache show"` を README で案内し、 ローカル `git diff` では decode 後の内容が見えるようにする
-- PR template に「`.sloff/cache/` 配下の差分は人間レビュー対象外」と明記する
+- `.sloff/fingerprints/**` を `.gitattributes` で `linguist-generated` 指定し、 GitHub PR diff の default collapsed にする
+- `git config diff.sloff-fingerprint.textconv "sloff fingerprint show"` を README で案内し、 ローカル `git diff` では decode 後の内容が見えるようにする
+- PR template に「`.sloff/fingerprints/` 配下の差分は人間レビュー対象外」と明記する
 
 で運用上緩和する。
 
-R5 (コンフリクト無し) の達成手段は本 ADR 採用時点では「物理的なファイル分割」 を意図していたが、 ADR-0009 で proto binary 化した結果、 **同 input に対する別 branch 独立 first-write 同士で `generated_at` 等の壁時計依存 field が drift して同 filename で byte 競合する経路** が残っていた。 これは [ADR-0010](./0010-cache-record-filename-timestamp-prefix.md) で filename に timestamp prefix を導入することで構造的に解消され、 R5 の達成手段は **path uniqueness を primary** とする形に格上げされている。
+R5 (コンフリクト無し) の達成手段は本 ADR 採用時点では「物理的なファイル分割」 を意図していたが、 ADR-0009 で proto binary 化した結果、 **同 input に対する別 branch 独立 first-write 同士で `generated_at` 等の壁時計依存 field が drift して同 filename で byte 競合する経路** が残っていた。 これは [ADR-0010](./0010-fingerprint-filename-timestamp-prefix.md) で filename に timestamp prefix を導入することで構造的に解消され、 R5 の達成手段は **path uniqueness を primary** とする形に格上げされている。
 
 ## Consequences
 
 ### 正の影響
 
 - 構造的コンフリクトを解消し、 ブランチ間で record が衝突しなくなる
-- 認証 / 外部 infra / ネットワークなしで開発者間 / CI 間で cache を共有できる
-- `git pull` で cache 状態も同期される単純なメンタルモデル
+- 認証 / 外部 infra / ネットワークなしで開発者間 / CI 間で fingerprint を共有できる
+- `git pull` で fingerprint 状態も同期される単純なメンタルモデル
 - 既存パッケージマネージャ群 (`go.mod` / `aqua.yaml` / `pnpm-lock.yaml`) を変更せずに済む
 
 ### 負の影響
 
 - record が累積するため GC 機構の実装が必要:
   - CI nightly sweep で古い record の削除 PR を bot 投稿
-  - `sloff cache gc` サブコマンドで同一 task 配下の record を mtime 古い順に削除
+  - `sloff fingerprint gc` サブコマンドで同一 task 配下の record を mtime 古い順に削除
   - lefthook / pre-commit hook で task rename / 削除コミット時に対応 record も削除
-- record 差分が PR diff に現れるため、 `linguist-generated` の diff collapsed 設定 + `sloff cache show` textconv 等のノイズ抑制設定が必要 ( ADR-0009 で format-level opacity を確保した上で、 PR レビューでの折りたたみは別レイヤで対応)
+- record 差分が PR diff に現れるため、 `linguist-generated` の diff collapsed 設定 + `sloff fingerprint show` textconv 等のノイズ抑制設定が必要 ( ADR-0009 で format-level opacity を確保した上で、 PR レビューでの折りたたみは別レイヤで対応)
 - record ファイル数の増加に伴う git operations のスループットは将来的に再評価
 - 容量が想定を超えた場合、 もしくは将来 artifact 共有が必要になった場合は Hybrid (Option E) への拡張余地を残す
 

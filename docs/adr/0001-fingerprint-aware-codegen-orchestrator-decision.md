@@ -1,12 +1,12 @@
-# ADR-0001: キャッシュ可能コード生成オーケストレーターの選定
+# ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定
 
 ## Context
 
 ### 背景
 
-中〜大規模の polyglot monorepo では、 コード生成 ( proto / SQL モデル / mock / GraphQL / 内製 protoc plugin / pnpm 系コードジェネレータ など 数十のツール) にかかる時間が開発生産性のボトルネックになりやすい。 さらに 多くのチームで **開発者間 / CI 間でキャッシュを共有できない** 構造になっており、 `git pull` 直後 / ブランチ切替直後には毎回フル再生成が走る。
+中〜大規模の polyglot monorepo では、 コード生成 ( proto / SQL モデル / mock / GraphQL / 内製 protoc plugin / pnpm 系コードジェネレータ など 数十のツール) にかかる時間が開発生産性のボトルネックになりやすい。 さらに 多くのチームで **開発者間 / CI 間で fingerprint を共有できない** 構造になっており、 `git pull` 直後 / ブランチ切替直後には毎回フル再生成が走る。
 
-この状況を解消するには「キャッシュ可能で、 かつ結果を共有できるコード生成オーケストレーター」を導入する必要がある。 大きな選択は **既製品を採用するか / 自作するか** に集約される。 本 ADR ではこの分岐を確定する。
+この状況を解消するには「fingerprint ベースで、 かつ結果を共有できるコード生成オーケストレーター」を導入する必要がある。 大きな選択は **既製品を採用するか / 自作するか** に集約される。 本 ADR ではこの分岐を確定する。
 
 ### 評価軸
 
@@ -18,14 +18,14 @@
 - 既存 monorepo 構造 ( Go module、 pnpm workspace 等) を大きく変えないこと
 - 全エンジニアに課す日常メンテコストが許容範囲に収まること
 
-#### キャッシュ健全性の 2 防御線 ( 本 ADR の核)
+#### fingerprint の健全性の 2 防御線 ( 本 ADR の核)
 
-共有モデルでキャッシュを運用するうえで、 「**cache が `skip` を返したとき、 その出力が本当に正しいことが構造で保証される**」必要がある。 さもなければ「cache を信じきれず手動で `--no-cache` を打つ」習慣が現場に残り、 共有 cache の存在意義そのものが失われる。 そのために以下 2 つを構造で防ぐ仕組みが必要:
+共有モデルで fingerprint を運用するうえで、 「**fingerprint が `skip` を返したとき、 その出力が本当に正しいことが構造で保証される**」必要がある。 さもなければ「fingerprint を信じきれず手動で `--no-fingerprint` を打つ」習慣が現場に残り、 共有 fingerprint store の存在意義そのものが失われる。 そのために以下 2 つを構造で防ぐ仕組みが必要:
 
 | 防御線 | 防ぐ嘘のシナリオ | 防御線が入ることで得られる嬉しさ |
 |---|---|---|
-| **(1) OS 中立な論理 version の取得元が runtime と必ず整合する** | (a) Mac で生成した record を Linux CI で再利用したいが、 ツールバイナリが OS 別で hash が分裂し、 record が共有不能になる。 (b) lockfile を更新したが install を忘れた状態で生成すると、 lockfile 上の新 version で計算した hash と古いバイナリの実行結果が乖離した「嘘 record」が共有される | (a) cross-OS で record を物理的に共有できる ( これが満たせないと共有 cache そのものが成立しない)。 (b) install 忘れ起因の嘘 record が record store に混入しない |
-| **(2) output-comparison ヒット判定** | (a) cache record だけ pull したが、 別開発者が手元で formatter で output を書き換えた / rebase で output が drift / 部分 checkout で output が欠損 → input_hash 一致で skip → 古い / 壊れた output で動く。 (b) 過去 non-deterministic に振る舞った generator の record が残り、 input_hash 一致で誤 hit する。 (c) Bazel `bazelbuild/bazel#14543` 型「 empty output でも success として cache」 | input が一致していても output 実体の drift を検出して fail-fast / 再生成。 「 cache が嘘をついていない」 を構造で保証する。 これがないと「 cache を信じきれず手動で `--no-cache` を打つ」 運用文化が共有 cache を死語にする |
+| **(1) OS 中立な論理 version の取得元が runtime と必ず整合する** | (a) Mac で生成した record を Linux CI で再利用したいが、 ツールバイナリが OS 別で hash が分裂し、 record が共有不能になる。 (b) lockfile を更新したが install を忘れた状態で生成すると、 lockfile 上の新 version で計算した hash と古いバイナリの実行結果が乖離した「嘘 record」が共有される | (a) cross-OS で record を物理的に共有できる ( これが満たせないと共有 fingerprint store そのものが成立しない)。 (b) install 忘れ起因の嘘 record が record store に混入しない |
+| **(2) output-comparison ヒット判定** | (a) fingerprint だけ pull したが、 別開発者が手元で formatter で output を書き換えた / rebase で output が drift / 部分 checkout で output が欠損 → input_hash 一致で skip → 古い / 壊れた output で動く。 (b) 過去 non-deterministic に振る舞った generator の record が残り、 input_hash 一致で誤 hit する。 (c) Bazel `bazelbuild/bazel#14543` 型「 empty output でも success として cache」 | input が一致していても output 実体の drift を検出して fail-fast / 再生成。 「 fingerprint が嘘をついていない」 を構造で保証する。 これがないと「 fingerprint を信じきれず手動で `--no-fingerprint` を打つ」 運用文化が共有 fingerprint store を死語にする |
 
 防御線 (1) は channel 別に取得方法を変えて達成する:
 
@@ -33,7 +33,7 @@
 - **workspace 内 npm package**: lockfile を SSoT とし、 lockfile vs `node_modules` の整合は preflight で検証 ( pnpm-local resolver + checker)
 - **内製ソース**: ソース hash を直接取るので runtime とのズレは起こらない ( go-local / pnpm-local)
 
-中〜大規模 monorepo ( 数百 task / 数百エンジニア / 日に数百回のコード生成実行) の規模では、 偽 cache が共有された場合の影響範囲が大きく、 これら 2 防御線を設計レベルで強制する価値は高い。
+中〜大規模 monorepo ( 数百 task / 数百エンジニア / 日に数百回のコード生成実行) の規模では、 偽 fingerprint が共有された場合の影響範囲が大きく、 これら 2 防御線を設計レベルで強制する価値は高い。
 
 > **Updated 2026-05-05**: 旧版では (1) OS 中立 logical version、 (2) lockfile vs install preflight、 (3) output-comparison の 3 防御線 と整理していた。 設計を進める中で、 prebuilt binary については「実 install バイナリの `--version` 出力」 を直接 hash 入力にする方式 ( script resolver) で (1) と旧 (2) が同時自動成立することが分かったため、 防御線を 2 つに統合し、 preflight は lockfile-based channel 固有の実装詳細に格下げした。
 
@@ -41,8 +41,8 @@
 
 ### References
 
-- [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
-- [ADR-0003: キャッシュレコードのストレージ方式](./0003-record-storage-strategy.md)
+- [ADR-0002: fingerprint hit 判定モデル](./0002-fingerprint-hit-decision-model.md)
+- [ADR-0003: fingerprint のストレージ方式](./0003-fingerprint-storage-strategy.md)
 - [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
@@ -84,7 +84,7 @@ JS/TS 中心の monorepo タスクオーケストレータ。 Vercel が開発�
 - (2) output-comparison: input-only 判定、 output は検証しない
 - 外部配布の prebuilt binary ( nix / mise / aqua / `go tool` 等) は SSoT として認識されない
 
-2 防御線すべてを満たさない。 「JS 単言語で素早く incremental」という設計目標が本 ADR の問題設定 ( polyglot codegen / 共有 cache の健全性) と合わない。
+2 防御線すべてを満たさない。 「JS 単言語で素早く incremental」という設計目標が本 ADR の問題設定 ( polyglot codegen / 共有 fingerprint store の健全性) と合わない。
 
 ### Option B: Nx
 
@@ -101,12 +101,12 @@ Nrwl ( 現 Nx) が開発する polyglot monorepo プラットフォーム。 Tur
 👎 **Cons**
 
 - Go ツールチェーン対応は community plugin 経由で一級ではない。 `go.mod` 1.24 `tool` ディレクティブの認識や `go list -deps` の解析は plugin 実装に依存
-- (1) OS 中立 version: cache key 構成は plugin 依存で、 host 由来の入力 ( 環境変数 / 絶対パス / OS 別バイナリ) が混入しやすい。 構造的な保証はない
+- (1) OS 中立 version: fingerprint key 構成は plugin 依存で、 host 由来の入力 ( 環境変数 / 絶対パス / OS 別バイナリ) が混入しやすい。 構造的な保証はない
 - (2) output-comparison: input-only
 - 外部配布の prebuilt binary との SSoT 直読みは標準では持たない
 - Nx workspace 構造への寄せ替え ( `nx.json` / `project.json` / `apps` `libs` 配置) を効果最大化のために行うと侵襲的になりがち。 段階導入は可能だが、 効果を最大化するには寄せ替えが必要
 
-JS/TS 中心 monorepo の現代的標準として Turborepo の対抗馬。 polyglot codegen の cache 健全性は本ツールの主問題設定ではない。
+JS/TS 中心 monorepo の現代的標準として Turborepo の対抗馬。 polyglot codegen の fingerprint の健全性は本ツールの主問題設定ではない。
 
 ### Option C: Bazel
 
@@ -115,7 +115,7 @@ Google が開発する大規模 monorepo 向け業界標準ビルダー。 `rule
 👍 **Pros**
 
 - hermetic build による厳密な再現性
-- artifact 共有も remote cache ( CAS + Action Cache) で完結。 コンパイル結果まで含めた cache 共有はどのツールよりも強い
+- artifact 共有も remote cache ( CAS + Action Cache) で完結。 コンパイル結果まで含めた fingerprint 共有はどのツールよりも強い
 - 大規模 monorepo の実績が豊富 ( Google / 多数のテック企業)
 - `gazelle` が import 文を静的解析して `BUILD.bazel` を自動生成 ( パッケージ粒度の依存自動導出)
 - 分散実行 ( Remote Build Execution) で巨大 build を線形にスケール
@@ -128,7 +128,7 @@ Google が開発する大規模 monorepo 向け業界標準ビルダー。 `rule
 - (2) output-comparison: input-only。 `bazelbuild/bazel#14543` で「Action successful and cached without outputs」が 2021 年から未解決
 - 外部配布の prebuilt binary を SSoT として読みに行く設計は不向き ( Bazel が toolchain を所有する思想と衝突)
 
-機能面ではどのツールよりも強力で、 「 artifact / コンパイル結果まで cache 共有したい」 「 巨大 monorepo を分散実行で回したい」 ニーズには第一選択。 ただし本 ADR の問題設定 ( 既存パッケージマネージャ群を温存しつつ codegen の cache 健全性を上げる) では、 移行コストと 2 防御線を欠く構造的な問題で ROI が見合わない。
+機能面ではどのツールよりも強力で、 「 artifact / コンパイル結果まで fingerprint 共有したい」 「 巨大 monorepo を分散実行で回したい」 ニーズには第一選択。 ただし本 ADR の問題設定 ( 既存パッケージマネージャ群を温存しつつ codegen の fingerprint の健全性を上げる) では、 移行コストと 2 防御線を欠く構造的な問題で ROI が見合わない。
 
 > Meta の **Buck2** ( Bazel 系の Rust 実装、 dynamic deps / incremental 性能改善 / REAPI 互換) も hermetic build 系の現代的選択肢として存在するが、 本 ADR の評価軸 ( 2 防御線 / 既存 package manager 温存 / 外部配布 prebuilt binary との連携) では Bazel とほぼ同じ評価になるため、 独立 Option としては立てず本節に内包する。 新規導入で hermetic を選ぶ場合は Bazel と Buck2 を別途比較する価値があるが、 sloff との対比文脈では区別不要と判断した。
 
@@ -193,12 +193,12 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
 👎 **Cons**
 
 - 初期実装コストが大きい
-- 共有 cache ( record schema、 ストレージ、 invalidate 戦略、 GC) を自作する必要がある
+- 共有 fingerprint store ( record schema、 ストレージ、 invalidate 戦略、 GC) を自作する必要がある
 - メンテ責務を内製で持ち続ける必要がある
 - 既製品の plugin エコシステム / コミュニティサポート ( Nx Cloud / moonbase / Bazel rules / Pants plugin / Turborepo の Vercel 連携 等) を享受できない
 - **スコープが codegen 専用** で一般のタスクランナーではない。 build / test / lint / dev server をまとめて orchestrate したいニーズには別ツール ( moonrepo / Nx / Turborepo / Make 等) を併用する想定
 - **artifact cache 非対応** ( Non-Goal)。 generator output が git 管理されている前提。 大きい binary / 画像 / 動画を生成する monorepo には不向き
-- **remote cache 初版未実装** ( interface は切るが LocalStorage のみ)。 record の git 管理で「実質的な remote cache」になる設計だが、 git に乗らない大きい record や organization 横断の cache 共有は対象外
+- **remote cache 初版未実装** ( interface は切るが LocalStorage のみ)。 record の git 管理で「実質的な remote cache」になる設計だが、 git に乗らない大きい record や organization 横断の fingerprint 共有は対象外
 - 設定ファイル数は Bazel / Pants ほどではないが少なくない: spec dir ごとに `sloff.yml` が必要 ( 数百タスクなら数十ファイル)
 - watch モード / Windows 非対応 ( Non-Goal)
 - 実績ゼロ。 既製品のような巨大 monorepo での battle-tested さは持たない
@@ -210,17 +210,17 @@ monorepo の実情に合わせた専用オーケストレーターを実装す�
 
 採用根拠:
 
-1. **既製品 5 ツール ( Bazel に Buck2 を含めて 6 製品) のいずれも「キャッシュ健全性の 2 防御線」を満たさない**
+1. **既製品 5 ツール ( Bazel に Buck2 を含めて 6 製品) のいずれも「fingerprint の健全性の 2 防御線」を満たさない**
    - (1) OS 中立な logical version が runtime と整合: moonrepo が proto 管理ランタイムのみ部分対応 ( かつ install 検証なし)、 他は OS 別バイナリ hash で分裂。 外部配布の prebuilt binary 群との直接統合はどのツールにも無し。 lockfile と install 状態の整合検証 ( workspace 内 npm package で必要) も既製品では仕組みが無い
    - (2) output-comparison: 全ツール input-only、 Bazel `bazelbuild/bazel#14543` のように「empty output でも cache」が業界共通の既知問題
-2. **中〜大規模 monorepo の規模では、 偽 cache が共有された場合の影響範囲が大きい**。 「cache を信じきれず `--no-cache` を打つ習慣」が現場に残ると共有 cache の存在意義そのものが失われる。 2 防御線を構造で強制する価値は高い
-3. **既製品を採用すると 2 防御線を欠いたまま運用することになる**。 偶発的に cache が嘘をついたとき「うちの cache は信じきれない」という不信感が継続する。 これは技術的負債というより組織的負債で、 後から取り戻すのが難しい
+2. **中〜大規模 monorepo の規模では、 偽 fingerprint が共有された場合の影響範囲が大きい**。 「fingerprint を信じきれず `--no-fingerprint` を打つ習慣」が現場に残ると共有 fingerprint store の存在意義そのものが失われる。 2 防御線を構造で強制する価値は高い
+3. **既製品を採用すると 2 防御線を欠いたまま運用することになる**。 偶発的に fingerprint が嘘をついたとき「うちの fingerprint は信じきれない」という不信感が継続する。 これは技術的負債というより組織的負債で、 後から取り戻すのが難しい
 4. **依存自動導出 / Go ツールチェーン対応 / lockfile hash 化など、 既製品に追いついている既存技術は積極的に取り込む**。 Pants の import 解析手法は sloff の依存自動導出 / pnpm workspace 内 内製ツール hash に取り込む ([Design Doc 参照](../design/architecture.md))
 
 ただし、 採用には以下のスコープ制約が伴う ( Cons の再強調):
 
 - sloff は **codegen 専用** ( 一般タスクランナーではない)、 **artifact cache 非対応**、 **remote cache 初版未実装**、 **実績ゼロ**
-- 上記が許容できない問題設定 ( artifact / コンパイル結果まで cache 共有したい / build / test まで全部一括で orchestrate したい / 巨大 binary を生成する monorepo / battle-tested さを最優先したい) では、 既製品 ( Bazel / Buck2 / Pants / moonrepo / Nx) のいずれかが現実解になる
+- 上記が許容できない問題設定 ( artifact / コンパイル結果まで fingerprint 共有したい / build / test まで全部一括で orchestrate したい / 巨大 binary を生成する monorepo / battle-tested さを最優先したい) では、 既製品 ( Bazel / Buck2 / Pants / moonrepo / Nx) のいずれかが現実解になる
 
 ### 反論への応答
 
@@ -236,30 +236,30 @@ moonrepo は既製品中、 最も sloff 設計に近く、 「moonrepo + 妥協
 
 #### Nx 採用案について
 
-JS/TS 比率が高い monorepo なら Nx は強力な対抗馬。 ただし sloff の問題設定 ( polyglot codegen の cache 健全性) では:
+JS/TS 比率が高い monorepo なら Nx は強力な対抗馬。 ただし sloff の問題設定 ( polyglot codegen の fingerprint の健全性) では:
 
-- (1) cache key が plugin 依存で host 由来入力が混入しやすく、 cross-OS record 共有を構造で保証できない
+- (1) fingerprint key が plugin 依存で host 由来入力が混入しやすく、 cross-OS record 共有を構造で保証できない
 - (2) output-comparison は持たない
 - Go の一級対応は community plugin 依存
 - Nx workspace 構造への寄せ替えを効果最大化のために行うと侵襲的になる
 
-JS/TS 中心ならフル機能を享受できる ( computation cache + Nx Cloud + nx affected + plugin エコシステム) が、 polyglot codegen の cache 健全性は別問題として残る。
+JS/TS 中心ならフル機能を享受できる ( computation cache + Nx Cloud + nx affected + plugin エコシステム) が、 polyglot codegen の fingerprint の健全性は別問題として残る。
 
 ## Consequences
 
 ### 正の影響
 
-- Go / Node / 外部配布 prebuilt binary 群を含む複数のパッケージマネージャ環境を変更せずに共有キャッシュを導入できる
-- キャッシュ健全性の 2 防御線が設計レベルで強制され、 「cache は信じきれる」運用文化を構築できる
+- Go / Node / 外部配布 prebuilt binary 群を含む複数のパッケージマネージャ環境を変更せずに共有 fingerprint storeを導入できる
+- fingerprint の健全性の 2 防御線が設計レベルで強制され、 「fingerprint は信じきれる」運用文化を構築できる
 - 既製品の学習コストを全エンジニアに広く課さずに済む
 - Pants の import 解析、 moonrepo の resolved version 思想、 Nx のプロジェクトグラフ可視化など、 既製品の優れた設計は積極的に取り込める
 
 ### 負の影響
 
-- 共有キャッシュの実装とメンテ責務が内製で残る
+- 共有 fingerprint storeの実装とメンテ責務が内製で残る
 - 既製品の remote cache インフラ ( Nx Cloud / moonbase / REAPI 互換) を使えないため、 ストレージ方式は別途設計する必要がある
 - スコープ ( codegen 専用 / artifact 非対応 / remote cache 初版未実装) を超える要求が出た場合は別ツール併用が必要
 - 自作する以上、 詳細設計を別途確定する必要がある:
-  - キャッシュヒット判定モデル → [ADR-0002](./0002-cache-hit-decision-model.md)
-  - record のストレージ方式 → [ADR-0003](./0003-record-storage-strategy.md)
+  - fingerprint hit判定モデル → [ADR-0002](./0002-fingerprint-hit-decision-model.md)
+  - record のストレージ方式 → [ADR-0003](./0003-fingerprint-storage-strategy.md)
   - 具体実装 ( spec 文法、 record schema、 OS 横断 invalidate、 preflight、 import 解析、 タスク間依存自動導出、 GC) → [Design Doc](../design/architecture.md)

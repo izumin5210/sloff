@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`sloff` is a cache-aware codegen orchestrator for monorepos, shipped as a single Go binary. The rationale, intent, and per-channel resolver details all live under `docs/`. Read these first whenever you need to make a design-related decision:
+`sloff` is a fingerprint-aware codegen orchestrator for monorepos, shipped as a single Go binary. The rationale, intent, and per-channel resolver details all live under `docs/`. Read these first whenever you need to make a design-related decision:
 
 - `docs/adr/` — finalized decisions
 - `docs/design/architecture.md` — overall architecture. Start here when in doubt.

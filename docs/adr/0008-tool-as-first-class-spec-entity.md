@@ -102,7 +102,7 @@ commands:
     tools: [protoc-gen-foo]
 ```
 
-上記は **cache key は packages/codegen 側の source を hash するが、 cmd は proto/cmd/protoc-gen-foo を実行する** という乖離が生じる ( 双方が存在すれば silent stale、 後者が不在なら早期 fail)。 別 dir の cwd-sensitive な tool ( `go run` / 相対 binary path 等) を参照するときは、 cmd 側で:
+上記は **fingerprint key は packages/codegen 側の source を hash するが、 cmd は proto/cmd/protoc-gen-foo を実行する** という乖離が生じる ( 双方が存在すれば silent stale、 後者が不在なら早期 fail)。 別 dir の cwd-sensitive な tool ( `go run` / 相対 binary path 等) を参照するときは、 cmd 側で:
 
 - full Go import path を書く: `cmd: ["go", "run", "github.com/org/repo/packages/codegen/cmd/protoc-gen-foo"]`
 - task dir 基準の相対 path を書く: `cmd: ["go", "run", "../../packages/codegen/cmd/protoc-gen-foo"]`
@@ -173,7 +173,7 @@ source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の buil
 | **build task に `builds: [tool-name]` フィールドを宣言** | 「 この task が tool を build する」 を named cross-ref で明示化 | spec field 増。 overlap 機構との二重管理 |
 | **tool が `build:` block を内包 ( tool = build pipeline)** | tool 定義に cmd / inputs / outputs を持たせ、 task との境界を統合 | tool と task の概念境界が崩れる。 ADR-0008 の D1 ( tool は first-class entity) の意図と外れる |
 | **co-location 制約 ( pnpm-local は package dir の sloff.yml に置く)** | 配置位置で「 同じ package について話している」 ことを明示 | 暗黙性は緩和されるが mechanism は path overlap のままで根本解決ではない |
-| **cmd 内 build ( 採用)** | go-local の go run と同じ責務分担、 sloff は source hash だけ担当 | source 集合の精度を esbuild walk から git-tracked enumeration に下げる必要があるが、 過剰 invalidate にしか倒れず cache 健全性は壊れない |
+| **cmd 内 build ( 採用)** | go-local の go run と同じ責務分担、 sloff は source hash だけ担当 | source 集合の精度を esbuild walk から git-tracked enumeration に下げる必要があるが、 過剰 invalidate にしか倒れず fingerprint の健全性は壊れない |
 
 **精度トレードオフ**: 旧 esbuild walk は「 bin から transitive に import される実ファイルだけ」 を hash 入力にしていた。 git-tracked enumeration は「 package dir の全ファイル ( gitignore で除外されたものを除く)」 を入れる。 後者は **過剰 invalidate** ( 関係ない src/utils.ts 編集で gen が rerun) するが false hit にはならない。 Turborepo の default も同じアプローチで、 monorepo 規模での実用上の精度は問題にならないことが知られている。
 

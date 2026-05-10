@@ -22,7 +22,7 @@ import (
 // every transitively imported external module (the "external" partition).
 //
 // stdlib (`pkg.Module == nil`) is intentionally omitted: hashing $GOROOT files
-// would tie the cache to absolute install paths and break OS-neutral sharing
+// would tie the fingerprint to absolute install paths and break OS-neutral sharing
 // (architecture R3). Users who need to invalidate on Go toolchain bumps add a
 // `tools: [{exec: ["go", "version"], extract: ...}]` entry alongside go-local;
 // see resolver-go-local.md.
@@ -44,7 +44,7 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	cfg := &packages.Config{
 		// NeedEmbedFiles surfaces //go:embed targets in pkg.EmbedFiles. Without it,
 		// edits to embedded templates / schemas / data files would not change the
-		// resolved_versions_hash and sloff would serve stale cache hits even though `go run`
+		// resolved_versions_hash and sloff would serve stale fingerprint hits even though `go run`
 		// rebuilds the binary on every embed change.
 		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedModule,
@@ -145,7 +145,7 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 
 		switch {
 		case pkg.Module == nil:
-			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral cache.
+			// stdlib: see package doc; hashing $GOROOT breaks OS-neutral fingerprint.
 		case pkg.Module.Main:
 			if err := l.collectInternalFiles(pkg, internalSet); err != nil {
 				return err
@@ -223,7 +223,7 @@ func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listin
 // Paths are converted to slash form so the digest is identical on Windows
 // and Unix. Files outside repoRoot are rejected because their absolute
 // location varies per developer machine, which would break OS-neutral
-// cache sharing.
+// fingerprint sharing.
 func (l *goPackagesLister) collectInternalFiles(pkg *packages.Package, internalSet map[string]struct{}) error {
 	for _, group := range [][]string{pkg.GoFiles, pkg.EmbedFiles, pkg.IgnoredFiles, pkg.OtherFiles} {
 		for _, f := range group {
@@ -251,7 +251,7 @@ func (l *goPackagesLister) collectInternalFiles(pkg *packages.Package, internalS
 //
 // Local replace directives (`replace foo => ../foo`) are intentionally not
 // handled here — the caller rejects them upstream because they bypass go.sum
-// and would let replaced-module edits slip past the cache silently.
+// and would let replaced-module edits slip past the fingerprint silently.
 func externalLabel(m *packages.Module) (labelPath, labelVersion, sumPath, sumVersion string) {
 	if m.Replace != nil && m.Replace.Version != "" {
 		// versioned replace: encode replacement path+version into the label,

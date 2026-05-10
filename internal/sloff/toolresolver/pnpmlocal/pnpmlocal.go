@@ -1,6 +1,6 @@
 // Package pnpmlocal implements toolresolver.Resolver for pnpm workspace-local
 // tools. A "tool" here is a workspace package (referenced via "workspace:*"
-// in pnpm-lock.yaml); the resolver computes its cache contribution along the
+// in pnpm-lock.yaml); the resolver computes its fingerprint contribution along the
 // same axes the spec already has:
 //
 //   - ExtraInputs (files_hash channel): every file inside the package's dir

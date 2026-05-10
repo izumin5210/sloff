@@ -1,13 +1,13 @@
 # sloff 🦥
 
-> A cache-aware codegen orchestrator for polyglot monorepos. Skips work when inputs haven't changed — and never lies about it.
+> A fingerprint-aware codegen orchestrator for polyglot monorepos. Skips work when inputs haven't changed — and never lies about it.
 
-`sloff` runs your code generators (proto / SQL / mock / GraphQL / etc.) and caches their outputs in git so devs and CI skip re-generation when nothing has changed. Cache hits are validated by **comparing both inputs *and* the actual output files** against the recorded state — so even when the cache record looks valid, a drifted output triggers re-generation rather than a stale skip.
+`sloff` runs your code generators (proto / SQL / mock / GraphQL / etc.) and fingerprints their outputs in git so devs and CI skip re-generation when nothing has changed. Fingerprint hits are validated by **comparing both inputs *and* the actual output files** against the recorded state — so even when the fingerprint looks valid, a drifted output triggers re-generation rather than a stale skip.
 
 ## Features
 
-- **Output-comparison cache hits.** A hit requires the recorded `input_hash` *and* the on-disk output files to match. Drifted outputs (manual edits, formatter runs, partial checkouts) are re-generated, never silently skipped.
-- **OS-portable cache.** Cache records are deterministic YAML committed to git. A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
+- **Output-comparison fingerprint hits.** A hit requires the recorded `input_hash` *and* the on-disk output files to match. Drifted outputs (manual edits, formatter runs, partial checkouts) are re-generated, never silently skipped.
+- **OS-portable fingerprints.** Fingerprints are deterministic YAML committed to git. A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
 - **Reads your existing toolchain.** No replacement for aqua / mise / nix / pnpm / `go.mod`. Tool versions come from the runtime binary's `--version`, lockfiles, or repo source — whichever is the actual source of truth.
 - **Auto-derived dependencies.** Task ordering is computed from `inputs` / `outputs` glob intersections. There is no manual `depends:` field to keep in sync.
 - **Single Go binary.** No runtime dependencies, no daemon, no language ecosystem to install.
@@ -45,7 +45,7 @@ Then from anywhere in the repo:
 sloff run
 ```
 
-`sloff run` discovers every `sloff.yml`, builds a DAG from `inputs` / `outputs` overlap, and either skips or re-runs each task based on cache lookup.
+`sloff run` discovers every `sloff.yml`, builds a DAG from `inputs` / `outputs` overlap, and either skips or re-runs each task based on fingerprint lookup.
 
 ## Tool resolvers
 
@@ -99,7 +99,7 @@ git-tracked files in the workspace package (and transitive workspace deps) contr
 
 sloff is well-suited when:
 
-- You have a **polyglot codegen pipeline** (Go + JS/TS + external prebuilt binaries) and want shared cache across devs and CI.
+- You have a **polyglot codegen pipeline** (Go + JS/TS + external prebuilt binaries) and want shared fingerprint store across devs and CI.
 - You want to **keep your existing toolchain** (aqua / mise / nix / pnpm / go.mod) instead of migrating to a new build system.
 - You're OK with **outputs being committed to git** (no separate artifact cache infrastructure).
 
@@ -114,7 +114,7 @@ You probably want a different tool when:
 | File-grained dependency inference | [Pants](https://www.pantsbuild.org/) |
 | Battle-tested at massive scale | Any of the above |
 
-sloff is intentionally narrow — **codegen orchestration with an honest cache, nothing else**.
+sloff is intentionally narrow — **codegen orchestration with honest fingerprints, nothing else**.
 
 ## Documentation
 

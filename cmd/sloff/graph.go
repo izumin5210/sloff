@@ -10,8 +10,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 	"github.com/izumin5210/sloff/internal/sloff/explain"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
 )
 

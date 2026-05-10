@@ -1,5 +1,5 @@
 // Package local is the default Storage backend that persists records as protobuf
-// binary files on the local filesystem under <repoRoot>/.sloff/cache/. It performs
+// binary files on the local filesystem under <repoRoot>/.sloff/fingerprints/. It performs
 // no git operations; committing the resulting files (or excluding them via
 // .gitignore) is up to the user of sloff. This is the file-on-disk variant;
 // remote backends (e.g. S3) live in sibling packages.
@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
-	"github.com/izumin5210/sloff/internal/sloff/cache"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 )
 
 const backendName = "local"
@@ -28,9 +28,9 @@ const backendName = "local"
 // Lexicographic order over well-formed prefixes equals chronological order.
 const timestampWidth = 17
 
-// Storage stores cache records under <repoRoot>/.sloff/cache/.
+// Storage stores fingerprints under <repoRoot>/.sloff/fingerprints/.
 //
-// Layout: .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb
+// Layout: .sloff/fingerprints/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb
 // (ADR-0009 / ADR-0010). The timestamp prefix is the file's initial creation
 // time and is preserved across in-place overwrites; it disambiguates
 // independently first-written records on different branches so R5 (no
@@ -69,15 +69,15 @@ func New(repoRoot string, opts ...Option) *Storage {
 	return s
 }
 
-// Name implements cache.Storage.
+// Name implements fingerprint.Storage.
 func (s *Storage) Name() string { return backendName }
 
-// Load implements cache.Storage. Returns the latest-timestamp record matching
+// Load implements fingerprint.Storage. Returns the latest-timestamp record matching
 // the (spec, task, input_hash) tuple. Multiple matches arise transiently
 // after merges of branches that independently wrote first-time records for
 // the same Key; deterministic-generator scope makes them semantically
 // equivalent (ADR-0010), so latest is an arbitrary but well-defined choice.
-func (s *Storage) Load(_ context.Context, key cache.Key) (*cachev1.Record, bool, error) {
+func (s *Storage) Load(_ context.Context, key fingerprint.Key) (*fingerprintv1.Record, bool, error) {
 	matches, err := s.matchingFiles(key)
 	if err != nil {
 		return nil, false, err
@@ -90,20 +90,20 @@ func (s *Storage) Load(_ context.Context, key cache.Key) (*cachev1.Record, bool,
 	if err != nil {
 		return nil, false, err
 	}
-	rec, err := cache.Unmarshal(b)
+	rec, err := fingerprint.Unmarshal(b)
 	if err != nil {
 		return nil, false, err
 	}
 	return rec, true, nil
 }
 
-// Save implements cache.Storage. The on-disk filename carries an initial
+// Save implements fingerprint.Storage. The on-disk filename carries an initial
 // creation timestamp that is created on first write and preserved on
 // subsequent overwrites. When the merge of independently first-written
 // branches has produced multiple files for the same Key, Save defensively
 // collapses them onto the earliest-prefix file (preserving the canonical
 // creation time visible in git history) before overwriting its contents.
-func (s *Storage) Save(_ context.Context, key cache.Key, record *cachev1.Record) error {
+func (s *Storage) Save(_ context.Context, key fingerprint.Key, record *fingerprintv1.Record) error {
 	dir := s.dirFor(key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -112,13 +112,13 @@ func (s *Storage) Save(_ context.Context, key cache.Key, record *cachev1.Record)
 	if err != nil {
 		return err
 	}
-	b, err := cache.Marshal(record)
+	b, err := fingerprint.Marshal(record)
 	if err != nil {
 		return err
 	}
 	var target string
 	if len(matches) == 0 {
-		target = filepath.Join(dir, formatPrefix(s.clock())+"-"+key.InputHash+cache.FileExt)
+		target = filepath.Join(dir, formatPrefix(s.clock())+"-"+key.InputHash+fingerprint.FileExt)
 	} else {
 		target = matches[0]
 		for _, p := range matches[1:] {
@@ -130,9 +130,9 @@ func (s *Storage) Save(_ context.Context, key cache.Key, record *cachev1.Record)
 	return os.WriteFile(target, b, 0o644)
 }
 
-// Delete implements cache.Storage. Removes every timestamped file matching
+// Delete implements fingerprint.Storage. Removes every timestamped file matching
 // the Key's (spec, task, input_hash). Missing keys are a no-op.
-func (s *Storage) Delete(_ context.Context, key cache.Key) error {
+func (s *Storage) Delete(_ context.Context, key fingerprint.Key) error {
 	matches, err := s.matchingFiles(key)
 	if err != nil {
 		return err
@@ -145,16 +145,16 @@ func (s *Storage) Delete(_ context.Context, key cache.Key) error {
 	return nil
 }
 
-// List implements cache.Storage. Duplicate timestamp variants for the same
+// List implements fingerprint.Storage. Duplicate timestamp variants for the same
 // Key are collapsed to a single returned entry; the entry's effective mtime
 // for OlderThan is the maximum across the duplicates because GC cares about
 // the most recent activity, not the oldest.
-func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Key, error) {
-	root := filepath.Join(s.repoRoot, ".sloff", "cache")
+func (s *Storage) List(ctx context.Context, filter fingerprint.ListFilter) ([]fingerprint.Key, error) {
+	root := filepath.Join(s.repoRoot, ".sloff", "fingerprints")
 	type bucket struct {
 		latest time.Time
 	}
-	seen := make(map[cache.Key]*bucket)
+	seen := make(map[fingerprint.Key]*bucket)
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if errors.Is(walkErr, fs.ErrNotExist) {
@@ -165,7 +165,7 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if d.IsDir() || filepath.Ext(p) != cache.FileExt {
+		if d.IsDir() || filepath.Ext(p) != fingerprint.FileExt {
 			return nil
 		}
 
@@ -182,7 +182,7 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 		if !ok {
 			return nil
 		}
-		key := cache.Key{
+		key := fingerprint.Key{
 			SpecRelpath: strings.Join(parts[:n-2], "/"),
 			TaskID:      parts[n-2],
 			InputHash:   hash,
@@ -210,7 +210,7 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]cache.Key, 0, len(seen))
+	keys := make([]fingerprint.Key, 0, len(seen))
 	for k, b := range seen {
 		if !filter.OlderThan.IsZero() && !b.latest.Before(filter.OlderThan) {
 			continue
@@ -231,13 +231,13 @@ func (s *Storage) List(ctx context.Context, filter cache.ListFilter) ([]cache.Ke
 
 // CollapseDuplicates removes every duplicate `<timestamp>-<input_hash>.pb`
 // file beyond the earliest-prefix one for each (spec, task, input_hash) Key.
-// Returns the number of files removed. Used by `sloff cache gc` as the
+// Returns the number of files removed. Used by `sloff fingerprint gc` as the
 // duplicate-collapse safety net described in ADR-0010 §"duplicate collapse
 // の責務" (Save's collapse only fires when output actually changes, which is
 // rare under deterministic-generator scope, so post-merge duplicates can
 // linger until GC sweeps them).
 func (s *Storage) CollapseDuplicates(ctx context.Context) (int, error) {
-	keys, err := s.List(ctx, cache.ListFilter{})
+	keys, err := s.List(ctx, fingerprint.ListFilter{})
 	if err != nil {
 		return 0, err
 	}
@@ -260,16 +260,16 @@ func (s *Storage) CollapseDuplicates(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
-func (s *Storage) dirFor(key cache.Key) string {
+func (s *Storage) dirFor(key fingerprint.Key) string {
 	specOS := filepath.FromSlash(path.Clean("/" + key.SpecRelpath))[1:] // tolerate empty / leading slash
-	return filepath.Join(s.repoRoot, ".sloff", "cache", specOS, key.TaskID)
+	return filepath.Join(s.repoRoot, ".sloff", "fingerprints", specOS, key.TaskID)
 }
 
 // matchingFiles enumerates `<timestamp>-<key.InputHash>.pb` files in the
 // Key's directory, sorted ascending by filename (= chronologically by
 // initial-creation time). Foreign files that don't match the prefix shape
 // are ignored.
-func (s *Storage) matchingFiles(key cache.Key) ([]string, error) {
+func (s *Storage) matchingFiles(key fingerprint.Key) ([]string, error) {
 	dir := s.dirFor(key)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -278,7 +278,7 @@ func (s *Storage) matchingFiles(key cache.Key) ([]string, error) {
 		}
 		return nil, err
 	}
-	suffix := "-" + key.InputHash + cache.FileExt
+	suffix := "-" + key.InputHash + fingerprint.FileExt
 	var matches []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -301,10 +301,10 @@ func (s *Storage) matchingFiles(key cache.Key) ([]string, error) {
 // splitFilename parses `<timestamp>-<hash>.pb`, returning empty / false when
 // the shape doesn't match (so List ignores stray files).
 func splitFilename(name string) (timestamp, hash string, ok bool) {
-	if !strings.HasSuffix(name, cache.FileExt) {
+	if !strings.HasSuffix(name, fingerprint.FileExt) {
 		return "", "", false
 	}
-	stem := strings.TrimSuffix(name, cache.FileExt)
+	stem := strings.TrimSuffix(name, fingerprint.FileExt)
 	dash := strings.IndexByte(stem, '-')
 	if dash <= 0 || dash == len(stem)-1 {
 		return "", "", false

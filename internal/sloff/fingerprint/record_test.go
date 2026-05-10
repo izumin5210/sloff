@@ -1,4 +1,4 @@
-package cache_test
+package fingerprint_test
 
 import (
 	"testing"
@@ -7,31 +7,31 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
-	"github.com/izumin5210/sloff/internal/sloff/cache"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 )
 
-func sampleRecord() *cachev1.Record {
-	return &cachev1.Record{
-		SchemaVersion: cache.SchemaVersion,
-		Spec: &cachev1.Spec{
+func sampleRecord() *fingerprintv1.Record {
+	return &fingerprintv1.Record{
+		SchemaVersion: fingerprint.SchemaVersion,
+		Spec: &fingerprintv1.Spec{
 			Cmd:    "buf generate --template buf.gen.yaml",
 			Dir:    "path/to/spec",
 			TaskId: "protoc-gen-go",
 		},
-		Input: &cachev1.Input{
+		Input: &fingerprintv1.Input{
 			Hash:                 "3f9a1c",
 			FilesHash:            "a1b2",
 			CmdHash:              "c3d4",
 			ResolvedVersionsHash: "e5f6",
-			ResolvedVersions: []*cachev1.ResolvedVersion{
+			ResolvedVersions: []*fingerprintv1.ResolvedVersion{
 				{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
 				{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
 			},
 		},
-		Output: &cachev1.Output{
+		Output: &fingerprintv1.Output{
 			Hash: "7e2b",
-			Files: []*cachev1.FileEntry{
+			Files: []*fingerprintv1.FileEntry{
 				{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
 				{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
 			},
@@ -44,11 +44,11 @@ func sampleRecord() *cachev1.Record {
 // Unmarshal must produce a path-ascending sequence in output.files so the
 // hash output is reproducible across writers.
 func TestMarshalSortsOutputFilesByPath(t *testing.T) {
-	b, err := cache.Marshal(sampleRecord())
+	b, err := fingerprint.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	msg := &cachev1.Record{}
+	msg := &fingerprintv1.Record{}
 	if err := proto.Unmarshal(b, msg); err != nil {
 		t.Fatalf("proto.Unmarshal: %v", err)
 	}
@@ -66,11 +66,11 @@ func TestMarshalSortsOutputFilesByPath(t *testing.T) {
 // the proto wire for input.resolved_versions, which absorbs the previous
 // generator_version_snapshot field per ADR-0009.
 func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
-	b, err := cache.Marshal(sampleRecord())
+	b, err := fingerprint.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	msg := &cachev1.Record{}
+	msg := &fingerprintv1.Record{}
 	if err := proto.Unmarshal(b, msg); err != nil {
 		t.Fatalf("proto.Unmarshal: %v", err)
 	}
@@ -86,11 +86,11 @@ func TestMarshalSortsResolvedVersionsByName(t *testing.T) {
 
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	want := sampleRecord()
-	b, err := cache.Marshal(want)
+	b, err := fingerprint.Marshal(want)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	got, err := cache.Unmarshal(b)
+	got, err := fingerprint.Unmarshal(b)
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
@@ -102,15 +102,15 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 }
 
 func TestMarshalIsByteStable(t *testing.T) {
-	b1, err := cache.Marshal(sampleRecord())
+	b1, err := fingerprint.Marshal(sampleRecord())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	rec, err := cache.Unmarshal(b1)
+	rec, err := fingerprint.Unmarshal(b1)
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	b2, err := cache.Marshal(rec)
+	b2, err := fingerprint.Marshal(rec)
 	if err != nil {
 		t.Fatalf("Marshal #2: %v", err)
 	}
@@ -120,24 +120,24 @@ func TestMarshalIsByteStable(t *testing.T) {
 }
 
 // TestMarshalRejectsUnknownSchemaVersion guards that ad-hoc enum values
-// outside the proto enum registry cannot leak into a cache file. ADR-0009 §
+// outside the proto enum registry cannot leak into a fingerprint file. ADR-0009 §
 // "schema_version 移行戦略" treats unknown versions as runtime errors rather
 // than silently encoded best-effort data.
 func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	rec := sampleRecord()
-	rec.SchemaVersion = cachev1.SchemaVersion(999)
-	if _, err := cache.Marshal(rec); err == nil {
+	rec.SchemaVersion = fingerprintv1.SchemaVersion(999)
+	if _, err := fingerprint.Marshal(rec); err == nil {
 		t.Fatal("Marshal: expected error for unknown schema version, got nil")
 	}
 }
 
 // TestUnmarshalRejectsZeroBytes guards against silently treating a zero-byte
-// or otherwise default-valued record as a usable cache entry. proto.Unmarshal
+// or otherwise default-valued record as a usable fingerprint entry. proto.Unmarshal
 // happily turns empty input into a Record with SCHEMA_VERSION_UNSPECIFIED;
 // the runner would then evaluate it as an existing record and either claim a
 // false hit or silently overwrite valid bytes. Surface the corruption instead.
 func TestUnmarshalRejectsZeroBytes(t *testing.T) {
-	if _, err := cache.Unmarshal(nil); err == nil {
+	if _, err := fingerprint.Unmarshal(nil); err == nil {
 		t.Error("Unmarshal: expected error for empty bytes (decodes to SCHEMA_VERSION_UNSPECIFIED)")
 	}
 }
@@ -145,16 +145,16 @@ func TestUnmarshalRejectsZeroBytes(t *testing.T) {
 // TestUnmarshalRejectsUnknownSchemaVersion is the read-side counterpart of
 // TestMarshalRejectsUnknownSchemaVersion: a future binary that emits a newer
 // schema_version must not be silently downgraded by an older binary. We
-// build the bytes via raw proto.Marshal to bypass cache.Marshal's writer-side
+// build the bytes via raw proto.Marshal to bypass fingerprint.Marshal's writer-side
 // validation and verify the load path catches it.
 func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	rec := sampleRecord()
-	rec.SchemaVersion = cachev1.SchemaVersion(999)
+	rec.SchemaVersion = fingerprintv1.SchemaVersion(999)
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
 	if err != nil {
 		t.Fatalf("proto.Marshal: %v", err)
 	}
-	if _, err := cache.Unmarshal(b); err == nil {
+	if _, err := fingerprint.Unmarshal(b); err == nil {
 		t.Error("Unmarshal: expected error for unknown schema version")
 	}
 }
@@ -162,21 +162,21 @@ func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
 // TestMarshalJSONCanonicalisesUnsortedInput guards that MarshalJSON returns
 // canonical output even when the caller hands in a record whose repeated
 // fields are not pre-sorted (e.g. a hand-crafted .pb file decoded directly
-// via proto.Unmarshal). Without the internal Sort, `sloff cache show` and
+// via proto.Unmarshal). Without the internal Sort, `sloff fingerprint show` and
 // the E2E harness would surface incidental ordering as JSON diff noise.
 func TestMarshalJSONCanonicalisesUnsortedInput(t *testing.T) {
 	rec := sampleRecord()
 	// Force non-canonical order: reverse-sort by name + by path.
-	rec.Input.ResolvedVersions = []*cachev1.ResolvedVersion{
+	rec.Input.ResolvedVersions = []*fingerprintv1.ResolvedVersion{
 		{Name: "protoc-gen-go", Source: "go.mod", Version: "v1.34.2"},
 		{Name: "buf", Source: "aqua.yaml", Version: "1.30.0"},
 	}
-	rec.Output.Files = []*cachev1.FileEntry{
+	rec.Output.Files = []*fingerprintv1.FileEntry{
 		{Path: "path/to/spec/foo.pb.go", Hash: "11aa"},
 		{Path: "path/to/spec/bar.pb.go", Hash: "22bb"},
 	}
 
-	got, err := cache.MarshalJSON(rec)
+	got, err := fingerprint.MarshalJSON(rec)
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestMarshalJSONDoesNotMutateInput(t *testing.T) {
 	originalFirstVersion := rec.Input.ResolvedVersions[0].GetName()
 	originalFirstFile := rec.Output.Files[0].GetPath()
 
-	if _, err := cache.MarshalJSON(rec); err != nil {
+	if _, err := fingerprint.MarshalJSON(rec); err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
 	if got := rec.Input.ResolvedVersions[0].GetName(); got != originalFirstVersion {
@@ -219,11 +219,11 @@ func index(s, sub string) int {
 	return -1
 }
 
-// TestFilePaths exercises the small helper used by runner cache hit logic.
-// It only lives in package cache, so direct callers in the runner do not
+// TestFilePaths exercises the small helper used by runner fingerprint hit logic.
+// It only lives in package fingerprint, so direct callers in the runner do not
 // register coverage here.
 func TestFilePaths(t *testing.T) {
-	got := cache.FilePaths([]*cachev1.FileEntry{
+	got := fingerprint.FilePaths([]*fingerprintv1.FileEntry{
 		{Path: "a/x.txt", Hash: "h1"},
 		{Path: "b/y.txt", Hash: "h2"},
 	})
@@ -231,7 +231,7 @@ func TestFilePaths(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("FilePaths mismatch (-want +got):\n%s", diff)
 	}
-	if got := cache.FilePaths(nil); len(got) != 0 {
+	if got := fingerprint.FilePaths(nil); len(got) != 0 {
 		t.Errorf("FilePaths(nil) should yield empty slice, got %v", got)
 	}
 }
@@ -239,17 +239,17 @@ func TestFilePaths(t *testing.T) {
 // TestMarshalRejectsNilRecord guards the explicit nil guard at the top of
 // Marshal so a buggy caller surfaces as an error rather than a panic.
 func TestMarshalRejectsNilRecord(t *testing.T) {
-	if _, err := cache.Marshal(nil); err == nil {
+	if _, err := fingerprint.Marshal(nil); err == nil {
 		t.Error("Marshal(nil): expected error")
 	}
 }
 
 // TestUnmarshalRejectsCorruptBytes covers the proto.Unmarshal error branch
-// of cache.Unmarshal — schema_version validation only kicks in once the
+// of fingerprint.Unmarshal — schema_version validation only kicks in once the
 // wire bytes parse, so malformed bytes must still surface as an error.
 func TestUnmarshalRejectsCorruptBytes(t *testing.T) {
 	// Bytes that don't form a valid proto message.
-	if _, err := cache.Unmarshal([]byte{0xff, 0xff, 0xff, 0xff}); err == nil {
+	if _, err := fingerprint.Unmarshal([]byte{0xff, 0xff, 0xff, 0xff}); err == nil {
 		t.Error("Unmarshal(corrupt bytes): expected error")
 	}
 }
@@ -258,8 +258,8 @@ func TestUnmarshalRejectsCorruptBytes(t *testing.T) {
 // Input or Output is unset, so callers can pass partially-built records
 // without nil-dereferencing.
 func TestSortHandlesEmptyRecord(t *testing.T) {
-	rec := &cachev1.Record{SchemaVersion: cache.SchemaVersion}
-	cache.Sort(rec) // must not panic when Input / Output are nil
+	rec := &fingerprintv1.Record{SchemaVersion: fingerprint.SchemaVersion}
+	fingerprint.Sort(rec) // must not panic when Input / Output are nil
 }
 
 // TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder guards against
@@ -271,17 +271,17 @@ func TestSortHandlesEmptyRecord(t *testing.T) {
 func TestSortCanonicalisesResolvedVersionsAcrossInsertionOrder(t *testing.T) {
 	// Same set of entries, different insertion orders. After Sort both
 	// records must compare equal.
-	entries := []*cachev1.ResolvedVersion{
+	entries := []*fingerprintv1.ResolvedVersion{
 		{Name: "go", Version: "script:go@compile1.x", Source: "script:go-build"},
 		{Name: "go", Version: "script:go@go1.26.0", Source: "script:go-runtime"},
 		{Name: "buf", Version: "script:buf@1.30.0", Source: "script:buf"},
 	}
 
-	forward := &cachev1.Record{Input: &cachev1.Input{ResolvedVersions: append([]*cachev1.ResolvedVersion(nil), entries...)}}
-	reverse := &cachev1.Record{Input: &cachev1.Input{ResolvedVersions: []*cachev1.ResolvedVersion{entries[2], entries[1], entries[0]}}}
+	forward := &fingerprintv1.Record{Input: &fingerprintv1.Input{ResolvedVersions: append([]*fingerprintv1.ResolvedVersion(nil), entries...)}}
+	reverse := &fingerprintv1.Record{Input: &fingerprintv1.Input{ResolvedVersions: []*fingerprintv1.ResolvedVersion{entries[2], entries[1], entries[0]}}}
 
-	cache.Sort(forward)
-	cache.Sort(reverse)
+	fingerprint.Sort(forward)
+	fingerprint.Sort(reverse)
 
 	if diff := cmp.Diff(forward, reverse, protocmp.Transform()); diff != "" {
 		t.Errorf("Sort must canonicalise regardless of insertion order:\n%s", diff)

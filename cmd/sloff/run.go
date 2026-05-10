@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
 	preflightpnpm "github.com/izumin5210/sloff/internal/sloff/preflight/pnpmlocal"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
@@ -37,12 +37,12 @@ func newRunCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Discover specs and execute every task with cache-aware orchestration",
+		Short: "Discover specs and execute every task with fingerprint-aware orchestration",
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
 			return runE(cobraCmd.Context(), root, pattern)
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .sloff/cache and lockfiles")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .sloff/fingerprints and lockfiles")
 	cmd.Flags().StringVar(&pattern, "pattern", "**/sloff.yml", "Glob pattern (relative to --root) used to discover specs")
 	return cmd
 }

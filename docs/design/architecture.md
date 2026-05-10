@@ -1,15 +1,15 @@
 # sloff Architecture
 
-`sloff` は monorepo 向けの **共有可能なキャッシュ機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Nx / Bazel / moonrepo / Pants) では実現できなかった「キャッシュ健全性の 2 防御線 ( OS 中立な logical version の取得元が runtime と必ず整合する仕組み / output-comparison)」を設計レベルで強制することを設計目標とする。
+`sloff` は monorepo 向けの **共有可能な fingerprint 機構を持つコード生成オーケストレーター** である。 既製のビルドツール ( Turborepo / Nx / Bazel / moonrepo / Pants) では実現できなかった「fingerprint の健全性の 2 防御線 ( OS 中立な logical version の取得元が runtime と必ず整合する仕組み / output-comparison)」を設計レベルで強制することを設計目標とする。
 
 関連:
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md) (= 自作)
-- [ADR-0002: キャッシュヒット判定モデル](../adr/0002-cache-hit-decision-model.md) (= output-comparison)
-- [ADR-0003: キャッシュレコードのストレージ方式](../adr/0003-record-storage-strategy.md) (= git per-task per-input ファイル)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](../adr/0001-fingerprint-aware-codegen-orchestrator-decision.md) (= 自作)
+- [ADR-0002: fingerprint hit 判定モデル](../adr/0002-fingerprint-hit-decision-model.md) (= output-comparison)
+- [ADR-0003: fingerprint のストレージ方式](../adr/0003-fingerprint-storage-strategy.md) (= git per-task per-input ファイル)
 - [ADR-0006: sloff は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
 - [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
-- [ADR-0010: キャッシュレコード filename への timestamp prefix](../adr/0010-cache-record-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
+- [ADR-0010: fingerprint filename への timestamp prefix](../adr/0010-fingerprint-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
@@ -19,13 +19,13 @@
 
 ### 背景
 
-中〜大規模の polyglot monorepo では、 コード生成 ( proto / SQL モデル / mock / GraphQL / 内製 protoc plugin / pnpm 系コードジェネレータ など 数十のツール) にかかる時間が開発生産性のボトルネックになりやすい。 さらに 多くのチームで開発者間 / CI 間でキャッシュを共有できない構造になっており、 ブランチ切替 / 新規 clone のたびに毎回フル再生成が走る。
+中〜大規模の polyglot monorepo では、 コード生成 ( proto / SQL モデル / mock / GraphQL / 内製 protoc plugin / pnpm 系コードジェネレータ など 数十のツール) にかかる時間が開発生産性のボトルネックになりやすい。 さらに 多くのチームで開発者間 / CI 間で fingerprint を共有できない構造になっており、 ブランチ切替 / 新規 clone のたびに毎回フル再生成が走る。
 
 この課題に対する 3 つの大きな意思決定が先行 ADR で確定している:
 
-- **[ADR-0001](../adr/0001-cache-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Nx / Bazel / moonrepo / Pants) は「キャッシュ健全性 2 防御線」を満たさないため **自作する**
-- **[ADR-0002](../adr/0002-cache-hit-decision-model.md)**: cache hit 判定は **output-comparison** ( input_hash 一致 + record の output_hash と現状ツリーの output_hash 一致)
-- **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb`)
+- **[ADR-0001](../adr/0001-fingerprint-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Nx / Bazel / moonrepo / Pants) は「fingerprint の健全性 2 防御線」を満たさないため **自作する**
+- **[ADR-0002](../adr/0002-fingerprint-hit-decision-model.md)**: fingerprint hit 判定は **output-comparison** ( input_hash 一致 + record の output_hash と現状ツリーの output_hash 一致)
+- **[ADR-0003](../adr/0003-fingerprint-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb`)
 
 本 Design Doc はこれら 3 つの決定を所与として、 `sloff` の **全体アーキテクチャ** をまとめる。 各 distribution channel に対応する Resolver の詳細は別 doc に分割している ( 本 doc 冒頭の関連リンク参照)。
 
@@ -33,14 +33,14 @@
 
 - generator output は git 管理されている前提を採る ( typical な monorepo の運用)
 - ヒット判定は output-comparison 方式 ( record の output_hash と現状ツリーの output_hash を照合)
-- record は git 管理の per-task per-input ファイル (`.sloff/cache/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb`、 ADR-0010)
+- record は git 管理の per-task per-input ファイル (`.sloff/fingerprints/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb`、 ADR-0010)
 - 開発者の OS は `darwin/arm64` / `linux/amd64` / `linux/arm64` のいずれかが基本対象。 Windows は対象外
 
 ### Goal
 
-1. `sloff` を Go 製の単一バイナリとして実装し、 開発者間 / CI 間で共有可能なコード生成キャッシュを提供する
-2. `darwin/arm64` で生成された cache record を `linux/amd64` の CI でもそのまま再利用できる ( OS 横断キャッシュ共有)
-3. cache record が構造的にコンフリクトしない ( ブランチ独立に生成しても安全にマージできる)
+1. `sloff` を Go 製の単一バイナリとして実装し、 開発者間 / CI 間で共有可能なコード生成 fingerprint を提供する
+2. `darwin/arm64` で生成された fingerprint を `linux/amd64` の CI でもそのまま再利用できる ( OS 横断 fingerprint 共有)
+3. fingerprint が構造的にコンフリクトしない ( ブランチ独立に生成しても安全にマージできる)
 4. OSS / 内製を問わず generator が更新されたら自動で invalidate される
 
 ### Non-Goals
@@ -49,14 +49,14 @@
 - generator 自体の高速化 ( generator 本体の処理時間短縮)
 - Windows 対応
 - watch モード ( 初版では非対応)
-- record の `schema_version` 跨ぎの後方互換読み込み ( 異なる schema_version の record を同じバイナリで両対応する経路は実装しない、 ADR-0009)。 wire-incompatible な変更が発生した場合は proto package を `sloff.cache.v2` に切り出す運用
+- record の `schema_version` 跨ぎの後方互換読み込み ( 異なる schema_version の record を同じバイナリで両対応する経路は実装しない、 ADR-0009)。 wire-incompatible な変更が発生した場合は proto package を `sloff.fingerprint.v2` に切り出す運用
 - 環境構築タスク ( パッケージマネージャの install 等) のオーケストレーション。 sloff は「pure な代入関数 ( inputs → outputs) としての generator」だけを扱い、 副作用が大きい install タスクは利用者の Makefile / shell スクリプト側に委ねる
 
 ## 要件
 
 | ID | 要件 | 説明 |
 |---|---|---|
-| R1 | 共有可能 | cache record は git の同一コミット内で完結する |
+| R1 | 共有可能 | fingerprint は git の同一コミット内で完結する |
 | R2 | deterministic | 2 開発者が独立に生成しても同一バイト列の record が出力される |
 | R3 | OS 非依存 | `darwin-arm64` / `linux-amd64` / `linux-arm64` で同じ record を共有できる |
 | R4 | invalidate 安全性 | generator 本体 (OSS バイナリ / 内製 Go CLI / pnpm package / pnpm workspace 内 内製 / buf BSR 依存) が変更されたら確実に invalidate される |
@@ -69,9 +69,9 @@
 
 - 単一バイナリ `sloff` ( Go 製) として実装
 - spec ファイル形式は `sloff.yml` ( spec dir 単位で 1 ファイル)
-- record は `.sloff/cache/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb` に git 管理で配置 (protobuf binary、 ADR-0009 / ADR-0010)
+- record は `.sloff/fingerprints/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb` に git 管理で配置 (protobuf binary、 ADR-0009 / ADR-0010)
 - record は **input hash → output hash + output ファイル一覧** の mapping のみ ( artifact は含まない)
-- cache hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
+- fingerprint hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
 - ツール invalidate は **OS 非依存な論理 version 文字列** を入力源別に取得して実現:
   - **prebuilt binary** ( nix / mise / aqua 等で配布されるもの / `go tool <name>` 経由 / `pnpm exec` 経由 等): script resolver が `<bin> --version` を実行し、 必要なら regex で抽出した文字列をそのまま採用 ( 「runtime のバイナリが SSoT」)。 npm 配布物も `pnpm exec <bin> --version` 等で同経路に乗せる ([ADR-0007](../adr/0007-no-external-dependency-resolver.md))
   - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
@@ -86,7 +86,7 @@ flowchart TD
     LOOKUP -- No --> RUN1["generator 実行"]
     LOOKUP -- Yes --> SCAN["record の output.files を<br/>現在の作業ツリーから読み込み<br/>output_hash 再計算"]
     SCAN --> CMP{"output_hash<br/>== record.output.hash?"}
-    CMP -- Yes --> SKIP["SKIP (cache hit)"]
+    CMP -- Yes --> SKIP["SKIP (fingerprint hit)"]
     CMP -- No --> RUN2["generator 実行"]
     RUN1 --> WRITE["record 書き込み<br/>(deterministic protobuf, write-skip)"]
     RUN2 --> WRITE
@@ -130,13 +130,13 @@ commands:
 - `inputs` / `outputs` の glob pattern は **spec dir 相対**。 `..` を含む pattern も許容され、 monorepo 典型の cross-dir codegen ( e.g. `proto/<svc>/sloff.yml` から `../../gen/go/**/*.pb.go` を出力) を spec の置き場所と関心事のスコープを揃えたまま表現できる。 ただし正規化後に repoRoot を抜ける pattern ( e.g. `../../../etc/passwd`) は load 時 error として弾く ( spec が repo 外を hash しないことを構造的に担保)
 - `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
 
-### キャッシュレコード schema
+### fingerprint schema
 
 #### ファイル配置規則
 
 ```
 <repo_root>/
-└── .sloff/cache/
+└── .sloff/fingerprints/
     └── <spec_relpath>/                                # spec dir からの相対パス ( ディレクトリ階層をそのまま展開)
         └── <task_id>/                                 # spec.commands[*].name の slug
             └── <YYYYMMDDHHMMSSsss>-<input_hash>.pb    # 1 ファイル = 1 record (protobuf binary, ADR-0009 / ADR-0010)
@@ -145,12 +145,12 @@ commands:
 例: `path/to/spec/sloff.yml` の `protoc-gen-go` タスクが `2026-05-10 12:34:56.789 UTC` に initial 作成された場合
 
 ```
-.sloff/cache/path/to/spec/protoc-gen-go/20260510123456789-3f9a1c....pb
+.sloff/fingerprints/path/to/spec/protoc-gen-go/20260510123456789-3f9a1c....pb
 ```
 
 filename 構造:
 
-- prefix `YYYYMMDDHHMMSSsss` (17 桁固定) は **initial creation 時刻** を millisecond 精度で表現。 lexicographic 順 = chronological 順 ([ADR-0010](../adr/0010-cache-record-filename-timestamp-prefix.md))
+- prefix `YYYYMMDDHHMMSSsss` (17 桁固定) は **initial creation 時刻** を millisecond 精度で表現。 lexicographic 順 = chronological 順 ([ADR-0010](../adr/0010-fingerprint-filename-timestamp-prefix.md))
 - `-` 1 文字で prefix と input_hash を区切る
 - 同 input への in-place 上書き時に prefix は変わらない ( disambiguator ではなく path-level nonce)
 - 異 branch で同 input を independently に initial 作成すると別 prefix の別 file になり、 git merge は両方を共存させる ( R5 を path uniqueness で構造的に担保)
@@ -160,12 +160,12 @@ filename 構造:
 
 #### Schema (protobuf)
 
-record の wire schema は [`proto/sloff/cache/v1/cache.proto`](../../proto/sloff/cache/v1/cache.proto) が SSoT。 generated Go code は `internal/proto/sloff/cache/v1/cache.pb.go` ( package `cachev1`)。
+record の wire schema は [`proto/sloff/fingerprint/v1/fingerprint.proto`](../../proto/sloff/fingerprint/v1/fingerprint.proto) が SSoT。 generated Go code は `internal/proto/sloff/fingerprint/v1/fingerprint.pb.go` ( package `fingerprintv1`)。
 
 論理構造を JSON 表記で示すと:
 
 ```json
-// .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb (decoded via `sloff cache show`)
+// .sloff/fingerprints/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb (decoded via `sloff fingerprint show`)
 {
   "schema_version": "SCHEMA_VERSION_V3",
   "spec": {
@@ -197,7 +197,7 @@ record の wire schema は [`proto/sloff/cache/v1/cache.proto`](../../proto/slof
 
 #### Deterministic ordering 規約 ( R2)
 
-- proto wire format は `proto.MarshalOptions{Deterministic: true}` で encode する (`internal/sloff/cache/record.go` の `Marshal` が単一の呼び出し点)
+- proto wire format は `proto.MarshalOptions{Deterministic: true}` で encode する (`internal/sloff/fingerprint/record.go` の `Marshal` が単一の呼び出し点)
 - `output.files` ( `repeated FileEntry`) は path 昇順、 `input.resolved_versions` ( `repeated ResolvedVersion`) は name 昇順で marshal 前に sort
 - `input.resolved_versions[*].source` は人間可読性のためだけに保持し、 hash 計算には絶対に含めない (initial creation 時刻は filename prefix が担う、 ADR-0010)
 - runner は `Storage.Save` の前に既存 record を load し、 `output.hash` および `output.files` の (path, hash) 集合が一致するなら **書き戻しをスキップ** する ( ADR-0009 §"byte stability の担保")。 これにより proto runtime の minor / patch upgrade 由来の bit-level drift が git diff に現れない
@@ -212,7 +212,7 @@ func runTask(spec CmdSpec) error {
     if record, ok := loadRecord(spec, inputHash); ok {
         currentOutputHash, err := hashOutputsOnDisk(record.Output.Files)
         if err == nil && currentOutputHash == record.Output.Hash {
-            return nil // cache hit (ADR-0002: output-comparison)
+            return nil // fingerprint hit (ADR-0002: output-comparison)
         }
     }
     if err := runGenerator(spec); err != nil {
@@ -235,13 +235,13 @@ func computeInputHash(spec CmdSpec) string {
 
 #### Storage interface ( 拡張性)
 
-[ADR-0003](../adr/0003-record-storage-strategy.md) で採用した「git per-task per-input ファイル方式」は、 record を永続化する **複数の実装可能な戦略のうちの 1 つ**。 将来の規模変化や運用要求の変化 ( 例: record 容量が想定を超える、 artifact 共有が必要になる、 リモート組織と cache を共有したい等) に応じて、 record の置き場を S3 や Hybrid に切り替えられる余地を初版から残しておく。
+[ADR-0003](../adr/0003-fingerprint-storage-strategy.md) で採用した「git per-task per-input ファイル方式」は、 record を永続化する **複数の実装可能な戦略のうちの 1 つ**。 将来の規模変化や運用要求の変化 ( 例: record 容量が想定を超える、 artifact 共有が必要になる、 リモート組織と fingerprint を共有したい等) に応じて、 record の置き場を S3 や Hybrid に切り替えられる余地を初版から残しておく。
 
 そのため record の永続化レイヤは **Go interface を切り、 backend を plug-in 可能にする**。 これは resolver / preflight checker の拡張性設計と同じ思想。
 
 ```go
-// internal/sloff/cache/storage.go
-package cache
+// internal/sloff/fingerprint/storage.go
+package fingerprint
 
 import "context"
 
@@ -282,7 +282,7 @@ type ListFilter struct {
 
 組み込み実装 ( 初版):
 
-- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
 
 将来追加候補 ( 必要が生じた段階で対応):
 
@@ -294,19 +294,19 @@ backend 選択は環境変数で切り替える想定:
 
 ```sh
 # 既定 ( 初版実装ではこれのみ)
-SLOFF_CACHE_BACKEND=local sloff run --pattern '**/sloff.yml'
+SLOFF_FINGERPRINT_BACKEND=local sloff run --pattern '**/sloff.yml'
 
 # 将来 S3 を導入した場合
-SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
+SLOFF_FINGERPRINT_BACKEND=s3 SLOFF_S3_BUCKET=sloff-fingerprints-prod sloff run ...
 ```
 
 ##### 設計上の責務分離
 
 - **Record** = 「何を保存するか」 ( YAML schema、 deterministic ordering)
 - **Storage** = 「どこに / どうやって保存するか」 ( ファイル / object / DB)
-- **output-comparison ロジック** ( cache lookup) は Storage backend に依存しない
+- **output-comparison ロジック** ( fingerprint lookup) は Storage backend に依存しない
 
-これにより、 backend 切替 ( 例: LocalStorage → S3Storage) を行っても、 cache 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
+これにより、 backend 切替 ( 例: LocalStorage → S3Storage) を行っても、 fingerprint 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
 
 ##### 初版スコープ
 
@@ -316,13 +316,13 @@ SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
 
 #### 棄却: 実行ファイル hash
 
-直感的には `cmd[0]` のバイナリ本体を SHA256 して hash 入力に混ぜれば良さそうだが、 OS 横断キャッシュ共有を破壊する:
+直感的には `cmd[0]` のバイナリ本体を SHA256 して hash 入力に混ぜれば良さそうだが、 OS 横断 fingerprint 共有を破壊する:
 
 - 外部配布の prebuilt binary ( nix / mise / aqua 等経由) は `darwin-arm64` / `linux-amd64` / `linux-arm64` でファイル本体が異なる
 - `go tool` ディレクティブで build される Go ツールも `GOOS` / `GOARCH` 別バイナリ
 - pnpm の binary cache (`~/.pnpm-store`) も同様
 
-開発者 A (Mac) が生成した cache を 開発者 B / CI (Linux) が共有できない。 R3 を満たさないため棄却する。
+開発者 A (Mac) が生成した fingerprint を 開発者 B / CI (Linux) が共有できない。 R3 を満たさないため棄却する。
 
 #### 採用: 論理 version 文字列を resolver で取得
 
@@ -367,10 +367,10 @@ flowchart LR
 - 同名 tool が 2 ファイル以上で定義されたら load 時 error。 未定義 name を参照した task も load 時 error
 - runner は `Run` 冒頭で全 tool を 1 回ずつ resolve し、 結果を name 別 cache に保持 ( N task が同じ tool を参照しても Resolver 呼び出しは 1 回、 ADR-0008 D6)
 - 一つの task で複数 resolver / tool を組み合わせたい場合 ( 例: `tools: [go-toolchain, my-codegen]`) は名前を並べる
-- prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断キャッシュを壊しうるため avoid)
+- prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断 fingerprint を壊しうるため avoid)
 - 複合 generator ( `buf generate` 等) を扱うときも専用 resolver は導入せず、 関連設定ファイルを spec.inputs に含める形で files_hash 経路に乗せる ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))
 
-declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md)、 named-tool 化の理由 ( DRY / per-tool 1 回 resolve / 表現力) は [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) 参照。
+declared-only に倒した理由 ( fingerprint の健全性 / 暗黙パースの排除 / ADR-0004 の `tools:` 必須化との整合) は [ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md)、 named-tool 化の理由 ( DRY / per-tool 1 回 resolve / 表現力) は [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) 参照。
 
 具体的な Resolver / Registry の interface 定義は [resolver / preflight の拡張性](#resolver--preflight-の拡張性-interface-設計) 節にまとめる。
 
@@ -383,7 +383,7 @@ declared-only に倒した理由 ( cache 健全性 / 暗黙パースの排除 / 
 - **OS 非依存** ( build 成果物ではなくソーステキストの hash)
 - **sloff バイナリ単体で完結** ( go API 直接 import、 外部 CLI ツールへの依存ゼロ、 subprocess spawn なし)
 - ソース変更には敏感に反応する
-- **sloff 1 run 内のメモ化**: 同一 entry ( 例: 同じ内製 protoc-gen-foo を多数の proto task が使う) を複数 task が参照する場合、 `SourceLister.List(ctx, entry)` の結果を `entry` をキーに run 内でキャッシュして 1 回だけ評価する。 これは Resolver / SourceLister の単純な最適化で、 cache 健全性に影響しない ( 同一入力に対する純粋関数の結果メモ化)
+- **sloff 1 run 内のメモ化**: 同一 entry ( 例: 同じ内製 protoc-gen-foo を多数の proto task が使う) を複数 task が参照する場合、 `SourceLister.List(ctx, entry)` の結果を `entry` をキーに run 内でキャッシュして 1 回だけ評価する。 これは Resolver / SourceLister の単純な最適化で、 fingerprint の健全性に影響しない ( 同一入力に対する純粋関数の結果メモ化)
 - **Resolver 単位で `SourceLister` を切替可能**: 標準実装で対応できないケース ( `go/packages` で正しく取れない構造の Go プロジェクト等) では、 該当 Resolver の `SourceLister` を `globLister` に切り替える。 「精度は下がるが死角ゼロ」を選ぶ retreat path として常に提供する。 切替単位は Resolver なので、 影響範囲が局所化される
 
 ##### 性能上の優位性は別途 benchmark で検証が必要
@@ -396,7 +396,7 @@ import 解析ベースの hash 抽出は、 ファイル glob ベースの愚直
 つまり「invalidate 削減効果が hash 計算オーバーヘッドを上回るか」は **実装後に実測で確かめる必要** がある。 検証すべき指標:
 
 - per-task の hash 計算時間 ( import 解析 vs 愚直 glob)
-- invalidate 削減効果 ( 不要ファイル除外による false miss 削減 / cache hit 率向上)
+- invalidate 削減効果 ( 不要ファイル除外による false miss 削減 / fingerprint hit 率向上)
 - 全体としてのビルド時間トレードオフ ( hash 計算オーバーヘッド × task 数 vs 不要再生成回避時間)
 
 検証結果次第で、 内製ツールのソース hash 抽出を **愚直 glob に retreat する** 選択肢もありうる ( Resolver の構造はそのまま、 内部の `SourceLister` を `goPackagesLister` から `globLister` に差し替えるだけで対応可能)。 性能評価は Open Question として記録する ( 後述)。
@@ -429,7 +429,7 @@ buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight
 
 - **デフォルト**: sloff を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
 - **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
-- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
+- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 fingerprint は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 
 代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `resolved_versions_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
 
@@ -566,7 +566,7 @@ prebuilt binary 系 ( `nix` / `mise` / `aqua` 等で配布される CLI 等) は
 
 依存関係は **`inputs` と `outputs` から完全に自動導出する**。 sloff には `depends` のような手動依存宣言フィールドは **存在しない**。
 
-これは単に DRY のためではなく、 **キャッシュ機構の健全性を担保するための必然** である。 詳細は本節末尾の [なぜ手動 `depends` を持たないか](#なぜ手動-depends-を持たないか-キャッシュ健全性の前提) を参照。
+これは単に DRY のためではなく、 **fingerprint 機構の健全性を担保するための必然** である。 詳細は本節末尾の [なぜ手動 `depends` を持たないか](#なぜ手動-depends-を持たないか-fingerprint の健全性の前提) を参照。
 
 #### 自動導出アルゴリズム
 
@@ -592,17 +592,17 @@ example:
 
 → `protoc-gen-go` の `inputs` glob に `*.options.pb.go` が含まれており、 これは `options-codegen` の `outputs` の実ファイルにマッチする。 sloff は自動的に **`protoc-gen-go → options-codegen` の依存** を構築する。
 
-#### なぜ手動 `depends` を持たないか (キャッシュ健全性の前提)
+#### なぜ手動 `depends` を持たないか (fingerprint の健全性の前提)
 
-sloff のキャッシュが信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと。 この前提が成立するなら、 上流 task の output が変わったときに下流 task の `input_hash` が必ず変わる ( 上流 output が下流 inputs に含まれるため)。
+sloff の fingerprint が信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと。 この前提が成立するなら、 上流 task の output が変わったときに下流 task の `input_hash` が必ず変わる ( 上流 output が下流 inputs に含まれるため)。
 
 仮に「inputs にも outputs にも現れない論理依存」があるとすると:
 
 1. 上流 task の output が変わっても、 下流 task の `input_hash` には反映されない
-2. 下流は `input_hash` 一致 → cache hit → skip
-3. **古い結果のまま動く** ( cache が嘘をつく)
+2. 下流は `input_hash` 一致 → fingerprint hit → skip
+3. **古い結果のまま動く** ( fingerprint が嘘をつく)
 
-つまり「手動 `depends` で表現したくなる依存」が存在する状況 = **「inputs / outputs の宣言が現実の generator 挙動を反映していない」状況** = **cache 機構自体が信頼できない状況**。 手動 `depends` を導入してその場の DAG を救済しても、 hash ベースの cache 判定が嘘をついている根本問題は解消されない ( むしろ「依存は明示してあるからキャッシュも信頼できる」という偽の安心感を生む)。
+つまり「手動 `depends` で表現したくなる依存」が存在する状況 = **「inputs / outputs の宣言が現実の generator 挙動を反映していない」状況** = **fingerprint 機構自体が信頼できない状況**。 手動 `depends` を導入してその場の DAG を救済しても、 hash ベースの fingerprint 判定が嘘をついている根本問題は解消されない ( むしろ「依存は明示してあるから fingerprint も信頼できる」という偽の安心感を生む)。
 
 したがって sloff では:
 
@@ -611,7 +611,7 @@ sloff のキャッシュが信頼できる前提は、 **「generator は spec �
 - もし「自動導出で見つからない依存」が必要に見えたら、 それは spec の `inputs` / `outputs` 宣言が不完全である合図。 spec を修正するのが正しい対応
 - 上記の前提を満たせない generator (`inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) は **そもそも sloff のスコープ外**。 利用者の Makefile / shell スクリプト側に残すか、 generator 自体を修正する
 
-この立場は不便なように見えるが、 「キャッシュは健全な generator にのみ意味がある」という根本原則を spec / 実装レベルで強制する設計判断。
+この立場は不便なように見えるが、 「fingerprint は健全な generator にのみ意味がある」という根本原則を spec / 実装レベルで強制する設計判断。
 
 #### invalidate チェーン
 
@@ -621,9 +621,9 @@ invalidate チェーンの実装は、 **「上流 task の最新 output hash �
 
 - 全 task の glob expand は **sloff 1 run 内で 1 回だけ** 行い、 task 間で結果を共有する ( I_t / O_t の集合をメモ化)
 - 交差判定は task 数 N に対して O(N²) だが、 実用上の monorepo 規模 ( 200 task 程度) では現実的なオーダー
-- chicken-and-egg ( 完全初回で output ファイルが存在しない) は generator 出力が git 管理されている前提のため通常起きない。 fresh clone 直後でも前回の generator output は git tree に存在する。 完全な初期化は cache miss で全 task 実行
+- chicken-and-egg ( 完全初回で output ファイルが存在しない) は generator 出力が git 管理されている前提のため通常起きない。 fresh clone 直後でも前回の generator output は git tree に存在する。 完全な初期化は fingerprint miss で全 task 実行
 - `sloff graph` サブコマンドで導出された DAG を Mermaid / DOT で可視化し、 「なぜ A → B の依存があるのか」をデバッグできるようにする (auto-detect の根拠ファイルも併記)
-- `sloff run --explain <task>` で個別 task の cache hit / miss 理由 ( 上流のどの output が変わって invalidate されたか) を表示
+- `sloff run --explain <task>` で個別 task の fingerprint hit / miss 理由 ( 上流のどの output が変わって invalidate されたか) を表示
 
 #### 暗黙性の懸念と緩和策
 
@@ -639,19 +639,19 @@ invalidate チェーンの実装は、 **「上流 task の最新 output hash �
 per-task per-input ファイル方式では record が累積する。 容量見積りは保守的に試算しても、 `1 record ≒ 2KB × タスク数 200 × 並走世代 10 ≒ 4MB` 程度に収まる見込み。 ただし長期運用では掃除機構が必要。 4 段で提供する:
 
 - **CI nightly sweep**: GitHub Actions の scheduled job で、 git mtime が直近 90 日以内に触れられていない record を列挙し、 削除 PR を bot 投稿する
-- **`sloff cache gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる。 **同 input_hash に対して複数 timestamp の record が併存した場合は、 最古 timestamp の 1 件に collapse する処理も担う ( ADR-0010 §duplicate collapse の責務)**
-- **task rename / 削除コミットでの自動削除**: lefthook / pre-commit hook に「 spec を変更/削除する diff があれば、 対応する `.sloff/cache/<spec_dir>/<task_id>/` も削除する」step を追加
+- **`sloff fingerprint gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる。 **同 input_hash に対して複数 timestamp の record が併存した場合は、 最古 timestamp の 1 件に collapse する処理も担う ( ADR-0010 §duplicate collapse の責務)**
+- **task rename / 削除コミットでの自動削除**: lefthook / pre-commit hook に「 spec を変更/削除する diff があれば、 対応する `.sloff/fingerprints/<spec_dir>/<task_id>/` も削除する」step を追加
 - **長期的オプション ( 本 Doc スコープ外)**: record 容量が想定を超えたら git LFS 化、 または Hybrid ( ADR-0003 Option E) への拡張余地は残す
 
 ### PR ノイズ抑制
 
-`.sloff/cache/**` を `.gitattributes` で `linguist-generated=true` 指定し、 GitHub PR diff の default collapsed 化。 PR template に「`.sloff/cache/` 配下の差分は人間レビュー対象外」と明記する運用ルールを併設する。
+`.sloff/fingerprints/**` を `.gitattributes` で `linguist-generated=true` 指定し、 GitHub PR diff の default collapsed 化。 PR template に「`.sloff/fingerprints/` 配下の差分は人間レビュー対象外」と明記する運用ルールを併設する。
 
 ## Open Questions
 
 - **Q1**: 同 input hash で複数 OS が独立に走った時、 output hash が真に一致するか。 一致しない generator (例: 行末コード差、 絶対パス埋込、 time.Now embed) が出た場合の対処方針。 cross-OS double-run 検証 CI を入れて早期発見するか
-- **Q2**: 開発者が手元で `.sloff/cache/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
-- **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと cache が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
+- **Q2**: 開発者が手元で `.sloff/fingerprints/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
+- **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと fingerprint が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
 - **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
 
 各 Resolver 固有の Open Questions は対応する Resolver doc を参照。
@@ -659,21 +659,21 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 ## File Layout
 
 ```
-.sloff/cache/                             # ★ cache record root (利用者リポジトリ側に作成)
+.sloff/fingerprints/                             # ★ fingerprint root (利用者リポジトリ側に作成)
   <spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb
 
 # sloff 自身のコードベース ( github.com/izumin5210/sloff):
-cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff cache gc` 等)
+cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff fingerprint gc` 等)
 internal/sloff/
   spec.go                                   # sloff.yml パース、 CmdSpec
-  runner.go                                 # 並列 runner、 cache lookup / write
+  runner.go                                 # 並列 runner、 fingerprint lookup / write
   hash.go                                   # input/output hash 計算
   depgraph.go                               # inputs / outputs からの依存自動導出 + DAG 構築
   explain.go                                # `sloff run --explain` / `sloff graph` の判定根拠出力
-  cache/                                    # ★ Storage interface + Registry
+  fingerprint/                                    # ★ Storage interface + Registry
     record.go                               # Record 型 (YAML schema, deterministic marshal/unmarshal)
     storage.go                              # Storage interface, Key / ListFilter 型
-    registry.go                             # Storage registry (SLOFF_CACHE_BACKEND による backend 選択)
+    registry.go                             # Storage registry (SLOFF_FINGERPRINT_BACKEND による backend 選択)
     local/                                # ★ 各 backend は独立 Go package
       local.go                            # LocalStorage (採用、 ADR-0003)
     # 将来追加候補 ( 初版では実装しない、 各々独立 package で実装):
@@ -710,8 +710,8 @@ internal/sloff/
 
 # 利用者リポジトリ側に作成するファイル ( sloff 利用時)
 <spec_dir>/sloff.yml                      # task 定義
-.sloff/cache/                             # 自動生成される record 群
-.gitattributes                              # .sloff/cache/** に linguist-generated=true を指定推奨
+.sloff/fingerprints/                             # 自動生成される record 群
+.gitattributes                              # .sloff/fingerprints/** に linguist-generated=true を指定推奨
 ```
 
 #### Resolver / Preflight Checker / Storage backend の package 分割方針
@@ -723,6 +723,6 @@ internal/sloff/
 - 将来の channel 追加 ( nix / cargo 等の lockfile-based) も「新 package を 1 つ追加」で完結し、 既存 package を触らない
 - internal ヘルパーの可視性も Go の package 境界で自然に閉じ込められる
 
-トップレベル package ( `toolresolver` / `preflight` / `cache`) には interface 定義と Registry のみを置き、 各実装 package は interface を import して `Resolver` / `Checker` / `Storage` を返す factory を export する。 Registry には `main.go` 等の起動側で必要な実装を組み立てて register する ( DI コンテナ的な使い方)。
+トップレベル package ( `toolresolver` / `preflight` / `fingerprint`) には interface 定義と Registry のみを置き、 各実装 package は interface を import して `Resolver` / `Checker` / `Storage` を返す factory を export する。 Registry には `main.go` 等の起動側で必要な実装を組み立てて register する ( DI コンテナ的な使い方)。
 
 `SourceLister` ( Resolver 内部 helper) は **トップレベル拡張ポイントではないため 1 package** で十分とする ( `lister.go` / `glob.go` / `gopackages.go` を同じ package に同居)。 ここを細かく分けすぎると過剰設計になる。

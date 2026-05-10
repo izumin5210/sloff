@@ -1,7 +1,7 @@
 // Package toolresolver dispatches tool version resolution to per-channel resolvers
 // (script for prebuilt binaries — including external npm / Go OSS packages, see
 // ADR-0007 — and go-local / pnpm-local for internal sources) and produces the
-// OS-neutral logical version strings that feed the cache record's resolved_versions_hash
+// OS-neutral logical version strings that feed the fingerprint's resolved_versions_hash
 // component, plus the ExtraInputs that feed the runner's depgraph derivation.
 package toolresolver
 

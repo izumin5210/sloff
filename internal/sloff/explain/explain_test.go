@@ -98,7 +98,7 @@ func TestEdges_SelfReferenceIsIgnored(t *testing.T) {
 // TestTaskRef_LabelTreatsDotSpecRelpathAsRoot guards the rendering rule that
 // a sloff.yml discovered at the working tree root (spec.Discover sets
 // SpecRelpath="." for path.Dir("sloff.yml")) renders as just the task name,
-// matching the cache layer's pathFor collapse and avoiding ".:copy"-style
+// matching the fingerprint layer's pathFor collapse and avoiding ".:copy"-style
 // labels in graph output.
 func TestTaskRef_LabelTreatsDotSpecRelpathAsRoot(t *testing.T) {
 	ref := explain.TaskRef{SpecRelpath: ".", Name: "copy"}

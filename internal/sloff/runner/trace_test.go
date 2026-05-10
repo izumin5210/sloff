@@ -11,7 +11,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
 	preflightpnpm "github.com/izumin5210/sloff/internal/sloff/preflight/pnpmlocal"
 	"github.com/izumin5210/sloff/internal/sloff/runner"

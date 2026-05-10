@@ -420,7 +420,7 @@ commands:
 
 // TestDiscover_DuplicateTaskAcrossSpecsAllowed guards that the same task name
 // can appear in different spec dirs (they're disambiguated by spec dir in the
-// cache record path), even though duplicates within one file are rejected.
+// fingerprint path), even though duplicates within one file are rejected.
 func TestDiscover_DuplicateTaskAcrossSpecsAllowed(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "a", "sloff.yml"), `tools:

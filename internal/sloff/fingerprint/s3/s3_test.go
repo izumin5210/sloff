@@ -543,6 +543,8 @@ func TestNew_RequiresBucket(t *testing.T) {
 // asked to talk to S3 here, so AWS credentials / network are not
 // required — credential resolution in `loadAWSConfig` is lazy.
 func TestNew_DefaultsAndOverrides(t *testing.T) {
+	pathStyleOn := true
+	pathStyleOff := false
 	cases := []struct {
 		name string
 		cfg  fingerprint.S3Config
@@ -550,8 +552,8 @@ func TestNew_DefaultsAndOverrides(t *testing.T) {
 		{name: "empty prefix falls back to default", cfg: fingerprint.S3Config{Bucket: "b"}},
 		{name: "prefix is trimmed", cfg: fingerprint.S3Config{Bucket: "b", Prefix: "/x/y/"}},
 		{name: "endpoint set", cfg: fingerprint.S3Config{Bucket: "b", Endpoint: "http://example.invalid"}},
-		{name: "use_path_style explicit true", cfg: fingerprint.S3Config{Bucket: "b", UsePathStyle: ptr(true)}},
-		{name: "use_path_style explicit false with endpoint", cfg: fingerprint.S3Config{Bucket: "b", Endpoint: "http://example.invalid", UsePathStyle: ptr(false)}},
+		{name: "use_path_style explicit true", cfg: fingerprint.S3Config{Bucket: "b", UsePathStyle: &pathStyleOn}},
+		{name: "use_path_style explicit false with endpoint", cfg: fingerprint.S3Config{Bucket: "b", Endpoint: "http://example.invalid", UsePathStyle: &pathStyleOff}},
 		{name: "region set", cfg: fingerprint.S3Config{Bucket: "b", Region: "ap-northeast-1"}},
 	}
 	for _, tt := range cases {
@@ -566,8 +568,6 @@ func TestNew_DefaultsAndOverrides(t *testing.T) {
 		})
 	}
 }
-
-func ptr[T any](v T) *T { return &v }
 
 // listKeys is a small ListObjectsV2 helper that flattens a paginator into a
 // sorted slice for assertions. Tests use it instead of reaching into the

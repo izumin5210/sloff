@@ -29,6 +29,13 @@ type Storage interface {
 
 	// List enumerates keys for GC and reporting. Empty filter fields mean "no filter".
 	List(ctx context.Context, filter ListFilter) ([]Key, error)
+
+	// CollapseDuplicates folds every (spec, task, input_hash) Key that has more
+	// than one timestamp variant down to its earliest-prefix variant, returning
+	// the number of variants removed. Backends that cannot produce duplicates
+	// (a single-writer backend with no merge analogue) may return (0, nil)
+	// without inspecting the store, but they MUST surface ctx errors.
+	CollapseDuplicates(ctx context.Context) (int, error)
 }
 
 // Key uniquely identifies a record.

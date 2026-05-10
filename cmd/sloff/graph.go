@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/izumin5210/sloff/internal/sloff/explain"
-	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
 )
 
@@ -89,14 +88,18 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		return err
 	}
 
-	// Storage is wired only because runner.New keeps it on the Options struct;
-	// Plan never touches it. Preflight is left nil so install drift never
-	// blocks rendering — graph is the tool users reach for *when* the build
-	// is broken.
+	storage, err := loadStorage(ctx, root)
+	if err != nil {
+		return fmt.Errorf("load fingerprint storage: %w", err)
+	}
+
+	// Plan never touches Storage; we still resolve it here so graph honours
+	// the same .sloff/config.yml as run / gc. Preflight is left nil so
+	// install drift does not block rendering.
 	r := runner.New(runner.Options{
 		RepoRoot:       root,
 		Specs:          specs,
-		Storage:        local.New(root),
+		Storage:        storage,
 		Resolvers:      resolvers,
 		TracerProvider: tp,
 	})

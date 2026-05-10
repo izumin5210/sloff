@@ -14,6 +14,8 @@
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
   - [Resolver: pnpm-local](./resolver-pnpm-local.md) — pnpm workspace 内 内製パッケージ
+- 各 Storage backend の詳細設計:
+  - [Storage: s3](./storage-s3.md) — S3 互換 object storage を opt-in で選べる追加 backend ( ADR-0003 Option C の materialise)
 
 ## Context
 
@@ -265,6 +267,11 @@ type Storage interface {
 
     // List は GC / 集計用に key 一覧を列挙する
     List(ctx context.Context, filter ListFilter) ([]Key, error)
+
+    // CollapseDuplicates は同 (spec, task, input_hash) に複数 timestamp variant
+    // が並存している状態 ( merge 直後 / 並列 first-write race) を、 最古 prefix
+    // 1 件に折り畳む。 削除した variant 数を返す。 `sloff fingerprint gc` の本体。
+    CollapseDuplicates(ctx context.Context) (int, error)
 }
 
 type Key struct {
@@ -280,25 +287,29 @@ type ListFilter struct {
 }
 ```
 
-組み込み実装 ( 初版):
+組み込み実装:
 
-- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`LocalStorage`** ( ADR-0003 既定): `.sloff/fingerprints/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`S3Storage`**: S3 / R2 / kumo 等の S3 互換 object storage に PUT / GET ( ADR-0003 Option C 相当)。 利用者が opt-in する追加 backend で、 既定ではない。 詳細は [Storage: s3](./storage-s3.md)
 
 将来追加候補 ( 必要が生じた段階で対応):
 
-- **`S3Storage`**: S3 / R2 等の object storage に PUT / GET ( ADR-0003 Option C 相当)
 - **`HybridStorage`**: 小さな record は git に、 大きな record や artifact は S3 に振り分ける ( ADR-0003 Option E 相当)
 - **`MemoryStorage`**: テスト用 ( in-memory map)
 
-backend 選択は環境変数で切り替える想定:
+backend 選択はリポジトリルート直下の `.sloff/config.yml` ( spec ファイルとは別物) で行う。 ファイル不在時は暗黙に `backend: local` ( 既存挙動)。
 
-```sh
-# 既定 ( 初版実装ではこれのみ)
-SLOFF_FINGERPRINT_BACKEND=local sloff run --pattern '**/sloff.yml'
-
-# 将来 S3 を導入した場合
-SLOFF_FINGERPRINT_BACKEND=s3 SLOFF_S3_BUCKET=sloff-fingerprints-prod sloff run ...
+```yaml
+# .sloff/config.yml — リポジトリ全体の sloff 設定
+fingerprint:
+  backend: s3      # 省略時 local
+  s3:
+    bucket: my-org-sloff-fingerprints
+    prefix: sloff/fingerprints
+    # region / endpoint / use_path_style は省略可。 詳細は storage-s3.md
 ```
+
+認証情報は `.sloff/config.yml` には書かず、 AWS 標準の credential chain ( env / `~/.aws/credentials` / IRSA / IMDS) に委譲する。 詳細は [Storage: s3](./storage-s3.md) を参照。
 
 ##### 設計上の責務分離
 
@@ -308,9 +319,9 @@ SLOFF_FINGERPRINT_BACKEND=s3 SLOFF_S3_BUCKET=sloff-fingerprints-prod sloff run .
 
 これにより、 backend 切替 ( 例: LocalStorage → S3Storage) を行っても、 fingerprint 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
 
-##### 初版スコープ
+##### 既定 backend と opt-in backend
 
-初版は **`LocalStorage` のみ実装** する ( ADR-0003 採用案)。 interface と Registry は最初から切るが、 他 backend は YAGNI 原則で実装しない。 将来 S3 / Hybrid が必要になった段階で interface に従って実装を追加する。
+`local` を **既定 backend** に置く ( ADR-0003 採用案)。 容量 / PR ノイズ / 外部 infra 整備状況のいずれかが組織側で問題として顕在化したときだけ、 `.sloff/config.yml` で **`s3` backend に opt-in** する ( 詳細は [Storage: s3](./storage-s3.md))。 Hybrid ( ADR-0003 Option E) / Memory は引き続き YAGNI で未実装、 必要が生じた段階で同じ interface を実装した独立 package を追加する。
 
 ### OS 横断 invalidate 戦略
 
@@ -674,10 +685,12 @@ internal/sloff/
     record.go                               # Record 型 (YAML schema, deterministic marshal/unmarshal)
     storage.go                              # Storage interface, Key / ListFilter 型
     registry.go                             # Storage registry (SLOFF_FINGERPRINT_BACKEND による backend 選択)
+    config.go                             # .sloff/config.yml load ( backend 選択 + s3 接続情報)
     local/                                # ★ 各 backend は独立 Go package
-      local.go                            # LocalStorage (採用、 ADR-0003)
-    # 将来追加候補 ( 初版では実装しない、 各々独立 package で実装):
-    #   s3/s3.go             (S3Storage,     ADR-0003 Option C)
+      local.go                            # LocalStorage (既定、 ADR-0003)
+    s3/                                   # S3Storage ( ADR-0003 Option C、 詳細は storage-s3.md)
+      s3.go
+    # 将来追加候補:
     #   hybrid/hybrid.go     (HybridStorage, ADR-0003 Option E)
     #   memory/memory.go     (MemoryStorage, テスト用)
   toolresolver/                             # ★ Resolver interface + Registry

@@ -10,10 +10,13 @@
 - [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
 - [ADR-0010: fingerprint filename への timestamp prefix](../adr/0010-fingerprint-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
+- [ADR-0011: 大規模 monorepo 向け remote backend は DynamoDB](../adr/0011-dynamodb-remote-fingerprint-storage.md) (= 1000+ task 規模では per-item KV モデルが構造的に最適)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
   - [Resolver: pnpm-local](./resolver-pnpm-local.md) — pnpm workspace 内 内製パッケージ
+- 各 Storage backend の詳細設計:
+  - [Storage: DynamoDB](./storage-dynamodb.md) — 大規模 monorepo 向け remote backend ( opt-in)、 2 段ローカルキャッシュ併用
 
 ## Context
 
@@ -77,7 +80,7 @@
   - **内製ソース** ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール): entry point からのソースファイル集合の hash
 - 内製ツール ( 内製 Go CLI / pnpm workspace 内 内製 js/ts ツール) を扱う Resolver は、 内部で **ソースファイル列挙戦略 ( `SourceLister`)** を選択する ( 標準は glob、 Go なら `go/packages`)。 Pants 流の dependency inference は Go 側で部分的に取り込む
 - preflight ( cmd 実行前の state 検証) は **検証したい invariant が channel 別に存在するときに Checker を持つ** general subsystem。 現状の builtin は `pnpm-local` の install drift checker のみ ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認)。 script resolver / go-local では runtime バイナリやソース自体が SSoT のため Checker 不要 ( [ADR-0007](../adr/0007-no-external-dependency-resolver.md) / [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) D7)
-- record の永続化レイヤ ( Storage) も interface を切り、 初版は `LocalStorage` のみ実装するが、 将来 S3 / Hybrid 等への切替を実装追加だけで可能にしておく
+- record の永続化レイヤ ( Storage) も interface を切り、 既定は local backend、 大規模 monorepo は DynamoDB backend を opt-in で選べる ( [ADR-0011](../adr/0011-dynamodb-remote-fingerprint-storage.md) / [storage-dynamodb.md](./storage-dynamodb.md))
 
 ```mermaid
 flowchart TD
@@ -245,9 +248,9 @@ package fingerprint
 
 import "context"
 
-// Storage は record の永続化バックエンド ( ローカルファイル / S3 / Hybrid 等)
+// Storage は record の永続化バックエンド ( ローカルファイル / DynamoDB 等)
 type Storage interface {
-    // Name は backend 識別子 (例: "local", "s3", "hybrid")
+    // Name は backend 識別子 (例: "local", "dynamodb")
     Name() string
 
     // Load は key に対応する record を取得する。 見つからなければ (nil, false, nil)。
@@ -265,6 +268,17 @@ type Storage interface {
 
     // List は GC / 集計用に key 一覧を列挙する
     List(ctx context.Context, filter ListFilter) ([]Key, error)
+
+    // CollapseDuplicates は同 (spec, task, input_hash) の重複 variant を最古 1 件に
+    // 折り畳む ( local backend では merge 直後の path uniqueness 経路、 DynamoDB
+    // backend では構造的に重複が起き得ないので no-op)。 削除した variant 数を返す。
+    CollapseDuplicates(ctx context.Context) (int, error)
+
+    // LoadMany / SaveMany は bulk API。 リモート backend ( DynamoDB) の per-task
+    // RTT を抑えるために必須で、 runner はこちらを呼ぶ。 local backend は per-key を
+    // errgroup で並列実行する trivial 実装。
+    LoadMany(ctx context.Context, keys []Key) (map[Key]*Record, error)
+    SaveMany(ctx context.Context, items []KeyRecord) error
 }
 
 type Key struct {
@@ -280,25 +294,27 @@ type ListFilter struct {
 }
 ```
 
-組み込み実装 ( 初版):
+組み込み実装:
 
-- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/fingerprints/<spec_relpath>/<task_id>/<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`local`** ( ADR-0003 で採用、 既定): `.sloff/fingerprints/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定
+- **`dynamodb`** ( ADR-0011、 opt-in): AWS DynamoDB に per-item で書き出す。 大規模 monorepo ( 1000+ task) 向け、 BatchGetItem / BatchWriteItem で起動 / 終了それぞれ数 RTT で済ませる。 リモート backend には常に **2 段ローカルキャッシュ** ( `$XDG_CACHE_HOME/sloff/fingerprints/<host>/<owner>/<repo>/...`) が decorator として被さる ( [storage-dynamodb.md](./storage-dynamodb.md))
 
-将来追加候補 ( 必要が生じた段階で対応):
+将来追加候補:
 
-- **`S3Storage`**: S3 / R2 等の object storage に PUT / GET ( ADR-0003 Option C 相当)
-- **`HybridStorage`**: 小さな record は git に、 大きな record や artifact は S3 に振り分ける ( ADR-0003 Option E 相当)
-- **`MemoryStorage`**: テスト用 ( in-memory map)
+- **`firestore`** / **`bigtable`** / **`cosmosdb`** 等の他クラウド KV: multi-cloud 利用組織で必要が生じれば各々独立 backend として実装
+- **`memory`**: テスト用 ( in-memory map)
 
-backend 選択は環境変数で切り替える想定:
+backend 選択はリポジトリルート直下の `.sloff/config.yml` で行う:
 
-```sh
-# 既定 ( 初版実装ではこれのみ)
-SLOFF_FINGERPRINT_BACKEND=local sloff run --pattern '**/sloff.yml'
-
-# 将来 S3 を導入した場合
-SLOFF_FINGERPRINT_BACKEND=s3 SLOFF_S3_BUCKET=sloff-fingerprints-prod sloff run ...
+```yaml
+fingerprint:
+  backend: dynamodb           # 省略時 local
+  dynamodb:
+    table: sloff-fingerprints # 必須
+    # region / endpoint / expires_after_days は任意
 ```
+
+認証情報 ( AWS credential 等) は config に書かず、 各クラウド標準のチェーン ( AWS_*、 IRSA、 IMDS 等) に委譲する。
 
 ##### 設計上の責務分離
 
@@ -306,11 +322,11 @@ SLOFF_FINGERPRINT_BACKEND=s3 SLOFF_S3_BUCKET=sloff-fingerprints-prod sloff run .
 - **Storage** = 「どこに / どうやって保存するか」 ( ファイル / object / DB)
 - **output-comparison ロジック** ( fingerprint lookup) は Storage backend に依存しない
 
-これにより、 backend 切替 ( 例: LocalStorage → S3Storage) を行っても、 fingerprint 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + Registry に登録するだけで完結する。
+これにより、 backend 切替 ( 例: local → dynamodb) を行っても、 fingerprint 判定ロジック自体は再実装不要。 backend 追加 = `Storage` interface を 1 つ実装 + cmd 側に builder を register するだけで完結する。
 
-##### 初版スコープ
+##### 既定 backend と opt-in backend
 
-初版は **`LocalStorage` のみ実装** する ( ADR-0003 採用案)。 interface と Registry は最初から切るが、 他 backend は YAGNI 原則で実装しない。 将来 S3 / Hybrid が必要になった段階で interface に従って実装を追加する。
+既定は `local` ( ADR-0003)。 リモート共有が必要かつ 1000+ task 規模を視野に入れる組織は `.sloff/config.yml` で `dynamodb` に opt-in する ( ADR-0011)。 multi-cloud / 別ワークロードへの対応は、 必要が生じた段階で同じ interface を実装した独立 package を追加する。
 
 ### OS 横断 invalidate 戦略
 
@@ -670,16 +686,22 @@ internal/sloff/
   hash.go                                   # input/output hash 計算
   depgraph.go                               # inputs / outputs からの依存自動導出 + DAG 構築
   explain.go                                # `sloff run --explain` / `sloff graph` の判定根拠出力
-  fingerprint/                                    # ★ Storage interface + Registry
-    record.go                               # Record 型 (YAML schema, deterministic marshal/unmarshal)
-    storage.go                              # Storage interface, Key / ListFilter 型
-    registry.go                             # Storage registry (SLOFF_FINGERPRINT_BACKEND による backend 選択)
-    local/                                # ★ 各 backend は独立 Go package
-      local.go                            # LocalStorage (採用、 ADR-0003)
-    # 将来追加候補 ( 初版では実装しない、 各々独立 package で実装):
-    #   s3/s3.go             (S3Storage,     ADR-0003 Option C)
-    #   hybrid/hybrid.go     (HybridStorage, ADR-0003 Option E)
-    #   memory/memory.go     (MemoryStorage, テスト用)
+  fingerprint/                                    # ★ Storage interface + factory
+    record.go                               # Record 型 ( deterministic marshal/unmarshal)
+    storage.go                              # Storage interface, Key / KeyRecord / ListFilter 型
+    config.go                               # .sloff/config.yml パース ( backend 選択)
+    factory.go                              # backend builder dispatch
+    cached/                               # ★ 2 段ローカルキャッシュ decorator ( remote backend 専用)
+      cached.go                           # XDG_CACHE_HOME 配下にミラー、 write-through
+      repopath.go                         # git remote URL → <host>/<owner>/<repo> 変換
+    local/                                # local backend
+      local.go                            # ADR-0003 既定
+    dynamodb/                             # DynamoDB backend ( opt-in、 ADR-0011)
+      dynamodb.go
+      keys.go
+    # 将来追加候補:
+    #   firestore/firestore.go    ( GCP 向け per-item KV)
+    #   memory/memory.go          ( テスト用 in-memory)
   toolresolver/                             # ★ Resolver interface + Registry
     resolver.go                             # Resolver interface, ResolvedVersion 型
     registry.go                             # Registry (byName + dispatch order)

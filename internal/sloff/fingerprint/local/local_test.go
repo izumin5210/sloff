@@ -587,3 +587,71 @@ func TestLoad_PropagatesUnmarshalError(t *testing.T) {
 		t.Error("expected Load to surface decode error for corrupt record")
 	}
 }
+
+func TestLoadMany(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	keys := []fingerprint.Key{
+		{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"},
+		{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h2"},
+		{SpecRelpath: "spec/b", TaskID: "other", InputHash: "h3"},
+	}
+	for _, k := range keys {
+		if err := st.Save(ctx, k, newRecord(k.TaskID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.LoadMany(ctx, append(keys, fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "missing"}))
+	if err != nil {
+		t.Fatalf("LoadMany: %v", err)
+	}
+	if len(got) != len(keys) {
+		t.Errorf("expected %d records (missing key excluded), got %d", len(keys), len(got))
+	}
+	for _, k := range keys {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing key %+v in LoadMany result", k)
+		}
+	}
+}
+
+func TestSaveMany(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	items := []fingerprint.KeyRecord{
+		{Key: fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"}, Record: newRecord("gen")},
+		{Key: fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h2"}, Record: newRecord("gen")},
+		{Key: fingerprint.Key{SpecRelpath: "spec/b", TaskID: "other", InputHash: "h3"}, Record: newRecord("other")},
+	}
+	if err := st.SaveMany(ctx, items); err != nil {
+		t.Fatalf("SaveMany: %v", err)
+	}
+	for _, it := range items {
+		if _, ok, _ := st.Load(ctx, it.Key); !ok {
+			t.Errorf("expected hit for %+v after SaveMany", it.Key)
+		}
+	}
+}
+
+func TestLoadMany_EmptyKeys(t *testing.T) {
+	st := newStorage(t.TempDir(), fixedClock)
+	got, err := st.LoadMany(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("LoadMany on empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(got))
+	}
+}
+
+func TestSaveMany_EmptyItems(t *testing.T) {
+	st := newStorage(t.TempDir(), fixedClock)
+	if err := st.SaveMany(context.Background(), nil); err != nil {
+		t.Errorf("SaveMany on empty should be noop, got %v", err)
+	}
+}

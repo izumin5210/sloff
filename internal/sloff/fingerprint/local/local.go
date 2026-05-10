@@ -13,9 +13,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
@@ -128,6 +132,70 @@ func (s *Storage) Save(_ context.Context, key fingerprint.Key, record *fingerpri
 		}
 	}
 	return os.WriteFile(target, b, 0o644)
+}
+
+// LoadMany implements fingerprint.Storage by fanning out per-key Load calls in
+// parallel. Local I/O is microseconds-fast, so a naive errgroup parallel for
+// loop is enough — the bulk shape exists primarily for remote backends, but
+// keeping the contract uniform across backends lets the runner dispatch
+// without per-backend branching.
+func (s *Storage) LoadMany(ctx context.Context, keys []fingerprint.Key) (map[fingerprint.Key]*fingerprintv1.Record, error) {
+	out := make(map[fingerprint.Key]*fingerprintv1.Record, len(keys))
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(localBulkConcurrency)
+	for _, key := range keys {
+		g.Go(func() error {
+			rec, ok, err := s.Load(gctx, key)
+			if err != nil {
+				return fmt.Errorf("local: load %+v: %w", key, err)
+			}
+			if !ok {
+				return nil
+			}
+			mu.Lock()
+			out[key] = rec
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SaveMany implements fingerprint.Storage by fanning out per-key Save calls in
+// parallel. Same rationale as LoadMany: local fs writes are cheap, so we just
+// keep parity with the bulk API contract.
+func (s *Storage) SaveMany(ctx context.Context, items []fingerprint.KeyRecord) error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(localBulkConcurrency)
+	for _, it := range items {
+		g.Go(func() error {
+			if err := s.Save(gctx, it.Key, it.Record); err != nil {
+				return fmt.Errorf("local: save %+v: %w", it.Key, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+// localBulkConcurrency caps the goroutines spawned by LoadMany / SaveMany.
+// Keeping this proportional to NumCPU mirrors the runner's task concurrency
+// budget, since the bulk operations are I/O-bound on the same disk.
+var localBulkConcurrency = bulkConcurrencyDefault()
+
+func bulkConcurrencyDefault() int {
+	n := runtime.NumCPU()
+	if n < 1 {
+		return 1
+	}
+	if n > 16 {
+		return 16
+	}
+	return n
 }
 
 // Delete implements fingerprint.Storage. Removes every timestamped file matching

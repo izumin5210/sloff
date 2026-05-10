@@ -408,6 +408,28 @@ func TestNew_RejectsNegativeTTL(t *testing.T) {
 	}
 }
 
+// TestNew_GoesThroughDefaultAWSChain exercises the production code path
+// where New constructs an aws.Config via LoadDefaultConfig itself
+// (instead of receiving a pre-built client through WithClient).
+// Credential resolution is lazy in aws-sdk-go-v2 so this does not need
+// real AWS credentials to succeed at construction time.
+func TestNew_GoesThroughDefaultAWSChain(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "stub")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "stub")
+	st, err := ddbpkg.New(context.Background(), ddbpkg.Config{
+		Table:    "stub",
+		Region:   "us-east-1",
+		Endpoint: kumoEndpoint(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if st.Name() != "dynamodb" {
+		t.Errorf("Name() = %q, want dynamodb", st.Name())
+	}
+}
+
 func TestName(t *testing.T) {
 	st, _, _ := newStorage(t, 0, fixedClock)
 	if name := st.Name(); name != "dynamodb" {

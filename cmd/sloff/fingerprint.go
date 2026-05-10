@@ -12,7 +12,6 @@ import (
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
-	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 )
 
 func newFingerprintCmd() *cobra.Command {
@@ -61,7 +60,10 @@ func runFingerprintGC(ctx context.Context, w io.Writer, root string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	st := local.New(root)
+	st, err := loadStorage(ctx, root)
+	if err != nil {
+		return err
+	}
 	removed, err := st.CollapseDuplicates(ctx)
 	if err != nil {
 		return err

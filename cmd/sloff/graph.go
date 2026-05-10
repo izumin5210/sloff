@@ -89,10 +89,13 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		return err
 	}
 
-	// Storage is wired only because runner.New keeps it on the Options struct;
-	// Plan never touches it. Preflight is left nil so install drift never
-	// blocks rendering — graph is the tool users reach for *when* the build
-	// is broken.
+	// Plan never reads Storage, but runner.Options.Storage is a non-pointer
+	// interface field, so something has to live there. Pin local.New(root)
+	// as a cheap no-op stub instead of going through loadStorage; that way
+	// graph keeps rendering even when an opt-in remote backend is selected
+	// but its config / network is misconfigured. Preflight is left nil for
+	// the same reason — install drift should not block diagnosis.
+	// TODO(DEV-21): drop this stub once Plan no longer requires a Storage.
 	r := runner.New(runner.Options{
 		RepoRoot:       root,
 		Specs:          specs,

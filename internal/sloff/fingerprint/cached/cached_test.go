@@ -414,3 +414,54 @@ type failingDeleteStorage struct {
 }
 
 func (f failingDeleteStorage) Delete(_ context.Context, _ fingerprint.Key) error { return f.err }
+
+// TestSave_CacheWriteFailureDoesNotMaskInnerSuccess covers the
+// best-effort error swallowing in writeCacheBestEffort: when MkdirAll
+// fails (a regular file blocks the directory path), Save still reports
+// the inner success.
+func TestSave_CacheWriteFailureDoesNotMaskInnerSuccess(t *testing.T) {
+	dir := t.TempDir()
+	// Drop a regular file at the path we'd otherwise want to create as a
+	// directory; MkdirAll then fails with ENOTDIR and the cache write
+	// silently skips.
+	if err := os.WriteFile(filepath.Join(dir, "spec"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mem := newMem()
+	st := cached.New(mem, dir)
+	key := fingerprint.Key{SpecRelpath: "spec/sub", TaskID: "gen", InputHash: "h"}
+	if err := st.Save(context.Background(), key, newRecord("gen")); err != nil {
+		t.Fatalf("Save should swallow cache write failure, got %v", err)
+	}
+	if mem.records[key] == nil {
+		t.Error("inner record should still be persisted")
+	}
+}
+
+// TestDelete_CacheRemoveFailureDoesNotMaskInnerSuccess covers the
+// best-effort branch in removeCacheBestEffort. The cache dir contains
+// a directory at the key path, which os.Remove cannot remove (it
+// would need RemoveAll). We assert Delete still reports the inner
+// result.
+func TestDelete_CacheRemoveFailureDoesNotMaskInnerSuccess(t *testing.T) {
+	dir := t.TempDir()
+	mem := newMem()
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	mem.records[key] = newRecord("gen")
+	// Pre-create a non-empty directory at the cache file's expected
+	// path so os.Remove fails with ENOTEMPTY.
+	target := filepath.Join(dir, "spec", "gen", "h.pb")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := cached.New(mem, dir)
+	if err := st.Delete(context.Background(), key); err != nil {
+		t.Fatalf("Delete should swallow cache remove failure, got %v", err)
+	}
+	if _, ok := mem.records[key]; ok {
+		t.Error("inner record should be deleted")
+	}
+}

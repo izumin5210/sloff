@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -155,44 +154,34 @@ func (s *Storage) readCache(key fingerprint.Key) (*fingerprintv1.Record, bool) {
 	return rec, true
 }
 
+// writeCacheBestEffort writes the record to disk and ignores any error.
+// The inner backend is the source of truth — a missing or stale cache
+// file is corrected on the next Load.
 func (s *Storage) writeCacheBestEffort(key fingerprint.Key, rec *fingerprintv1.Record) {
-	if err := s.writeCache(key, rec); err != nil {
-		// Cache write failures are non-fatal; the inner backend is the
-		// source of truth and will be consulted on the next read. We
-		// intentionally swallow errors here rather than surfacing them
-		// up the call chain.
-		_ = err
-	}
+	_ = s.writeCache(key, rec)
 }
 
+// writeCacheManyBestEffort fans out per-record cache writes, swallowing
+// individual errors for the same reason as writeCacheBestEffort.
 func (s *Storage) writeCacheManyBestEffort(items map[fingerprint.Key]*fingerprintv1.Record) {
 	if len(items) == 0 {
 		return
 	}
 	g := new(errgroup.Group)
 	g.SetLimit(cacheConcurrency)
-	var mu sync.Mutex
-	var firstErr error
 	for k, rec := range items {
 		g.Go(func() error {
-			if err := s.writeCache(k, rec); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-			}
+			_ = s.writeCache(k, rec)
 			return nil
 		})
 	}
 	_ = g.Wait()
-	_ = firstErr
 }
 
 // writeCache is atomic: marshal → write to a temp file in the same dir →
 // rename. Concurrent writes of the same key produce wire-byte-identical
 // content (deterministic Marshal), so the rename winner does not matter.
-func (s *Storage) writeCache(key fingerprint.Key, rec *fingerprintv1.Record) error {
+func (s *Storage) writeCache(key fingerprint.Key, rec *fingerprintv1.Record) (retErr error) {
 	b, err := fingerprint.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("cached: marshal %+v: %w", key, err)
@@ -206,25 +195,31 @@ func (s *Storage) writeCache(key fingerprint.Key, rec *fingerprintv1.Record) err
 		return err
 	}
 	tmpName := tmp.Name()
+	defer func() {
+		// Cleanup the temp file on any failure path; once the rename
+		// succeeds the file no longer exists under tmpName so Remove is
+		// a no-op there.
+		if retErr != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
 		return err
 	}
-	if err := os.Rename(tmpName, full); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	return os.Rename(tmpName, full)
 }
 
+// removeCacheBestEffort drops the cache file and ignores any error
+// other than "already gone". Stale cache files are corrected by Load's
+// content check (mismatched record bytes) on the next access.
 func (s *Storage) removeCacheBestEffort(key fingerprint.Key) {
-	if err := os.Remove(s.keyPath(key)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		_ = err
+	err := os.Remove(s.keyPath(key))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// best-effort: see comment above
 	}
 }
 

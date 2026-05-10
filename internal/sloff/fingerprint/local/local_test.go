@@ -481,6 +481,7 @@ func TestList_IgnoresForeignFiles(t *testing.T) {
 	for _, name := range []string{
 		"deadbeef.pb",                   // legacy (pre ADR-0010) hash-only filename
 		"notatimestamp-deadbeef.pb",     // dash present but prefix isn't all digits
+		"abcdefghijklmnopq-deadbeef.pb", // prefix matches timestamp width but is not numeric
 		"20260505120000000-stray.txt",   // wrong extension
 		"20260505120000000-.pb",         // empty hash
 		"-20260505120000000deadbeef.pb", // leading dash

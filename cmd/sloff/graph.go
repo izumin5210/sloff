@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/izumin5210/sloff/internal/sloff/explain"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
-	"github.com/izumin5210/sloff/internal/sloff/spec"
 )
 
 const (
@@ -52,20 +53,36 @@ resolver-contributed sources), so they fail loud.`,
 	return cmd
 }
 
-func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string) error {
+func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	tp, shutdown, err := setupTracing(ctx)
+	if err != nil {
+		return fmt.Errorf("setup tracing: %w", err)
+	}
+	defer flushTracing(shutdown)
+
+	tracer := tp.Tracer(cmdTracerName)
+	ctx, span := tracer.Start(ctx, "sloff.graph", trace.WithAttributes(
+		attribute.String("sloff.subcommand", "graph"),
+		attribute.String("sloff.spec.pattern", pattern),
+		attribute.String("sloff.graph.format", format),
+	))
+	defer endSpan(span, &err)
 
 	root, err := filepath.Abs(rawRoot)
 	if err != nil {
 		return fmt.Errorf("resolve --root: %w", err)
 	}
+	span.SetAttributes(attribute.String("sloff.repo_root", root))
 
-	specs, err := spec.Discover(root, pattern)
+	specs, err := discoverSpecs(ctx, tracer, root, pattern)
 	if err != nil {
-		return fmt.Errorf("discover specs: %w", err)
+		return err
 	}
+	span.SetAttributes(attribute.Int("sloff.spec.count", len(specs)))
 
 	resolvers, err := buildResolvers(root)
 	if err != nil {
@@ -77,10 +94,11 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 	// blocks rendering — graph is the tool users reach for *when* the build
 	// is broken.
 	r := runner.New(runner.Options{
-		RepoRoot:  root,
-		Specs:     specs,
-		Storage:   local.New(root),
-		Resolvers: resolvers,
+		RepoRoot:       root,
+		Specs:          specs,
+		Storage:        local.New(root),
+		Resolvers:      resolvers,
+		TracerProvider: tp,
 	})
 
 	tasks, err := r.Plan(ctx)

@@ -5,6 +5,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,10 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
@@ -28,6 +33,33 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/spec"
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver"
 )
+
+// runnerTracerName is the InstrumentationScope name attached to every span
+// runner emits. It is the import path so trace consumers can group sloff's
+// runner-side activity under a single library identity.
+const runnerTracerName = "github.com/izumin5210/sloff/internal/sloff/runner"
+
+// endSpan finishes span with error status when *errp is non-nil. The pointer
+// indirection lets callers tie span outcome to a named return value:
+//
+//	defer endSpan(span, &err)
+func endSpan(span trace.Span, errp *error) {
+	if errp != nil && *errp != nil {
+		span.RecordError(*errp)
+		span.SetStatus(codes.Error, (*errp).Error())
+	}
+	span.End()
+}
+
+// inputHashAttr is the truncated form of the full input hash used as a span
+// attribute. The full hex is preserved on the cache record; spans only need
+// enough to correlate sibling tasks across one run.
+func inputHashAttr(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
 
 // Logger is the minimal logging surface the runner uses. log.Default() is used by default.
 type Logger interface {
@@ -58,6 +90,14 @@ type Options struct {
 	Stderr io.Writer
 
 	Logger Logger
+
+	// TracerProvider is where runner emits OpenTelemetry spans. nil yields a
+	// noop provider so embedding callers that haven't configured tracing pay
+	// no cost and never accidentally bleed sloff's spans through a host's
+	// global TracerProvider. The CLI entry points pass a sloff-local provider
+	// configured from OTEL_*/SLOFF_OTEL_* env (cmd/sloff/otel.go); embedders
+	// can pass their own to fan sloff spans into their pipeline.
+	TracerProvider trace.TracerProvider
 }
 
 // Runner executes all discovered specs in topological order with fingerprint lookup and
@@ -67,6 +107,7 @@ type Runner struct {
 	logger Logger
 	stdout io.Writer
 	stderr io.Writer
+	tracer trace.Tracer        // derived once in New from opts.TracerProvider
 	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
 
 	// producedBy maps each resolved output path to the task that produced it. Cross-task
@@ -93,7 +134,21 @@ func New(opts Options) *Runner {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
-	return &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
+	tp := opts.TracerProvider
+	if tp == nil {
+		// Default to a sloff-local noop so callers that don't configure
+		// tracing pay nothing and don't accidentally route runner spans
+		// through whatever the host process happens to have on the global
+		// TracerProvider.
+		tp = noop.NewTracerProvider()
+	}
+	return &Runner{
+		opts:   opts,
+		logger: logger,
+		stdout: stdout,
+		stderr: stderr,
+		tracer: tp.Tracer(runnerTracerName),
+	}
 }
 
 // Run executes preflight then every task. Errors during preflight or task execution
@@ -132,17 +187,42 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	tasks, err := r.collectTasks(inputsByTool, versionsByTool)
+	tasks, err := r.collectTasksTraced(ctx, inputsByTool, versionsByTool)
 	if err != nil {
 		return err
 	}
-	ordered, err := depgraph.Build(tasks)
+	ordered, err := r.depgraphBuildTraced(ctx, tasks)
 	if err != nil {
 		return err
 	}
 
 	r.producedBy = map[string]string{}
 	return r.runTasks(ctx, ordered)
+}
+
+// collectTasksTraced wraps the ctx-free collectTasks with a span. The
+// underlying call has no cancelable I/O, so the span purely captures phase
+// timing and the resolved task count for the trace tree.
+func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) (tasks []depgraph.Task, err error) {
+	_, span := r.tracer.Start(ctx, "runner.collect_tasks")
+	defer endSpan(span, &err)
+	tasks, err = r.collectTasks(inputsByTool, versionsByTool)
+	if err != nil {
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("sloff.task.count", len(tasks)))
+	return tasks, nil
+}
+
+// depgraphBuildTraced wraps depgraph.Build with a span. depgraph.Build is a
+// pure function that doesn't take ctx; the wrapper exists only so the phase
+// shows up in the trace tree alongside the others.
+func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task) (ordered []depgraph.Task, err error) {
+	_, span := r.tracer.Start(ctx, "runner.depgraph.build", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(tasks)),
+	))
+	defer endSpan(span, &err)
+	return depgraph.Build(tasks)
 }
 
 // runTasks executes the topologically-ordered task list with bounded
@@ -159,15 +239,22 @@ func (r *Runner) Run(ctx context.Context) error {
 // scheduled and the first non-context error is returned. Cancellation is
 // observed before each task starts so a Ctrl-C drops in-flight tasks at the
 // next scheduling boundary rather than waiting for the whole queue to drain.
-func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) error {
+func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err error) {
 	if len(ordered) == 0 {
 		return nil
 	}
 
+	concurrency := taskConcurrency(len(ordered))
+	ctx, span := r.tracer.Start(ctx, "runner.tasks.run", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+		attribute.Int("sloff.tasks.concurrency", concurrency),
+	))
+	defer endSpan(span, &err)
+
 	predecessors := taskPredecessorIndices(ordered)
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(taskConcurrency(len(ordered)))
+	g.SetLimit(concurrency)
 
 	done := make([]chan struct{}, len(ordered))
 	failed := make([]bool, len(ordered))
@@ -201,7 +288,8 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) error {
 			return nil
 		})
 	}
-	return g.Wait()
+	err = g.Wait()
+	return err
 }
 
 // taskPredecessorIndices returns, for each task index in ordered, the set of
@@ -276,11 +364,11 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := r.collectTasks(inputsByTool, nil)
+	tasks, err := r.collectTasksTraced(ctx, inputsByTool, nil)
 	if err != nil {
 		return nil, err
 	}
-	return depgraph.Build(tasks)
+	return r.depgraphBuildTraced(ctx, tasks)
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
@@ -310,22 +398,33 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 // are not written for a known-suspect run. Hard errors from a checker
 // (the check itself couldn't execute) bypass the read-only fall-through
 // and fail the run regardless.
-func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) error {
+func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) (err error) {
+	ctx, span := r.tracer.Start(ctx, "runner.preflight", trace.WithAttributes(
+		attribute.Int("sloff.tool.referenced_count", len(referencedToolNames)),
+	))
+	defer endSpan(span, &err)
+
 	if r.opts.Preflight == nil {
+		span.SetAttributes(attribute.String("sloff.preflight.skipped_reason", "no_registry"))
 		return nil
 	}
 	checkers := scopeCheckers(r.opts.Preflight.Names(), registry, referencedToolNames)
+	span.SetAttributes(attribute.Int("sloff.preflight.checker_count", len(checkers)))
 	if len(checkers) == 0 {
+		span.SetAttributes(attribute.String("sloff.preflight.skipped_reason", "no_referenced_checkers"))
 		return nil
 	}
 	res, err := r.opts.Preflight.Run(ctx, ".", checkers)
 	if err != nil {
 		return err
 	}
+	span.SetAttributes(attribute.Bool("sloff.preflight.ok", res.OK))
 	if !res.OK {
+		span.SetAttributes(attribute.Int("sloff.preflight.issue_count", len(res.Issues)))
 		r.reportPreflightIssues(res.Issues)
 		if !r.opts.ReadOnly {
-			return fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
+			err = fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
+			return err
 		}
 		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; fingerprints will not be written")
 	}
@@ -366,7 +465,12 @@ func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, reference
 // Splitting Inputs from Versions lets callers that only care about depgraph
 // structure (`sloff graph` / future `--explain`-style read-only debug
 // surfaces) skip the Versions path entirely; see IZU-16.
-func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]string, error) {
+func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]string, err error) {
+	ctx, span := r.tracer.Start(ctx, "runner.resolve.inputs", trace.WithAttributes(
+		attribute.Int("sloff.tool.referenced_count", len(referenced)),
+	))
+	defer endSpan(span, &err)
+
 	results := make([][]string, len(referenced))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(resolverConcurrency(len(referenced)))
@@ -376,19 +480,30 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		g.Go(func() error {
-			ins, err := r.opts.Resolvers.Inputs(gctx, entry.SpecDir, declared)
-			if err != nil {
-				return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+		g.Go(func() (gerr error) {
+			toolCtx, toolSpan := r.tracer.Start(gctx,
+				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+				trace.WithAttributes(
+					attribute.String("sloff.tool.name", entry.Name),
+					attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+					attribute.String("sloff.resolver.phase", "inputs"),
+				))
+			defer endSpan(toolSpan, &gerr)
+
+			ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
+			if gerr != nil {
+				gerr = fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				return gerr
 			}
+			toolSpan.SetAttributes(attribute.Int("sloff.tool.input.count", len(ins)))
 			results[i] = ins
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
+	if err = g.Wait(); err != nil {
 		return nil, err
 	}
-	out := make(map[string][]string, len(referenced))
+	out = make(map[string][]string, len(referenced))
 	for i, name := range referenced {
 		out[name] = results[i]
 	}
@@ -397,7 +512,12 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 
 // resolveVersionContribs invokes Registry.Versions once per referenced tool
 // name. Same scoping discipline as resolveInputContribs.
-func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (map[string][]toolresolver.ResolvedVersion, error) {
+func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]toolresolver.ResolvedVersion, err error) {
+	ctx, span := r.tracer.Start(ctx, "runner.resolve.versions", trace.WithAttributes(
+		attribute.Int("sloff.tool.referenced_count", len(referenced)),
+	))
+	defer endSpan(span, &err)
+
 	results := make([][]toolresolver.ResolvedVersion, len(referenced))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(resolverConcurrency(len(referenced)))
@@ -407,19 +527,30 @@ func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.Tool
 			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		g.Go(func() error {
-			vs, err := r.opts.Resolvers.Versions(gctx, entry.SpecDir, declared)
-			if err != nil {
-				return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, err)
+		g.Go(func() (gerr error) {
+			toolCtx, toolSpan := r.tracer.Start(gctx,
+				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+				trace.WithAttributes(
+					attribute.String("sloff.tool.name", entry.Name),
+					attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+					attribute.String("sloff.resolver.phase", "versions"),
+				))
+			defer endSpan(toolSpan, &gerr)
+
+			vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
+			if gerr != nil {
+				gerr = fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				return gerr
 			}
+			toolSpan.SetAttributes(attribute.Int("sloff.tool.version.count", len(vs)))
 			results[i] = vs
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
+	if err = g.Wait(); err != nil {
 		return nil, err
 	}
-	out := make(map[string][]toolresolver.ResolvedVersion, len(referenced))
+	out = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
 	for i, name := range referenced {
 		out[name] = results[i]
 	}
@@ -643,9 +774,16 @@ func mergeInputs(declared, extra []string) []string {
 
 func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Name }
 
-func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
+func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	info := r.byKey[depgraphKey(t)]
 	versions := info.versions
+
+	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
+		attribute.String("sloff.spec", t.SpecRelpath),
+		attribute.String("sloff.task.name", t.Name),
+		attribute.Int("sloff.tool.count", len(versions)),
+	))
+	defer endSpan(span, &err)
 
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
@@ -654,24 +792,21 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	cmdHash := hash.Cmd(info.command.Cmd)
 	resolvedVersionsHash := hash.ResolvedVersions(versionStrings(versions))
 	inputHash := hash.Input(filesHash, cmdHash, resolvedVersionsHash)
+	span.SetAttributes(attribute.String("sloff.input.hash", inputHashAttr(inputHash)))
 
 	key := fingerprint.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
-
 	taskLabel := taskLabel(t)
-	existing, hadExisting, err := r.opts.Storage.Load(ctx, key)
+	hit, existing, paths, err := r.cacheLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	}
-	if hadExisting {
-		paths := fingerprint.FilePaths(existing.GetOutput().GetFiles())
-		current, hashErr := hash.Files(r.opts.RepoRoot, paths)
-		if hashErr == nil && current == existing.GetOutput().GetHash() {
-			if err := r.recordProducedPaths(taskLabel, paths); err != nil {
-				return err
-			}
-			r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
-			return nil
+	span.SetAttributes(attribute.Bool("sloff.cache.hit", hit))
+	if hit {
+		if err := r.recordProducedPaths(taskLabel, paths); err != nil {
+			return err
 		}
+		r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
+		return nil
 	}
 
 	r.logger.Infof("RUN  %s/%s", t.SpecRelpath, t.Name)
@@ -728,14 +863,64 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	// initial-creation-time concern that motivated keeping generated_at stable
 	// has migrated to the filename's timestamp prefix (ADR-0010), which the
 	// Storage backend preserves on in-place overwrites.
-	if hadExisting && outputsEquivalent(existing.GetOutput(), newRec.GetOutput()) {
+	if existing != nil && outputsEquivalent(existing.GetOutput(), newRec.GetOutput()) {
 		return nil
 	}
 
-	if err := r.opts.Storage.Save(ctx, key, newRec); err != nil {
+	if err := r.cacheStore(ctx, key, newRec); err != nil {
 		return fmt.Errorf("%s: save record: %w", t.Name, err)
 	}
 	return nil
+}
+
+// cacheLookup wraps Storage.Load with a runner.cache.load span. Returns
+// (hit, existing, paths, err) where:
+//   - hit=true only when a record exists AND its output files still hash to
+//     the recorded value; paths is the recorded output paths so the caller
+//     can skip exec.
+//   - hit=false otherwise; existing may still be non-nil if a stale record
+//     was loaded (the caller uses it for the post-exec write-skip check
+//     against the freshly-built record's output identity).
+//
+// The span's sloff.cache.state attribute distinguishes hit / stale /
+// not_found / error so trace consumers can analyse cache health without
+// re-running.
+func (r *Runner) cacheLookup(ctx context.Context, key fingerprint.Key) (hit bool, existing *fingerprintv1.Record, paths []string, err error) {
+	_, span := r.tracer.Start(ctx, "runner.cache.load")
+	defer func() {
+		if err != nil {
+			span.SetAttributes(attribute.String("sloff.cache.state", "error"))
+		}
+		endSpan(span, &err)
+	}()
+
+	rec, ok, loadErr := r.opts.Storage.Load(ctx, key)
+	if loadErr != nil {
+		err = loadErr
+		return false, nil, nil, err
+	}
+	if !ok {
+		span.SetAttributes(attribute.String("sloff.cache.state", "not_found"))
+		return false, nil, nil, nil
+	}
+	candidate := fingerprint.FilePaths(rec.GetOutput().GetFiles())
+	current, hashErr := hash.Files(r.opts.RepoRoot, candidate)
+	if hashErr == nil && current == rec.GetOutput().GetHash() {
+		span.SetAttributes(attribute.String("sloff.cache.state", "hit"))
+		return true, rec, candidate, nil
+	}
+	span.SetAttributes(attribute.String("sloff.cache.state", "stale"))
+	return false, rec, nil, nil
+}
+
+// cacheStore wraps Storage.Save with a runner.cache.save span tagged with the
+// output file count.
+func (r *Runner) cacheStore(ctx context.Context, key fingerprint.Key, rec *fingerprintv1.Record) (err error) {
+	_, span := r.tracer.Start(ctx, "runner.cache.save", trace.WithAttributes(
+		attribute.Int("sloff.output.file_count", len(rec.GetOutput().GetFiles())),
+	))
+	defer endSpan(span, &err)
+	return r.opts.Storage.Save(ctx, key, rec)
 }
 
 // outputsEquivalent reports whether two Output values represent the same
@@ -801,16 +986,47 @@ func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
 	return outputs, nil
 }
 
-func (r *Runner) execCmd(ctx context.Context, info taskInfo) error {
+func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
+	ctx, span := r.tracer.Start(ctx, "runner.task.exec")
+	defer endSpan(span, &err)
+
 	if len(info.command.Cmd) == 0 {
 		return fmt.Errorf("empty cmd")
 	}
+	span.SetAttributes(
+		attribute.String("sloff.cmd", info.command.Cmd[0]),
+		attribute.Int("sloff.cmd.argv_count", len(info.command.Cmd)),
+	)
 	cmd := exec.CommandContext(ctx, info.command.Cmd[0], info.command.Cmd[1:]...)
 	cmd.Dir = filepath.Join(r.opts.RepoRoot, info.specRelpath)
 	cmd.Stdout = r.stdout
 	cmd.Stderr = r.stderr
-	cmd.Env = os.Environ()
-	return cmd.Run()
+	cmd.Env = childEnv(os.Environ())
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		span.SetAttributes(attribute.Int("process.exit_code", ee.ExitCode()))
+	} else if err == nil {
+		span.SetAttributes(attribute.Int("process.exit_code", 0))
+	}
+	return err
+}
+
+// childEnv returns env entries with SLOFF_OTEL_* keys removed. ADR-0009 D2'
+// scopes the SLOFF_-prefixed tracing config to the **current** sloff run; if a
+// task cmd happens to invoke another `sloff` (or any tool that honors the same
+// prefix), the child should not silently inherit the parent's silence /
+// endpoint overrides. Standard OTEL_* keys still flow through so otel-aware
+// codegen tools see whatever the user's shell configured.
+func childEnv(parent []string) []string {
+	out := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "SLOFF_OTEL_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func (r *Runner) reportPreflightIssues(issues []preflight.Issue) {

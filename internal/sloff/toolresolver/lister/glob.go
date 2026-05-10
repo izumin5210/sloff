@@ -42,7 +42,7 @@ func (l *globLister) List(_ context.Context, specDir, entry string) (Listing, er
 	// Refuse entries that resolve outside repoRoot. Parent-relative entries
 	// (e.g. `../cmd/gen`) are valid as long as the final target stays inside
 	// the repo; absolute or deep `../../../...` traversals would tie the
-	// listing to per-developer paths and break OS-neutral cache sharing.
+	// listing to per-developer paths and break OS-neutral fingerprint sharing.
 	if rel, err := filepath.Rel(l.repoRoot, absBase); err != nil || strings.HasPrefix(rel, "..") {
 		return Listing{}, fmt.Errorf("entry %q resolves outside repo root", entry)
 	}

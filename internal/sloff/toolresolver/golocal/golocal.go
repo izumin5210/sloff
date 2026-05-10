@@ -118,7 +118,7 @@ func (r *Resolver) list(ctx context.Context, specDir string, declared *toolresol
 
 // encodeExternalVersion produces the canonical hash-input string for one
 // external Go module. The go.sum line is folded in as a SHA-256 digest so the
-// version stays single-line and bounded length, while still flipping the cache
+// version stays single-line and bounded length, while still flipping the fingerprint
 // when go.sum drifts (Go's classic supply-chain anchor).
 func encodeExternalVersion(m lister.ExternalModule) string {
 	label := DepsPrefix + m.Path + "@" + m.Version

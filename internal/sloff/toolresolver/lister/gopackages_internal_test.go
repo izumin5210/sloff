@@ -266,7 +266,7 @@ func TestWalk_LocalReplaceHashesReplacedSourcesAsInternal(t *testing.T) {
 // TestWalk_LocalReplaceRejectsOutsideRepoRoot guards the boundary: if a local
 // replace points outside repoRoot (absolute path or `../sibling-repo`), the
 // resulting file paths would vary per developer machine and break OS-neutral
-// cache sharing. Refuse to fingerprint instead of recording per-machine paths.
+// fingerprint sharing. Refuse to fingerprint instead of recording per-machine paths.
 func TestWalk_LocalReplaceRejectsOutsideRepoRoot(t *testing.T) {
 	repoRoot := t.TempDir()
 	outside := t.TempDir() // a separate tempdir, definitely outside repoRoot

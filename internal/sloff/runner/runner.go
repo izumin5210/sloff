@@ -1,6 +1,6 @@
 // Package runner orchestrates spec discovery, preflight, dependency-graph derivation
 // and per-task fingerprint lookup/execute/write. It is the integration point for the
-// foundation packages (spec / glob / hash / cache / depgraph / toolresolver / preflight).
+// foundation packages (spec / glob / hash / fingerprint / depgraph / toolresolver / preflight).
 package runner
 
 import (
@@ -149,7 +149,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // concurrency. A task starts as soon as every task that produces one of its
 // inputs has finished — depgraph already sorted them, so we only need to
 // re-derive each task's predecessor set from the same output→producer mapping
-// it used. Independent tasks (the common case for cache-hit runs across
+// it used. Independent tasks (the common case for fingerprint-hit runs across
 // service-local gen-db, where each spec's outputs sit in its own service dir)
 // fan out across NumCPU workers; tasks with real producer→consumer chains
 // (buf-default → buf-custom, build-protoc-plugins → buf-custom, …) still
@@ -235,7 +235,7 @@ func taskPredecessorIndices(ordered []depgraph.Task) [][]int {
 
 // taskConcurrency caps how many tasks runTasks executes in parallel.
 // Cache-hit tasks are I/O-bound (re-reading every input + every output to
-// re-hash); cache-miss tasks spawn a child generator. NumCPU is the same
+// re-hash); fingerprint-miss tasks spawn a child generator. NumCPU is the same
 // budget the resolver fan-out uses, mostly because most tasks block on file
 // reads and a few on subprocess wait. Values much higher than NumCPU on
 // SSD-backed APFS show diminishing returns and risk blowing past the

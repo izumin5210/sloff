@@ -68,7 +68,7 @@ func TestResolver_RejectsEmptyPackageName(t *testing.T) {
 // TestResolver_RejectsNonWorkspacePackage guards the ADR-0007 boundary: a
 // pnpm-local declaration referring to an external npm package must fail
 // clearly so the user knows to switch to the script resolver instead of
-// getting a silent wrong-version cache.
+// getting a silent wrong-version fingerprint.
 func TestResolver_RejectsNonWorkspacePackage(t *testing.T) {
 	root := setupWorkspace(
 		t,
@@ -126,7 +126,7 @@ func TestResolver_EnumeratesPackageDirAsExtraInputs(t *testing.T) {
 // TestResolver_FollowsTransitiveWorkspaceLinks guards that link: deps are
 // followed: editing @org/util's source must be visible to a consumer that
 // uses @org/codegen, because codegen depends on util via workspace:*.
-// Without this, transitive workspace edits would silently miss the cache.
+// Without this, transitive workspace edits would silently miss the fingerprint.
 func TestResolver_FollowsTransitiveWorkspaceLinks(t *testing.T) {
 	root := setupWorkspace(
 		t,

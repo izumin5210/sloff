@@ -18,7 +18,7 @@ import (
 // TestGitLsFiles_ReturnsTrackedAndUntrackedNonIgnored guards the core
 // enumerator contract: tracked files AND untracked-but-not-ignored files
 // surface, while gitignored paths (typically build outputs) do not. Without
-// this, dist/ artefacts would land in ExtraInputs and tie the cache to
+// this, dist/ artefacts would land in ExtraInputs and tie the fingerprint to
 // per-developer build state.
 func TestGitLsFiles_ReturnsTrackedAndUntrackedNonIgnored(t *testing.T) {
 	root := t.TempDir()
@@ -72,7 +72,7 @@ func TestGitLsFiles_HonoursTrackedFilesEvenWhenNowIgnored(t *testing.T) {
 // git ls-files would otherwise return .sloff/fingerprints/** alongside the
 // user's files. sloff rewrites .sloff/fingerprints/ on every run, so feeding
 // those paths into ExtraInputs would flip files_hash on every subsequent
-// run and miss the cache forever. Both tracked and untracked entries
+// run and miss the fingerprint forever. Both tracked and untracked entries
 // under .sloff/ must be dropped — the directory is sloff's
 // implementation detail, not user state, regardless of git status.
 func TestGitLsFiles_DropsSloffStateDir(t *testing.T) {

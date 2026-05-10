@@ -120,7 +120,7 @@ func TestMarshalIsByteStable(t *testing.T) {
 }
 
 // TestMarshalRejectsUnknownSchemaVersion guards that ad-hoc enum values
-// outside the proto enum registry cannot leak into a cache file. ADR-0009 §
+// outside the proto enum registry cannot leak into a fingerprint file. ADR-0009 §
 // "schema_version 移行戦略" treats unknown versions as runtime errors rather
 // than silently encoded best-effort data.
 func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
@@ -132,7 +132,7 @@ func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 }
 
 // TestUnmarshalRejectsZeroBytes guards against silently treating a zero-byte
-// or otherwise default-valued record as a usable cache entry. proto.Unmarshal
+// or otherwise default-valued record as a usable fingerprint entry. proto.Unmarshal
 // happily turns empty input into a Record with SCHEMA_VERSION_UNSPECIFIED;
 // the runner would then evaluate it as an existing record and either claim a
 // false hit or silently overwrite valid bytes. Surface the corruption instead.
@@ -220,7 +220,7 @@ func index(s, sub string) int {
 }
 
 // TestFilePaths exercises the small helper used by runner fingerprint hit logic.
-// It only lives in package cache, so direct callers in the runner do not
+// It only lives in package fingerprint, so direct callers in the runner do not
 // register coverage here.
 func TestFilePaths(t *testing.T) {
 	got := fingerprint.FilePaths([]*fingerprintv1.FileEntry{

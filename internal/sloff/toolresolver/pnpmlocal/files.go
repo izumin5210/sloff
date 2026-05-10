@@ -14,7 +14,7 @@ import (
 // repo-relative slash-form paths, deduplicated, but not necessarily sorted.
 // pkgDir is repo-relative OS-native form. The implementation must respect
 // .gitignore so that build outputs (typically dist/, build/, etc.) don't
-// leak into ExtraInputs (which would tie the cache to artefacts the user
+// leak into ExtraInputs (which would tie the fingerprint to artefacts the user
 // regenerates locally). Production enumerators must also exclude sloff's
 // own state directory (sloffStateDir) — see GitLsFiles for why.
 //
@@ -25,7 +25,7 @@ type FileEnumerator func(ctx context.Context, repoRoot, pkgDir string) ([]string
 // sloffStateDir is the path prefix of the directory sloff owns inside
 // the repo (fingerprints, etc.). pnpm-local enumeration must drop entries
 // under this prefix because hashing them feeds sloff's own writes back
-// into its inputs and self-invalidates the cache on every subsequent run.
+// into its inputs and self-invalidates the fingerprint on every subsequent run.
 // Compared to .git/, which git itself hides from ls-files, .sloff/ is a
 // regular tracked / untracked directory so we filter explicitly.
 const sloffStateDir = ".sloff/"

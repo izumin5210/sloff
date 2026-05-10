@@ -449,7 +449,7 @@ func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
 // outputs and persist a record; the second run must locate the same record,
 // re-hash the cross-dir output, and SKIP without re-executing the cmd. The
 // marker.txt counter (incremented on every cmd execution) detects any
-// regression where the runner stops recognising cross-dir outputs as cacheable.
+// regression where the runner stops recognising cross-dir outputs as fingerprintable.
 func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
 	runE2E(t, "cross-dir-outputs", runStep(), runStep())
 }
@@ -460,7 +460,7 @@ func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
 // (services/a/internal/foo.gen.go vs services/b/...). Before the fix the runner keyed
 // detectOutputPatternConflicts by raw pattern string and refused to start with
 // "duplicate output pattern producers". After the fix both tasks run, each generator
-// lands its own file, and the cache stores one record per spec.
+// lands its own file, and the fingerprint stores one record per spec.
 func TestRunner_PerSpecDistinctOutputsDoNotCollide(t *testing.T) {
 	runE2E(t, "per-spec-distinct-outputs", runStep())
 }
@@ -468,7 +468,7 @@ func TestRunner_PerSpecDistinctOutputsDoNotCollide(t *testing.T) {
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and
-// future runs hit the cache forever.
+// future runs hit the fingerprint forever.
 func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	workdir := t.TempDir()
 	specDir := filepath.Join(workdir, "spec")
@@ -587,7 +587,7 @@ commands:
 // preflight end to end: when a task references a pnpm-local tool but
 // node_modules/.pnpm/lock.yaml is missing (pnpm install was never run
 // against this checkout), the runner aborts before any cmd executes.
-// Without the abort, the resolver would hand the cmd a stale-install cache
+// Without the abort, the resolver would hand the cmd a stale-install fingerprint
 // key and silent stale outputs would propagate.
 func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
 	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
@@ -752,7 +752,7 @@ commands:
 // TestRunner_DuplicateToolNameAcrossSpecsErrors guards the ADR-0008 D2
 // invariant: tool names live in a flat repo-wide namespace, so two
 // sloff.yml files defining the same name must fail the run with both
-// definition sites named — silently picking one would diverge cache results
+// definition sites named — silently picking one would diverge fingerprint results
 // from what the user wrote.
 func TestRunner_DuplicateToolNameAcrossSpecsErrors(t *testing.T) {
 	workdir := t.TempDir()
@@ -1021,7 +1021,7 @@ commands:
 
 	// Both timestamp variants must still be present: a hit does not invoke
 	// Save, so the duplicate-collapse path is not exercised here. (`sloff
-	// cache gc` is the planned collapse trigger for this exact state.)
+	// fingerprint gc` is the planned collapse trigger for this exact state.)
 	postEntries, err := os.ReadDir(fingerprintDir)
 	if err != nil {
 		t.Fatal(err)
@@ -1040,7 +1040,7 @@ commands:
 // TestRunner_ConcurrentFirstWriteCollapsesOnRewrite covers the rare branch of
 // ADR-0010's Save semantics: when two branches' first-writes were merged
 // (multiple `<timestamp>-<hash>.pb` for the same Key) and a subsequent run
-// happens to land in the cache-miss-with-different-output path, Save must
+// happens to land in the fingerprint-miss-with-different-output path, Save must
 // collapse the duplicates onto the earliest-prefix file. The
 // "different-output for the same input" case is a non-deterministic
 // generator (out of sloff scope), so the test forces the situation by

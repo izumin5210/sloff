@@ -319,7 +319,7 @@ func TestRunCacheGC_CollapsesDuplicates(t *testing.T) {
 	}
 }
 
-// TestFingerprintGCCommandViaRootCmd exercises the cobra wiring for `cache gc`,
+// TestFingerprintGCCommandViaRootCmd exercises the cobra wiring for `fingerprint gc`,
 // including the `--repo-root` flag plumb-through that the helper-only
 // runFingerprintGC test does not cover. Without this, the RunE branch (cwd
 // resolution + context propagation) drops out of the coverage profile.
@@ -447,7 +447,7 @@ func TestFingerprintGC_DefaultsToCwd(t *testing.T) {
 }
 
 // TestRunCacheDiff_SurfacesSemanticDifference is the negative half: when the
-// records differ in a hash-significant field (here output.hash), `cache diff`
+// records differ in a hash-significant field (here output.hash), `fingerprint diff`
 // must exit 1 and emit the JSON diff.
 func TestRunCacheDiff_SurfacesSemanticDifference(t *testing.T) {
 	dir := t.TempDir()

@@ -22,7 +22,7 @@ import (
 // records. ADR-0009 bumped V1 (YAML) → V2 (protobuf). ADR-0010 bumped V2 → V3
 // when Record.generated_at was dropped in favour of the filename's timestamp
 // prefix; legacy V2 records become invalid and are rejected on read so callers
-// regenerate them through the normal cache-miss path.
+// regenerate them through the normal fingerprint-miss path.
 const SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V3
 
 // FileExt is the on-disk extension of a fingerprint file. Storage backends

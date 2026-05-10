@@ -214,7 +214,7 @@ YAGNI で flat にする。 必要が生じたら別 ADR で qualified namespace
 
 「 inline と named を共存」 は authoring の自由度を増すが:
 
-- 同じ tool が inline でも named でも書ける状態は cache キーの一意性を曖昧にする
+- 同じ tool が inline でも named でも書ける状態は fingerprint キーの一意性を曖昧にする
 - spec を読む側が「 inline ? named ? どっち?」 を毎回判断する負担を負う
 - pre-release のうちに 1 形式に絞るほうが教育コストが低い
 

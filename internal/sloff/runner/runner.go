@@ -16,10 +16,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
@@ -60,10 +58,6 @@ type Options struct {
 	Stderr io.Writer
 
 	Logger Logger
-
-	// Clock supplies the timestamp written to record.GeneratedAt. Defaults to
-	// time.Now().UTC(); tests inject a fixed clock so cache YAML is byte-deterministic.
-	Clock func() time.Time
 }
 
 // Runner executes all discovered specs in topological order with cache lookup and
@@ -98,9 +92,6 @@ func New(opts Options) *Runner {
 	stderr := opts.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
-	}
-	if opts.Clock == nil {
-		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
 	return &Runner{opts: opts, logger: logger, stdout: stdout, stderr: stderr}
 }
@@ -710,7 +701,6 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	}
 
 	newRec := &cachev1.Record{
-		GeneratedAt:   timestamppb.New(r.opts.Clock()),
 		SchemaVersion: cache.SchemaVersion,
 		Spec: &cachev1.Spec{
 			Cmd:    strings.Join(info.command.Cmd, " "),
@@ -733,8 +723,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	// Write-skip rule (ADR-0009 §"byte stability"): if a record already exists at
 	// this key with the same output identity (hash + per-file (path, hash) set),
 	// the existing entry is still semantically correct. Skip the rewrite so
-	// proto runtime byte-level drift never reaches git, and informational fields
-	// (generated_at, resolved_versions[*].source) keep their first-observed value.
+	// proto runtime byte-level drift never reaches git and the informational
+	// resolved_versions[*].source field keeps its first-observed value. The
+	// initial-creation-time concern that motivated keeping generated_at stable
+	// has migrated to the filename's timestamp prefix (ADR-0010), which the
+	// Storage backend preserves on in-place overwrites.
 	if hadExisting && outputsEquivalent(existing.GetOutput(), newRec.GetOutput()) {
 		return nil
 	}

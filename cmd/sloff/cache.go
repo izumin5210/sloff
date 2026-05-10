@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
+	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 )
 
 func newCacheCmd() *cobra.Command {
@@ -24,7 +26,48 @@ verifying record contents and comparing two records.`,
 	}
 	cmd.AddCommand(newCacheShowCmd())
 	cmd.AddCommand(newCacheDiffCmd())
+	cmd.AddCommand(newCacheGCCmd())
 	return cmd
+}
+
+func newCacheGCCmd() *cobra.Command {
+	var root string
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Collapse duplicate timestamp variants of cache records",
+		Long: `gc walks .sloff/cache/ and, for each (spec, task, input_hash) Key
+that has more than one <timestamp>-<input_hash>.pb sibling, removes
+every variant except the earliest-prefix one. Save's in-line collapse
+only fires on cache miss with a changed output, which is rare under
+deterministic-generator scope, so post-merge duplicates can otherwise
+linger until this safety net sweeps them (ADR-0010 §"duplicate
+collapse の責務").`,
+		RunE: func(cobraCmd *cobra.Command, args []string) error {
+			if root == "" {
+				wd, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				root = wd
+			}
+			return runCacheGC(cobraCmd.Context(), cobraCmd.OutOrStdout(), root)
+		},
+	}
+	cmd.Flags().StringVar(&root, "repo-root", "", "repo root containing .sloff/cache/ (default: cwd)")
+	return cmd
+}
+
+func runCacheGC(ctx context.Context, w io.Writer, root string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	st := local.New(root)
+	removed, err := st.CollapseDuplicates(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "collapsed %d duplicate record file(s)\n", removed)
+	return err
 }
 
 func newCacheShowCmd() *cobra.Command {
@@ -94,18 +137,19 @@ func runCacheDiff(w io.Writer, pathA, pathB string) error {
 	cache.Sort(b)
 
 	// Semantic equality ignores fields documented as informational
-	// (generated_at, resolved_versions[*].source — neither feeds into the
-	// cache hash, ADR-0009). Two records with the same cache identity but
-	// different first-observed timestamp or resolver source label exit 0
-	// silently. Use `sloff cache show` on each path for a full byte view.
+	// (resolved_versions[*].source doesn't feed into the cache hash,
+	// ADR-0009). Two records with the same cache identity but different
+	// resolver source label exit 0 silently. Use `sloff cache show` on each
+	// path for a full byte view. The earlier `generated_at` field was dropped
+	// in ADR-0010 along with the schema_version V3 bump, so it no longer
+	// participates in this comparison.
 	if recordsSemanticallyEqual(a, b) {
 		return nil
 	}
 
-	// Truly different records: print the full JSON diff (including
-	// informational fields, so the user can still see what shifted in
-	// generated_at / source as part of a semantically different record)
-	// and exit 1.
+	// Truly different records: print the full JSON diff (including the
+	// informational source field, so the user can still see what shifted as
+	// part of a semantically different record) and exit 1.
 	jsonA, err := marshalRecordJSON(a)
 	if err != nil {
 		return err
@@ -133,7 +177,6 @@ func recordsSemanticallyEqual(a, b *cachev1.Record) bool {
 }
 
 func clearInformationalFields(rec *cachev1.Record) {
-	rec.GeneratedAt = nil
 	if in := rec.GetInput(); in != nil {
 		for _, v := range in.GetResolvedVersions() {
 			v.Source = ""

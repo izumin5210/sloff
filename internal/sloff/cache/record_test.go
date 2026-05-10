@@ -2,12 +2,10 @@ package cache_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
@@ -15,7 +13,6 @@ import (
 
 func sampleRecord() *cachev1.Record {
 	return &cachev1.Record{
-		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 34, 56, 0, time.UTC)),
 		SchemaVersion: cache.SchemaVersion,
 		Spec: &cachev1.Spec{
 			Cmd:    "buf generate --template buf.gen.yaml",

@@ -16,20 +16,23 @@ syntax = "proto3";
 
 package sloff.cache.v1;
 
-import "google/protobuf/timestamp.proto";
-
 option go_package = "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1;cachev1";
 
 // Record is one cache entry on disk. Lives at
-// .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb.
+// .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb.
+// The filename's timestamp prefix encodes the record's initial creation time
+// (ADR-0010); no wall-clock field is carried in the wire format so that the
+// bytes are a deterministic function of the input.
 message Record {
   SchemaVersion schema_version = 1;
   Spec spec = 2;
   Input input = 3;
   Output output = 4;
-  // Informational. Not part of cache identity. Drift alone does not trigger
-  // a write per ADR-0009 §"byte stability の担保".
-  google.protobuf.Timestamp generated_at = 5;
+  // Field number 5 is reserved for the removed `generated_at` field (ADR-0010
+  // dropped it once the filename prefix took over the initial-creation-time
+  // role).
+  reserved 5;
+  reserved "generated_at";
 }
 
 // SchemaVersion enumerates the schemas a Record may carry. Enum values match
@@ -37,8 +40,13 @@ message Record {
 // ADR-0009 and is intentionally absent here.
 enum SchemaVersion {
   SCHEMA_VERSION_UNSPECIFIED = 0;
-  // First protobuf-encoded schema. Introduced by ADR-0009.
+  // First protobuf-encoded schema. Introduced by ADR-0009. Superseded by V3
+  // and intentionally retained as a closed enum value so legacy on-disk
+  // records can be detected and rejected explicitly.
   SCHEMA_VERSION_V2 = 2;
+  // Drops Record.generated_at; the filename's timestamp prefix replaces it
+  // (ADR-0010).
+  SCHEMA_VERSION_V3 = 3;
 }
 
 message Spec {

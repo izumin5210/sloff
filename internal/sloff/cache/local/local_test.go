@@ -9,16 +9,20 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/cache/local"
 )
 
+var fixedClock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+
+func newStorage(root string, now time.Time) *local.Storage {
+	return local.New(root, local.WithClock(func() time.Time { return now }))
+}
+
 func newRecord(taskID string) *cachev1.Record {
 	return &cachev1.Record{
-		GeneratedAt:   timestamppb.New(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)),
 		Input:         &cachev1.Input{Hash: "deadbeef"},
 		Output:        &cachev1.Output{Hash: "cafebabe"},
 		SchemaVersion: cache.SchemaVersion,
@@ -32,7 +36,7 @@ func newRecord(taskID string) *cachev1.Record {
 
 func TestSaveLoad_RoundTrip(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "deadbeef"}
@@ -55,7 +59,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 
 func TestLoad_MissReturnsFalse(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	got, ok, err := st.Load(ctx, cache.Key{SpecRelpath: "x", TaskID: "y", InputHash: "z"})
@@ -67,9 +71,9 @@ func TestLoad_MissReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
+func TestSave_PreservesSpecRelpathHierarchyAndTimestampPrefix(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "path/to/spec", TaskID: "gen", InputHash: "abc123"}
@@ -77,18 +81,140 @@ func TestSave_PreservesSpecRelpathHierarchy(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	// Deviation from architecture.md: we keep the spec dir hierarchy verbatim instead of
-	// flattening with "_". A "_" substitution would lose information on List for spec
-	// dirs whose names contain underscores.
-	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "abc123.pb")
+	// Spec dir hierarchy is preserved verbatim (deviates from architecture.md's
+	// optional "_" substitution so List can losslessly recover the spec_relpath).
+	// The filename carries a YYYYMMDDHHMMSSsss timestamp prefix per ADR-0010;
+	// fixedClock = 2026-05-05 12:00:00.000 UTC.
+	want := filepath.Join(root, ".sloff", "cache", "path", "to", "spec", "gen", "20260505120000000-abc123.pb")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("expected record at %s, got err=%v", want, err)
 	}
 }
 
+func TestSave_PreservesPrefixOnInPlaceOverwrite(t *testing.T) {
+	root := t.TempDir()
+	now := fixedClock
+	clockFn := func() time.Time { return now }
+	st := local.New(root, local.WithClock(clockFn))
+	ctx := context.Background()
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(root, ".sloff", "cache", "spec", "gen", "20260505120000000-h.pb")
+	if _, err := os.Stat(first); err != nil {
+		t.Fatalf("first save missing: %v", err)
+	}
+
+	// Advance the clock by an hour. A second Save for the same Key must not
+	// produce a new filename; the original prefix is the canonical
+	// initial-creation timestamp.
+	now = now.Add(time.Hour)
+	updated := newRecord("gen")
+	updated.Output.Hash = "newhash"
+	if err := st.Save(ctx, key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(first); err != nil {
+		t.Errorf("expected prefix preserved at %s, got err=%v", first, err)
+	}
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected exactly 1 file after re-save, got %d: %v", len(entries), names)
+	}
+}
+
+func TestSave_CollapsesPostMergeDuplicates(t *testing.T) {
+	root := t.TempDir()
+	now := fixedClock
+	st := local.New(root, local.WithClock(func() time.Time { return now }))
+	ctx := context.Background()
+
+	// Pre-seed two duplicate timestamp variants of the same Key, as if two
+	// branches independently produced first-writes that were later merged.
+	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	older := filepath.Join(dir, "20260101000000000-h.pb")
+	newer := filepath.Join(dir, "20260601000000000-h.pb")
+	rec := newRecord("gen")
+	bytes, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{older, newer} {
+		if err := os.WriteFile(p, bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	updated := newRecord("gen")
+	updated.Output.Hash = "newhash"
+	if err := st.Save(ctx, key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(older); err != nil {
+		t.Errorf("expected earliest prefix kept at %s, got err=%v", older, err)
+	}
+	if _, err := os.Stat(newer); !os.IsNotExist(err) {
+		t.Errorf("expected later duplicate removed at %s, got err=%v", newer, err)
+	}
+}
+
+func TestLoad_ReturnsLatestAmongDuplicates(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	older := newRecord("gen")
+	older.Output.Hash = "older"
+	newer := newRecord("gen")
+	newer.Output.Hash = "newer"
+	for path, rec := range map[string]*cachev1.Record{
+		filepath.Join(dir, "20260101000000000-h.pb"): older,
+		filepath.Join(dir, "20260601000000000-h.pb"): newer,
+	} {
+		b, err := cache.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, ok, err := st.Load(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if got.GetOutput().GetHash() != "newer" {
+		t.Errorf("expected latest record (newer), got hash=%q", got.GetOutput().GetHash())
+	}
+}
+
 func TestDelete_RemovesFile(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
@@ -107,9 +233,42 @@ func TestDelete_RemovesFile(t *testing.T) {
 	}
 }
 
+func TestDelete_RemovesAllTimestampVariants(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "task")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := cache.Marshal(newRecord("task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(dir, "20260101000000000-h.pb"),
+		filepath.Join(dir, "20260601000000000-h.pb"),
+	}
+	for _, p := range paths {
+		if err := os.WriteFile(p, bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Delete(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("expected %s removed, got err=%v", p, err)
+		}
+	}
+}
+
 func TestDelete_MissingKeyIsNoop(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 	if err := st.Delete(ctx, cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "h"}); err != nil {
 		t.Errorf("Delete on missing should be noop, got %v", err)
@@ -118,7 +277,7 @@ func TestDelete_MissingKeyIsNoop(t *testing.T) {
 
 func TestList_AllAndFiltered(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	keys := []cache.Key{
@@ -157,9 +316,38 @@ func TestList_AllAndFiltered(t *testing.T) {
 	}
 }
 
+func TestList_DedupesPostMergeDuplicates(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := cache.Marshal(newRecord("gen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"20260101000000000-h.pb", "20260601000000000-h.pb"} {
+		if err := os.WriteFile(filepath.Join(dir, name), bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.List(ctx, cache.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != key {
+		t.Errorf("expected single dedupe entry, got %+v", got)
+	}
+}
+
 func TestList_OlderThan(t *testing.T) {
 	root := t.TempDir()
-	st := local.New(root)
+	st := newStorage(root, fixedClock)
 	ctx := context.Background()
 
 	old := cache.Key{SpecRelpath: "s", TaskID: "t", InputHash: "old"}
@@ -167,7 +355,7 @@ func TestList_OlderThan(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Backdate the on-disk mtime to something definitively older.
-	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "old.pb")
+	oldFile := filepath.Join(root, ".sloff", "cache", "s", "t", "20260505120000000-old.pb")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(oldFile, past, past); err != nil {
 		t.Fatal(err)
@@ -186,6 +374,47 @@ func TestList_OlderThan(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].InputHash != "old" {
 		t.Errorf("expected only old, got %+v", got)
+	}
+}
+
+func TestCollapseDuplicates(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := cache.Marshal(newRecord("gen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		"20260101000000000-h.pb",
+		"20260301000000000-h.pb",
+		"20260601000000000-h.pb",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := st.CollapseDuplicates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Errorf("expected 2 removals, got %d", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, files[0])); err != nil {
+		t.Errorf("expected earliest preserved, got err=%v", err)
+	}
+	for _, name := range files[1:] {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("expected %s removed, got err=%v", name, err)
+		}
 	}
 }
 

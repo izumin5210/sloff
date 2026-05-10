@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -113,9 +114,7 @@ func (s *Storage) LoadMany(ctx context.Context, keys []fingerprint.Key) (map[fin
 	if err != nil {
 		return nil, err
 	}
-	for k, rec := range fetched {
-		out[k] = rec
-	}
+	maps.Copy(out, fetched)
 	s.writeCacheManyBestEffort(fetched)
 	return out, nil
 }

@@ -296,7 +296,7 @@ func TestLoadMany_ExceedsBatchSize(t *testing.T) {
 	// 150 keys => 2 BatchGetItem calls (limit 100).
 	const N = 150
 	var keys []fingerprint.Key
-	for i := 0; i < N; i++ {
+	for i := range N {
 		keys = append(keys, fingerprint.Key{
 			SpecRelpath: "spec",
 			TaskID:      "gen",
@@ -343,7 +343,7 @@ func TestSaveMany_ExceedsBatchSize(t *testing.T) {
 	// 60 items => 3 BatchWriteItem calls (limit 25).
 	const N = 60
 	items := make([]fingerprint.KeyRecord, 0, N)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		items = append(items, fingerprint.KeyRecord{
 			Key:    fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h" + strconv.Itoa(i)},
 			Record: newRecord("gen"),

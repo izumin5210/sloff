@@ -64,9 +64,8 @@ func readGitRemote(repoRoot, name string) (string, error) {
 // treat it as decorative; including it in the cache path would split the
 // cache between users who clone with `.git` and those who don't.
 func parseGitURL(raw string) (host, path string, err error) {
-	if strings.HasPrefix(raw, "git@") {
+	if rest, ok := strings.CutPrefix(raw, "git@"); ok {
 		// SSH alias: git@github.com:owner/repo.git
-		rest := strings.TrimPrefix(raw, "git@")
 		idx := strings.Index(rest, ":")
 		if idx <= 0 || idx == len(rest)-1 {
 			return "", "", fmt.Errorf("malformed SSH alias")

@@ -351,3 +351,66 @@ func TestName_PassesInner(t *testing.T) {
 		t.Errorf("Name() = %q, want %q (inner backend's name)", got, "mem")
 	}
 }
+
+func TestList_PassesThroughToInner(t *testing.T) {
+	st, mem, _ := newCached(t)
+	ctx := context.Background()
+	keys := []fingerprint.Key{
+		{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"},
+		{SpecRelpath: "spec/b", TaskID: "other", InputHash: "h2"},
+	}
+	for _, k := range keys {
+		mem.records[k] = newRecord(k.TaskID)
+	}
+	got, err := st.List(ctx, fingerprint.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(keys) {
+		t.Errorf("expected %d keys, got %d: %+v", len(keys), len(got), got)
+	}
+}
+
+func TestCollapseDuplicates_PassesThroughToInner(t *testing.T) {
+	st, _, _ := newCached(t)
+	got, err := st.CollapseDuplicates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0 (mem inner returns 0), got %d", got)
+	}
+}
+
+func TestSave_InnerErrorSkipsCache(t *testing.T) {
+	st, mem, dir := newCached(t)
+	mem.saveErr = errors.New("inner failed")
+	key := fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"}
+	if err := st.Save(context.Background(), key, newRecord("gen")); err == nil {
+		t.Fatal("expected inner Save error to surface")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("expected cache untouched on inner failure, entries=%v", entries)
+	}
+}
+
+func TestDelete_InnerErrorPropagates(t *testing.T) {
+	mem := newMem()
+	mem.saveErr = nil
+	innerErr := errors.New("delete failed")
+	dir := t.TempDir()
+	st := cached.New(failingDeleteStorage{memStorage: mem, err: innerErr}, dir)
+	if err := st.Delete(context.Background(), fingerprint.Key{SpecRelpath: "x", TaskID: "y", InputHash: "z"}); !errors.Is(err, innerErr) {
+		t.Errorf("expected inner Delete error to surface, got %v", err)
+	}
+}
+
+// failingDeleteStorage forces Delete to surface a specific error so the
+// decorator's pass-through behaviour on Delete failure is exercised
+// without inventing yet another knob on memStorage.
+type failingDeleteStorage struct {
+	*memStorage
+	err error
+}
+
+func (f failingDeleteStorage) Delete(_ context.Context, _ fingerprint.Key) error { return f.err }

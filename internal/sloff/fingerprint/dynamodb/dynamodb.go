@@ -12,7 +12,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/smithy-go"
 	"golang.org/x/sync/errgroup"
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
@@ -519,21 +518,4 @@ func unprocessedKeys(left ddbtypes.KeysAndAttributes, byPair map[[2]string]finge
 		}
 	}
 	return out
-}
-
-// isResourceNotFound surfaces "table doesn't exist" as a clearer error than
-// the SDK's typed exception. Used in tests; left here for ad-hoc debugging.
-func isResourceNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var nf *ddbtypes.ResourceNotFoundException
-	if errors.As(err, &nf) {
-		return true
-	}
-	var ae smithy.APIError
-	if errors.As(err, &ae) {
-		return ae.ErrorCode() == "ResourceNotFoundException"
-	}
-	return false
 }

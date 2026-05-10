@@ -423,3 +423,100 @@ func TestName(t *testing.T) {
 		t.Errorf("Name() = %q, want local", name)
 	}
 }
+
+// TestNew_DefaultClockUsesNow exercises the default-clock branch of New
+// (which the WithClock path otherwise displaces) so the new Storage stamps
+// records with the wall clock when no Option is passed.
+func TestNew_DefaultClockUsesNow(t *testing.T) {
+	root := t.TempDir()
+	st := local.New(root)
+	ctx := context.Background()
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "deadbeef"}
+	before := time.Now().UTC().Add(-time.Second)
+	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	after := time.Now().UTC().Add(time.Second)
+
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected single record, got entries=%v err=%v", entries, err)
+	}
+	name := entries[0].Name()
+	if len(name) < 17 {
+		t.Fatalf("filename too short: %q", name)
+	}
+	stamp, err := time.Parse("20060102150405", name[:14])
+	if err != nil {
+		t.Fatalf("parse prefix from %q: %v", name, err)
+	}
+	if stamp.Before(before) || stamp.After(after) {
+		t.Errorf("default clock prefix %v outside [%v, %v]", stamp, before, after)
+	}
+}
+
+// TestList_IgnoresForeignFiles guards the `splitFilename` filter: foreign
+// files (no timestamp prefix, wrong extension, or hash-only legacy
+// filenames from before ADR-0010) must be skipped by List rather than
+// silently producing keys with bogus InputHash values.
+func TestList_IgnoresForeignFiles(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := cache.Marshal(newRecord("gen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One legitimate record + an assortment of garbage that List must skip.
+	if err := os.WriteFile(filepath.Join(dir, "20260505120000000-deadbeef.pb"), bytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"deadbeef.pb",                   // legacy (pre ADR-0010) hash-only filename
+		"notatimestamp-deadbeef.pb",     // dash present but prefix isn't all digits
+		"20260505120000000-stray.txt",   // wrong extension
+		"20260505120000000-.pb",         // empty hash
+		"-20260505120000000deadbeef.pb", // leading dash
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("noise"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.List(ctx, cache.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].InputHash != "deadbeef" {
+		t.Errorf("expected single entry for the well-formed file, got %+v", got)
+	}
+}
+
+// TestLoad_PropagatesUnmarshalError covers the corrupt-on-disk branch of
+// Load: a `<timestamp>-<hash>.pb` whose contents cannot be decoded must
+// surface the decode error so the runner reports it instead of treating the
+// file as a miss and silently regenerating.
+func TestLoad_PropagatesUnmarshalError(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20260505120000000-h.pb"), []byte("not a proto"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := st.Load(ctx, cache.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"})
+	if err == nil {
+		t.Error("expected Load to surface decode error for corrupt record")
+	}
+}

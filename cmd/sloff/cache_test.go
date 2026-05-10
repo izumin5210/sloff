@@ -319,6 +319,133 @@ func TestRunCacheGC_CollapsesDuplicates(t *testing.T) {
 	}
 }
 
+// TestCacheGCCommandViaRootCmd exercises the cobra wiring for `cache gc`,
+// including the `--repo-root` flag plumb-through that the helper-only
+// runCacheGC test does not cover. Without this, the RunE branch (cwd
+// resolution + context propagation) drops out of the coverage profile.
+func TestCacheGCCommandViaRootCmd(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, ".sloff", "cache", "spec", "copy")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec:          &cachev1.Spec{Dir: "spec", TaskId: "copy", Cmd: "echo hi"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
+	}
+	pb, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"20260101000000000-deadbeef.pb",
+		"20260601000000000-deadbeef.pb",
+	} {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), pb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"cache", "gc", "--repo-root", root})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(cache gc): %v", err)
+	}
+	if !strings.Contains(out.String(), "collapsed") {
+		t.Errorf("expected gc summary in output, got: %q", out.String())
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "20260101000000000-deadbeef.pb" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only earliest-prefix file remaining, got %v", names)
+	}
+}
+
+// TestRunCacheGC_NoRecordsIsNoop covers the happy-zero path: a repo without
+// any cache records must succeed with `collapsed 0 ...` rather than failing
+// loudly. Captures the empty-list branch through CollapseDuplicates.
+func TestRunCacheGC_NoRecordsIsNoop(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+	if err := runCacheGC(context.Background(), &out, root); err != nil {
+		t.Fatalf("runCacheGC: %v", err)
+	}
+	if !strings.Contains(out.String(), "collapsed 0") {
+		t.Errorf("expected zero-collapse output, got: %q", out.String())
+	}
+}
+
+// TestCacheGC_DefaultsToCwd covers the `--repo-root` omitted branch of
+// newCacheGCCmd, where the command resolves repo root from cwd. We chdir
+// into a tempdir, invoke `sloff cache gc` with no flags, and assert it
+// operated against the tempdir.
+func TestCacheGC_DefaultsToCwd(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, ".sloff", "cache", "spec", "copy")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec:          &cachev1.Spec{Dir: "spec", TaskId: "copy", Cmd: "echo hi"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
+	}
+	pb, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"20260101000000000-deadbeef.pb",
+		"20260601000000000-deadbeef.pb",
+	} {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), pb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prevWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWd) })
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"cache", "gc"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(cache gc): %v", err)
+	}
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only earliest preserved after cwd-default gc, got %v", names)
+	}
+}
+
 // TestRunCacheDiff_SurfacesSemanticDifference is the negative half: when the
 // records differ in a hash-significant field (here output.hash), `cache diff`
 // must exit 1 and emit the JSON diff.

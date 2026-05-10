@@ -499,6 +499,72 @@ func TestList_IgnoresForeignFiles(t *testing.T) {
 	}
 }
 
+// TestCollapseDuplicates_RespectsCtx covers the ctx.Err() short-circuit at
+// the top of CollapseDuplicates' loop body. A pre-cancelled context must
+// return the cancellation error before any file is removed, so a long-
+// running gc invoked from a CI job that gets cancelled mid-run does not
+// leave half-collapsed state on disk.
+func TestCollapseDuplicates_RespectsCtx(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+
+	dir := filepath.Join(root, ".sloff", "cache", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := cache.Marshal(newRecord("gen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		"20260101000000000-h.pb",
+		"20260601000000000-h.pb",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := st.CollapseDuplicates(ctx); err == nil {
+		t.Error("expected cancelled ctx to surface error")
+	}
+	// Both files should still be on disk because the loop bailed before
+	// attempting any os.Remove.
+	for _, name := range files {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s preserved after cancelled gc, got err=%v", name, err)
+		}
+	}
+}
+
+// TestSave_ErrorOnUnwritableDir covers the os.MkdirAll error branch of
+// Save: a parent path that already exists as a regular file makes MkdirAll
+// fail, and Save must surface the error rather than overwrite or silently
+// continue.
+func TestSave_ErrorOnUnwritableDir(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	// Create a file at the path where Save would otherwise create a
+	// directory; MkdirAll then fails because a non-dir occupies the path.
+	cacheRoot := filepath.Join(root, ".sloff", "cache", "spec")
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheRoot, "task"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	key := cache.Key{SpecRelpath: "spec", TaskID: "task", InputHash: "h"}
+	if err := st.Save(ctx, key, newRecord("task")); err == nil {
+		t.Error("expected Save to fail when parent path is occupied by a regular file")
+	}
+}
+
 // TestLoad_PropagatesUnmarshalError covers the corrupt-on-disk branch of
 // Load: a `<timestamp>-<hash>.pb` whose contents cannot be decoded must
 // surface the decode error so the runner reports it instead of treating the

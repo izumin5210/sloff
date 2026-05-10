@@ -583,6 +583,101 @@ commands:
 	}
 }
 
+// TestRunner_FlushPersistsRecordsAfterPartialFailure guards against the
+// queueing regression Codex flagged: when one task succeeds and a later
+// task fails, the successful task's fingerprint record must still be on
+// disk after Run returns the failure error. The pre-bulk implementation
+// achieved this because each task wrote its own record synchronously
+// inside fingerprintStore. The bulk implementation defers writes to a
+// single SaveMany at the end of Run; the flush therefore has to run
+// even when runTasks returns an error, otherwise a single late failure
+// invalidates the cache for every earlier success.
+func TestRunner_FlushPersistsRecordsAfterPartialFailure(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-place a `good.txt` placeholder so depgraph sees the file at
+	// planning time and wires fail-task → ok-task. ok-task overwrites
+	// it at run time. Without the placeholder, the runner would expand
+	// fail-task.inputs against an empty disk and lose the dependency,
+	// letting fail-task race ok-task and potentially cancel its exec
+	// mid-flight via errgroup context cancellation — that race would
+	// mask the regression we want to detect.
+	if err := os.WriteFile(filepath.Join(specDir, "good.txt"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// fail-task depends on ok-task via good.txt so the depgraph guarantees
+	// ok-task completes (and enqueues its record) before fail-task starts
+	// failing.
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: ok-task
+    cmd: ["sh", "-c", "cp input.txt good.txt"]
+    inputs: ["input.txt"]
+    outputs: ["good.txt"]
+    tools: [versioner]
+  - name: fail-task
+    cmd: ["sh", "-c", "exit 1"]
+    inputs: ["good.txt"]
+    outputs: ["never-written.txt"]
+    tools: [versioner]
+`
+	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs, err := spec.Discover(workdir, "**/sloff.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+	})
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("expected error from fail-task, got nil")
+	}
+
+	// ok-task ran to completion before fail-task, so its record must
+	// have been persisted by the end-of-run flush even though the run
+	// itself ended in error.
+	okTaskRecordDir := filepath.Join(workdir, ".sloff", "fingerprints", "spec", "ok-task")
+	entries, err := os.ReadDir(okTaskRecordDir)
+	if err != nil {
+		t.Fatalf("ok-task record dir missing (flush did not run on error path): %v", err)
+	}
+	if len(entries) == 0 {
+		t.Errorf("expected at least one fingerprint record for ok-task after partial failure, got 0")
+	}
+
+	// fail-task's record must NOT be on disk: runTask never enqueues a
+	// record when the generator fails, so flushFingerprints would never
+	// see it. Asserting this guards against an accidental "queue
+	// everything before exec" regression.
+	failTaskRecordDir := filepath.Join(workdir, ".sloff", "fingerprints", "spec", "fail-task")
+	if entries, err := os.ReadDir(failTaskRecordDir); err == nil && len(entries) > 0 {
+		t.Errorf("fail-task fingerprint must not be persisted, got: %v", entries)
+	}
+}
+
 // TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing guards the drift
 // preflight end to end: when a task references a pnpm-local tool but
 // node_modules/.pnpm/lock.yaml is missing (pnpm install was never run

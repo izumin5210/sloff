@@ -218,11 +218,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	r.producedBy = map[string]string{}
-	if err := r.runTasks(ctx, ordered); err != nil {
-		return err
-	}
-
-	return r.flushFingerprints(ctx)
+	runErr := r.runTasks(ctx, ordered)
+	// Flush even when runTasks returned an error so records queued by tasks
+	// that completed *before* a later failure are still persisted. The
+	// alternative (skip flush on error) would force every successful task
+	// to re-execute on the next run, just because some unrelated task at
+	// the tail of the DAG happened to fail. Failed tasks never enqueue a
+	// record (runTask only calls fingerprintStore after a successful
+	// generator + output hash), so the queue holds only good entries.
+	flushErr := r.flushFingerprints(ctx)
+	return errors.Join(runErr, flushErr)
 }
 
 // prefetchFingerprints computes an optimistic input_hash for every task using

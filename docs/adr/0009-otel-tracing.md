@@ -2,24 +2,24 @@
 
 ## Context
 
-sloff は cache-aware codegen orchestrator として、 1 run の中に多段のフェーズを走らせる:
+sloff は fingerprint-aware codegen orchestrator として、 1 run の中に多段のフェーズを走らせる:
 
 1. spec discover ( `spec.Discover`)
 2. tool registry の構築 ( ADR-0008)
 3. preflight ( resolver 単位、 例: pnpm-local の install drift 検証)
 4. resolver pre-pass ( `Inputs` / `Versions` を tool 単位で 1 回だけ走らせる、 ADR-0008 D6)
 5. task collection と DAG 構築 ( `depgraph.Build`)
-6. 並列 task 実行 ( errgroup でファンアウト → 各 task は cache load → ( miss なら exec → cache save) )
+6. 並列 task 実行 ( errgroup でファンアウト → 各 task は fingerprint load → ( miss なら exec → fingerprint save) )
 
-現状の観測手段は `runner.Logger` interface ( `log.Default()` 実装) 経由の平文 log 3 行 ( `SKIP cache hit` / `RUN ...` / preflight error) しかない。 これでは以下のような運用上の疑問に答えられない:
+現状の観測手段は `runner.Logger` interface ( `log.Default()` 実装) 経由の平文 log 3 行 ( `SKIP fingerprint hit` / `RUN ...` / preflight error) しかない。 これでは以下のような運用上の疑問に答えられない:
 
-- 全体所要時間のうち **どのフェーズが支配的か** ( resolver か exec か cache I/O か)
+- 全体所要時間のうち **どのフェーズが支配的か** ( resolver か exec か fingerprint I/O か)
 - 並列 task の **ファンアウト形状**: どの task がクリティカルパス上に居るか
-- `cache.hit` 率の分布: 「 cache hit のはずが exec まで降りた」 タスクの特定
+- `fingerprint.hit` 率の分布: 「 fingerprint hit のはずが exec まで降りた」 タスクの特定
 - per-resolver / per-tool のコスト: `pnpm-local` BFS は何 ms / `go/packages.Load` は何 ms か
 - 異常時の **subprocess の挙動**: どの cmd が長時間ブロックしているか
 
-参考として [Goアプリケーションを observability する話](https://blog.kengo-toda.jp/entry/2026/02/18/082231) と [OpenTelemetry CLI による observability](https://mackerel.io/ja/blog/entry/tech/opentelemetry-cli-observability) は、 短命な CLI process でも OpenTelemetry の trace を吐けば「 phase ごとの所要時間」 「 並列 task の Gantt」 「 cache hit/miss 分布」 を後から可視化できるとしている。 sloff は cache-aware という性質上、 trace ベースで初めて見える運用課題が大きい。
+参考として [Goアプリケーションを observability する話](https://blog.kengo-toda.jp/entry/2026/02/18/082231) と [OpenTelemetry CLI による observability](https://mackerel.io/ja/blog/entry/tech/opentelemetry-cli-observability) は、 短命な CLI process でも OpenTelemetry の trace を吐けば「 phase ごとの所要時間」 「 並列 task の Gantt」 「 fingerprint hit/miss 分布」 を後から可視化できるとしている。 sloff は fingerprint-aware という性質上、 trace ベースで初めて見える運用課題が大きい。
 
 ## Decision
 
@@ -130,17 +130,17 @@ sloff.run | sloff.graph                   [root, cmd/sloff]
 ├─ runner.depgraph.build
 └─ runner.tasks.run                       (run のみ)
     └─ runner.task.run                    per task
-        ├─ runner.cache.load
+        ├─ runner.fingerprint.load
         ├─ runner.task.exec               miss 時のみ
-        └─ runner.cache.save              miss かつ ReadOnly=false 時のみ
+        └─ runner.fingerprint.save              miss かつ ReadOnly=false 時のみ
 ```
 
 主な span attribute:
 
-- `runner.task.run`: `sloff.spec` ( spec dir) / `sloff.task.name` / `sloff.cache.hit` ( bool) / `sloff.input.hash` ( 12 桁 hex に切詰) / `sloff.tool.count`
-- `runner.cache.load`: `sloff.cache.state` ( hit / stale / miss / not_found)
+- `runner.task.run`: `sloff.spec` ( spec dir) / `sloff.task.name` / `sloff.fingerprint.hit` ( bool) / `sloff.input.hash` ( 12 桁 hex に切詰) / `sloff.tool.count`
+- `runner.fingerprint.load`: `sloff.fingerprint.state` ( hit / stale / miss / not_found)
 - `runner.task.exec`: `sloff.cmd` ( argv 全体は冗長なので argv[0] のみ) / `process.exit_code`
-- `runner.cache.save`: `sloff.output.file_count`
+- `runner.fingerprint.save`: `sloff.output.file_count`
 - `resolver.<channel>[<tool>]`: `sloff.tool.name` / `sloff.resolver.channel`
 
 Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` をセットする ( runner package に共通 helper を置く)。
@@ -148,7 +148,7 @@ Span のエラー時は必ず `RecordError` + `SetStatus(codes.Error, ...)` を�
 #### 設計判断の補足
 
 - **resolver 実装は無変更**。 instrumentation は呼び出し側 ( `runner.resolveInputContribs` / `resolveVersionContribs`) の loop 内で span を貼る。 resolver パッケージに otel 依存を持ち込まないことで、 将来 resolver を追加するときの認知負荷を増やさない。
-- **cache `Storage` interface は無変更**。 `Storage.Load` / `Storage.Save` の呼び出し箇所を span で囲む ( これも runner 側責任)。
+- **fingerprint `Storage` interface は無変更**。 `Storage.Load` / `Storage.Save` の呼び出し箇所を span で囲む ( これも runner 側責任)。
 - **`spec.Discover` は cmd/sloff 側でラップ**。 spec パッケージに otel 依存を持たせない。 phase span として cmd / runner の境界に span 開始 / 終了が分散するが、 trace tree としては parent-child で正しく繋がる。
 
 ### D6. Shutdown 規律
@@ -169,7 +169,7 @@ global TextMapPropagator も `setupTracing` から **触らない**。 sloff 自
 
 ### D8. metrics / logs / TRACEPARENT 受信は scope 外
 
-- **metrics**: cache hit rate / task duration histogram / resolver duration 等は OTel metrics で表現したい候補だが、 trace の attribute だけでも当面の運用課題には足りる ( backend 側で集計可能)。 別 ADR で扱う。
+- **metrics**: fingerprint hit rate / task duration histogram / resolver duration 等は OTel metrics で表現したい候補だが、 trace の attribute だけでも当面の運用課題には足りる ( backend 側で集計可能)。 別 ADR で扱う。
 - **logs**: 現 `runner.Logger` は `log.Default()` 直書き。 OTel log bridge ( slog 経由) への移行は 「 logger interface のリファクタ + `slog` 導入」 を伴う別 issue。
 - **TRACEPARENT 受信**: CI から親 span を継承して sloff の trace を child として繋ぐのは有用だが、 単独で sloff の運用課題に対する優先度は低い。 上 2 つと同様、 必要に迫られたら別 ADR で。
 
@@ -177,7 +177,7 @@ global TextMapPropagator も `setupTracing` から **触らない**。 sloff 自
 
 ### 正の影響
 
-- **observability の足場**: 本 PR で trace tree が見える状態になり、 「 どのフェーズが遅いか」 「 cache hit 率」 「 並列 task 形状」 を Jaeger / Tempo / Honeycomb 等で観測できるようになる。
+- **observability の足場**: 本 PR で trace tree が見える状態になり、 「 どのフェーズが遅いか」 「 fingerprint hit 率」 「 並列 task 形状」 を Jaeger / Tempo / Honeycomb 等で観測できるようになる。
 - **0 cost when disabled**: env を何も set しなければ `noop` provider で短絡。 CI fixture や手元実行は今までと挙動 / 性能が変わらない。
 - **既存 E2E goldens は無変更**: `internal/sloff/runner/runner_test.go` の golden 比較は test process が default `noop` のままなので emit が起きず、 `testdata/e2e/runner/.../expected/` は touch されない。
 - **将来の metrics / logs 拡張余地**: SDK / exporter / resource はすべて OTel 標準に乗っているので、 metrics / logs 追加時に provider 横並びで追加できる。
@@ -191,7 +191,7 @@ global TextMapPropagator も `setupTracing` から **触らない**。 sloff 自
 
 ### 将来再考の余地
 
-- **metrics 導入** ( task duration histogram / cache hit rate counter / resolver duration histogram)
+- **metrics 導入** ( task duration histogram / fingerprint hit rate counter / resolver duration histogram)
 - **`slog` への logger 移行 + OTel log bridge** ( runner.Logger interface のリファクタを伴う)
 - **TRACEPARENT 受信** ( CI から親 span を継承)
 - **child process への TRACEPARENT 伝搬** ( codegen tool 側が OTel 対応していれば trace tree が垂直に繋がる)

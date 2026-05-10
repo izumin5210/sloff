@@ -102,7 +102,7 @@ func childrenOf(spans []sdktrace.ReadOnlySpan, parent sdktrace.ReadOnlySpan) []s
 }
 
 // attrString returns the string-valued attribute with the given key on s, or
-// "" if absent. Tests use this for sloff.cache.state and similar string attrs.
+// "" if absent. Tests use this for sloff.fingerprint.state and similar string attrs.
 func attrString(s sdktrace.ReadOnlySpan, key string) string {
 	for _, kv := range s.Attributes() {
 		if string(kv.Key) == key {
@@ -113,7 +113,7 @@ func attrString(s sdktrace.ReadOnlySpan, key string) string {
 }
 
 // attrBool returns the bool-valued attribute with the given key on s, or false
-// (with a `found` flag) if absent. Used to assert sloff.cache.hit.
+// (with a `found` flag) if absent. Used to assert sloff.fingerprint.hit.
 func attrBool(s sdktrace.ReadOnlySpan, key string) (bool, bool) {
 	for _, kv := range s.Attributes() {
 		if string(kv.Key) == key {
@@ -172,7 +172,7 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 		t.Errorf("expected child %q under runner.resolve.inputs, got %d children", wantChild, len(resolverChildren))
 	}
 
-	// runner.task.run must exist with cache.hit=false on first run, and have all
+	// runner.task.run must exist with fingerprint.hit=false on first run, and have all
 	// three I/O sub-spans (load / exec / save).
 	taskSpans := findSpansByName(spans, "runner.task.run")
 	if len(taskSpans) != 1 {
@@ -180,8 +180,8 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 	}
 	taskSpan := taskSpans[0]
 
-	if hit, ok := attrBool(taskSpan, "sloff.cache.hit"); !ok || hit {
-		t.Errorf("sloff.cache.hit on first run = (%v, found=%v), want (false, true)", hit, ok)
+	if hit, ok := attrBool(taskSpan, "sloff.fingerprint.hit"); !ok || hit {
+		t.Errorf("sloff.fingerprint.hit on first run = (%v, found=%v), want (false, true)", hit, ok)
 	}
 
 	taskChildren := childrenOf(spans, taskSpan)
@@ -189,17 +189,17 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 	for _, c := range taskChildren {
 		gotChildNames[c.Name()]++
 	}
-	for _, want := range []string{"runner.cache.load", "runner.task.exec", "runner.cache.save"} {
+	for _, want := range []string{"runner.fingerprint.load", "runner.task.exec", "runner.fingerprint.save"} {
 		if gotChildNames[want] != 1 {
 			t.Errorf("child %q under runner.task.run: got %d, want 1\nchildren: %v", want, gotChildNames[want], gotChildNames)
 		}
 	}
 
-	// cache.load on a cold run should report the not_found state.
-	loadSpan := findSpan(taskChildren, "runner.cache.load")
+	// fingerprint.load on a cold run should report the not_found state.
+	loadSpan := findSpan(taskChildren, "runner.fingerprint.load")
 	if loadSpan != nil {
-		if state := attrString(loadSpan, "sloff.cache.state"); state != "not_found" {
-			t.Errorf("runner.cache.load sloff.cache.state = %q, want \"not_found\"", state)
+		if state := attrString(loadSpan, "sloff.fingerprint.state"); state != "not_found" {
+			t.Errorf("runner.fingerprint.load sloff.fingerprint.state = %q, want \"not_found\"", state)
 		}
 	}
 }
@@ -220,8 +220,8 @@ func TestTrace_SecondRunCacheHit(t *testing.T) {
 	}
 	taskSpan := taskSpans[0]
 
-	if hit, ok := attrBool(taskSpan, "sloff.cache.hit"); !ok || !hit {
-		t.Errorf("sloff.cache.hit on second run = (%v, found=%v), want (true, true)", hit, ok)
+	if hit, ok := attrBool(taskSpan, "sloff.fingerprint.hit"); !ok || !hit {
+		t.Errorf("sloff.fingerprint.hit on second run = (%v, found=%v), want (true, true)", hit, ok)
 	}
 
 	taskChildren := childrenOf(spans, taskSpan)
@@ -229,17 +229,17 @@ func TestTrace_SecondRunCacheHit(t *testing.T) {
 		switch c.Name() {
 		case "runner.task.exec":
 			t.Errorf("runner.task.exec should not run on cache hit; got span")
-		case "runner.cache.save":
-			t.Errorf("runner.cache.save should not run on cache hit; got span")
+		case "runner.fingerprint.save":
+			t.Errorf("runner.fingerprint.save should not run on cache hit; got span")
 		}
 	}
 
-	loadSpan := findSpan(taskChildren, "runner.cache.load")
+	loadSpan := findSpan(taskChildren, "runner.fingerprint.load")
 	if loadSpan == nil {
-		t.Fatal("runner.cache.load missing on second run")
+		t.Fatal("runner.fingerprint.load missing on second run")
 	}
-	if state := attrString(loadSpan, "sloff.cache.state"); state != "hit" {
-		t.Errorf("runner.cache.load sloff.cache.state = %q, want \"hit\"", state)
+	if state := attrString(loadSpan, "sloff.fingerprint.state"); state != "hit" {
+		t.Errorf("runner.fingerprint.load sloff.fingerprint.state = %q, want \"hit\"", state)
 	}
 }
 

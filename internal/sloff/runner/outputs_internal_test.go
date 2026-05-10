@@ -3,7 +3,7 @@ package runner
 import (
 	"testing"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 )
 
 // TestOutputsEquivalent exercises every branch of the write-skip helper:
@@ -11,14 +11,14 @@ import (
 // The helper drives whether runTask rewrites a record on disk, so each
 // branch needs an explicit fixture.
 func TestOutputsEquivalent(t *testing.T) {
-	mk := func(hash string, files ...*cachev1.FileEntry) *cachev1.Output {
-		return &cachev1.Output{Hash: hash, Files: files}
+	mk := func(hash string, files ...*fingerprintv1.FileEntry) *fingerprintv1.Output {
+		return &fingerprintv1.Output{Hash: hash, Files: files}
 	}
-	fe := func(p, h string) *cachev1.FileEntry { return &cachev1.FileEntry{Path: p, Hash: h} }
+	fe := func(p, h string) *fingerprintv1.FileEntry { return &fingerprintv1.FileEntry{Path: p, Hash: h} }
 
 	cases := []struct {
 		name string
-		a, b *cachev1.Output
+		a, b *fingerprintv1.Output
 		want bool
 	}{
 		{

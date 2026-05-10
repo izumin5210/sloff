@@ -1,25 +1,25 @@
-// Schema for the on-disk cache record produced by sloff per (spec, task, input_hash) tuple.
+// Schema for the on-disk fingerprint produced by sloff per (spec, task, input_hash) tuple.
 //
 // SSoT for ADR-0009. Wire-incompatible changes require bumping the package
-// version (sloff.cache.v2). See
-// ../../../../docs/adr/0009-cache-record-binary-serialization.md.
+// version (sloff.fingerprint.v2). See
+// ../../../../docs/adr/0009-fingerprint-binary-serialization.md.
 //
 // Design rules enforced here:
 //   - No `map<,>` fields. Order-sensitive collections are `repeated <Entry>`
 //     and the marshaller sorts deterministically before writing.
 //   - schema_version is a closed enum so unknown / invalid versions cannot be
 //     represented at the wire level.
-//   - Sub-messages are top-level; the `sloff.cache.v1` package qualifier
+//   - Sub-messages are top-level; the `sloff.fingerprint.v1` package qualifier
 //     keeps names like Spec / Input / Output appropriately scoped.
 
 syntax = "proto3";
 
-package sloff.cache.v1;
+package sloff.fingerprint.v1;
 
-option go_package = "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1;cachev1";
+option go_package = "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1;fingerprintv1";
 
-// Record is one cache entry on disk. Lives at
-// .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb.
+// Record is one fingerprint on disk. Lives at
+// .sloff/fingerprints/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb.
 // The filename's timestamp prefix encodes the record's initial creation time
 // (ADR-0010); no wall-clock field is carried in the wire format so that the
 // bytes are a deterministic function of the input.
@@ -55,7 +55,7 @@ message Spec {
   string cmd = 3;
 }
 
-// Input captures everything that contributes to the cache key for one task.
+// Input captures everything that contributes to the fingerprint key for one task.
 // hash = sha256_concat(files_hash, cmd_hash, resolved_versions_hash).
 message Input {
   string hash = 1;

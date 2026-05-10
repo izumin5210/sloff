@@ -2,11 +2,11 @@
 
 ## Context
 
-[ADR-0002](./0002-cache-hit-decision-model.md) で決まった「output-comparison」の cache 判定が正しく機能するためには、 cache key を構成する各 component が **意味のある値** で埋められている必要がある。 また、 同一 output path を複数 task が produce する spec は cache 依存配線が壊れるため、 早期に検出して fail させたい。
+[ADR-0002](./0002-fingerprint-hit-decision-model.md) で決まった「output-comparison」の fingerprint 判定が正しく機能するためには、 fingerprint key を構成する各 component が **意味のある値** で埋められている必要がある。 また、 同一 output path を複数 task が produce する spec は fingerprint 依存配線が壊れるため、 早期に検出して fail させたい。
 
 Codex のアドバサリアルレビューで以下 3 点の方針判断を求められた:
 
-1. **`tools:` 未宣言 spec の扱い** — resolved_versions_hash が空のまま cache key に混ざると、 generator binary upgrade (例: `buf` 1.x → 2.x) で cache invalidate されない
+1. **`tools:` 未宣言 spec の扱い** — resolved_versions_hash が空のまま fingerprint key に混ざると、 generator binary upgrade (例: `buf` 1.x → 2.x) で fingerprint invalidate されない
 2. **output pattern が 0 ファイルにマッチした場合の扱い** — generator が exit 0 で何も書かなかったケースをどう拾うか
 3. **同一 output path を複数 task が produce する spec の検出方法** — 静的 (実行前) か事後 (実行時) か
 
@@ -14,14 +14,14 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 
 ### References
 
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
-- [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](./0001-fingerprint-aware-codegen-orchestrator-decision.md)
+- [ADR-0002: fingerprint hit 判定モデル](./0002-fingerprint-hit-decision-model.md)
 
 ## Decision
 
 ### D1. `tools:` を spec の必須フィールドにする
 
-`spec.validate` で `tools:` が空 / 未宣言の command を **拒否** する。 spec parse 段階で fail させ、 runner / registry のフォールバック経路 (= 警告のみで cache 続行) は撤去する。
+`spec.validate` で `tools:` が空 / 未宣言の command を **拒否** する。 spec parse 段階で fail させ、 runner / registry のフォールバック経路 (= 警告のみで fingerprint 続行) は撤去する。
 
 ### D2. output pattern 検証は union semantics
 
@@ -36,8 +36,8 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 ### D1: `tools:` 必須化
 
 - sloff はコード生成 orchestrator であり、 何らかの generator binary を呼び出すことが前提。 spec に対応する tool が **存在しない** ケースは構造的に想定しづらい
-- resolved_versions_hash が空のまま cache key に混ざると、 binary 更新が cache invalidate に効かず、 stale な generation 結果が serve され続ける。 これは ADR-0002 で確定した output-comparison の前提を破る
-- 「警告だけ出して cache を保存する」フォールバック経路は、 安全機構として機能しない (record はそのまま残り、 次回 cache hit する) ため撤去
+- resolved_versions_hash が空のまま fingerprint key に混ざると、 binary 更新が fingerprint invalidate に効かず、 stale な generation 結果が serve され続ける。 これは ADR-0002 で確定した output-comparison の前提を破る
+- 「警告だけ出して fingerprint を保存する」フォールバック経路は、 安全機構として機能しない (record はそのまま残り、 次回 fingerprint hit する) ため撤去
 - pre-1.0 でユーザー spec の互換性ブレイクは許容範囲
 
 ### D2: union semantics
@@ -60,8 +60,8 @@ Codex のアドバサリアルレビューで以下 3 点の方針判断を求�
 
 ### 正の影響
 
-- cache 正しさの最低保証が明確化される: tool version が必ず key に含まれ、 出力衝突は必ずエラーになる
-- 「警告だけで先に進む」グレーな経路がなくなり、 cache を信頼できる
+- fingerprint の正しさの最低保証が明確化される: tool version が必ず key に含まれ、 出力衝突は必ずエラーになる
+- 「警告だけで先に進む」グレーな経路がなくなり、 fingerprint を信頼できる
 - 実装が小さく保たれる (静的 overlap 解析を持ち込まない)
 
 ### 負の影響 / 注意点

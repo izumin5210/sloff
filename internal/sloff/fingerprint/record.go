@@ -1,10 +1,10 @@
-// Package cache defines the storage interface and serialization helpers for
-// sloff's on-disk cache records. The record schema itself is the protobuf
-// message in proto/sloff/cache/v1/cache.proto; generated code lives at
-// internal/proto/sloff/cache/v1 (Go package cachev1). Callers operate on
-// *cachev1.Record values directly; this package only provides the marshal /
+// Package fingerprint defines the storage interface and serialization helpers for
+// sloff's on-disk fingerprints. The record schema itself is the protobuf
+// message in proto/sloff/fingerprint/v1/fingerprint.proto; generated code lives at
+// internal/proto/sloff/fingerprint/v1 (Go package fingerprintv1). Callers operate on
+// *fingerprintv1.Record values directly; this package only provides the marshal /
 // sort / lookup helpers and the storage backend interface.
-package cache
+package fingerprint
 
 import (
 	"bytes"
@@ -15,17 +15,17 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 )
 
 // SchemaVersion is the canonical schema version embedded in newly written
 // records. ADR-0009 bumped V1 (YAML) → V2 (protobuf). ADR-0010 bumped V2 → V3
 // when Record.generated_at was dropped in favour of the filename's timestamp
 // prefix; legacy V2 records become invalid and are rejected on read so callers
-// regenerate them through the normal cache-miss path.
-const SchemaVersion = cachev1.SchemaVersion_SCHEMA_VERSION_V3
+// regenerate them through the normal fingerprint-miss path.
+const SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V3
 
-// FileExt is the on-disk extension of a cache record file. Storage backends
+// FileExt is the on-disk extension of a fingerprint file. Storage backends
 // use this to assemble paths and to filter directory listings.
 const FileExt = ".pb"
 
@@ -35,9 +35,9 @@ const FileExt = ".pb"
 // so the option lives in a single location (ADR-0009 §"byte stability の担保").
 // Marshal also normalises the order of repeated fields that the schema
 // requires sorted, so callers can append entries in any order.
-func Marshal(rec *cachev1.Record) ([]byte, error) {
+func Marshal(rec *fingerprintv1.Record) ([]byte, error) {
 	if rec == nil {
-		return nil, fmt.Errorf("cache: nil record")
+		return nil, fmt.Errorf("fingerprint: nil record")
 	}
 	if err := validateSchemaVersion(rec.GetSchemaVersion()); err != nil {
 		return nil, err
@@ -46,13 +46,13 @@ func Marshal(rec *cachev1.Record) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(rec)
 }
 
-// Unmarshal parses a proto-encoded cache record. ADR-0009 treats records with
+// Unmarshal parses a proto-encoded fingerprint. ADR-0009 treats records with
 // an unknown or unspecified schema_version as runtime errors rather than
 // best-effort decodes, so the validation runs symmetrically on the read path
 // — including against zero-byte files, which proto.Unmarshal otherwise turns
 // into a default-valued Record.
-func Unmarshal(b []byte) (*cachev1.Record, error) {
-	rec := &cachev1.Record{}
+func Unmarshal(b []byte) (*fingerprintv1.Record, error) {
+	rec := &fingerprintv1.Record{}
 	if err := proto.Unmarshal(b, rec); err != nil {
 		return nil, err
 	}
@@ -62,12 +62,12 @@ func Unmarshal(b []byte) (*cachev1.Record, error) {
 	return rec, nil
 }
 
-func validateSchemaVersion(v cachev1.SchemaVersion) error {
-	if v == cachev1.SchemaVersion_SCHEMA_VERSION_UNSPECIFIED {
-		return fmt.Errorf("cache: schema version is unspecified (likely a corrupt or empty record file)")
+func validateSchemaVersion(v fingerprintv1.SchemaVersion) error {
+	if v == fingerprintv1.SchemaVersion_SCHEMA_VERSION_UNSPECIFIED {
+		return fmt.Errorf("fingerprint: schema version is unspecified (likely a corrupt or empty record file)")
 	}
-	if _, ok := cachev1.SchemaVersion_name[int32(v)]; !ok {
-		return fmt.Errorf("cache: unknown schema version %d", v)
+	if _, ok := fingerprintv1.SchemaVersion_name[int32(v)]; !ok {
+		return fmt.Errorf("fingerprint: unknown schema version %d", v)
 	}
 	return nil
 }
@@ -85,7 +85,7 @@ func validateSchemaVersion(v cachev1.SchemaVersion) error {
 // both produce Name == "go". With a name-only sort the relative order of
 // such entries would depend on insertion order, breaking byte stability
 // for the same logical input set.
-func Sort(rec *cachev1.Record) {
+func Sort(rec *fingerprintv1.Record) {
 	if out := rec.GetOutput(); out != nil {
 		sort.SliceStable(out.Files, func(i, j int) bool {
 			return out.Files[i].GetPath() < out.Files[j].GetPath()
@@ -107,7 +107,7 @@ func Sort(rec *cachev1.Record) {
 
 // FilePaths returns just the path strings of files in their current order.
 // Use after Sort if a sorted slice is required.
-func FilePaths(files []*cachev1.FileEntry) []string {
+func FilePaths(files []*fingerprintv1.FileEntry) []string {
 	out := make([]string, len(files))
 	for i, f := range files {
 		out[i] = f.GetPath()
@@ -116,7 +116,7 @@ func FilePaths(files []*cachev1.FileEntry) []string {
 }
 
 // MarshalJSON returns the canonical protojson representation of rec.
-// Shared by `sloff cache show` and the runner E2E harness so the human-readable
+// Shared by `sloff fingerprint show` and the runner E2E harness so the human-readable
 // view of a record is produced from a single set of options.
 //
 // The output is canonical: repeated fields are sorted via Sort before
@@ -129,8 +129,8 @@ func FilePaths(files []*cachev1.FileEntry) []string {
 // json.Compact + json.Indent so the output is reproducible across calls
 // while still preserving the proto declaration order of keys (encoding/json
 // keeps the original token order when transforming a raw JSON byte slice).
-func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
-	canonical := proto.Clone(rec).(*cachev1.Record)
+func MarshalJSON(rec *fingerprintv1.Record) ([]byte, error) {
+	canonical := proto.Clone(rec).(*fingerprintv1.Record)
 	Sort(canonical)
 	raw, err := protojson.MarshalOptions{
 		UseProtoNames:   true,
@@ -141,11 +141,11 @@ func MarshalJSON(rec *cachev1.Record) ([]byte, error) {
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
-		return nil, fmt.Errorf("cache: compact protojson output: %w", err)
+		return nil, fmt.Errorf("fingerprint: compact protojson output: %w", err)
 	}
 	var indented bytes.Buffer
 	if err := json.Indent(&indented, compact.Bytes(), "", "  "); err != nil {
-		return nil, fmt.Errorf("cache: re-indent protojson output: %w", err)
+		return nil, fmt.Errorf("fingerprint: re-indent protojson output: %w", err)
 	}
 	return indented.Bytes(), nil
 }

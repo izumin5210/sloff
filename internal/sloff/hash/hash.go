@@ -1,4 +1,4 @@
-// Package hash computes the deterministic hash inputs that drive sloff's cache lookup.
+// Package hash computes the deterministic hash inputs that drive sloff's fingerprint lookup.
 //
 // All exported functions are pure: same arguments yield the same hex SHA-256 digest.
 // Files reads file contents from disk; the rest operate purely on their arguments.

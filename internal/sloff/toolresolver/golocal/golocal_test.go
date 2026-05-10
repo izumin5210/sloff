@@ -244,7 +244,7 @@ func TestResolver_ExternalModulesBecomeGoDepsVersions(t *testing.T) {
 // TestResolver_GoSumDriftFlipsDepsVersion guards the cryptographic-anchor
 // invariant: same path@version with a different go.sum line must produce a
 // different ResolvedVersion string (otherwise replaced/republished modules would
-// silently reuse the cache).
+// silently reuse the fingerprint).
 func TestResolver_GoSumDriftFlipsDepsVersion(t *testing.T) {
 	listing := func(sum string) lister.Listing {
 		return lister.Listing{

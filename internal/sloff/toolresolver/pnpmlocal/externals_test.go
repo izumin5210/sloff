@@ -90,7 +90,7 @@ snapshots:
 // TestCollectExternals_HandlesPeerDepSuffix guards the peer-context form
 // (`pkg@1.0.0(peer@2.0.0)`) that pnpm uses when peers vary across consumers.
 // The full version string with the peer suffix must round-trip so peer
-// changes invalidate the cache too.
+// changes invalidate the fingerprint too.
 func TestCollectExternals_HandlesPeerDepSuffix(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'

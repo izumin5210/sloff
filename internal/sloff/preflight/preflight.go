@@ -1,5 +1,5 @@
 // Package preflight verifies that build artefacts and source state are mutually
-// consistent before the runner trusts the cache. Each distribution channel that
+// consistent before the runner trusts the fingerprint. Each distribution channel that
 // can drift between SSoT and runtime ( e.g. pnpm-local's dist/ vs src/ for build-
 // required tools) registers a Checker; the Registry runs the subset that applies
 // to a given run. External-package channels are intentionally outside this scope:

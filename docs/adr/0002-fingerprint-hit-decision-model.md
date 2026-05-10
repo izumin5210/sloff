@@ -1,24 +1,24 @@
-# ADR-0002: キャッシュヒット判定モデル
+# ADR-0002: fingerprint hit 判定モデル
 
 ## Context
 
 ### 背景
 
-[ADR-0001](./0001-cache-aware-codegen-orchestrator-decision.md) で、 共有可能なキャッシュ機構を持つコード生成オーケストレーターを **自作する** ことが決定された。 自作する以上、 cache hit 判定の論理そのものを自前で設計する必要がある。
+[ADR-0001](./0001-fingerprint-aware-codegen-orchestrator-decision.md) で、 共有可能な fingerprint 機構を持つコード生成オーケストレーターを **自作する** ことが決定された。 自作する以上、 fingerprint hit 判定の論理そのものを自前で設計する必要がある。
 
-ローカル単独運用の cache であれば「input が同じなら output も同じ」という deterministic generator の前提を素直に信用すれば足りるが、 **共有モデルでは別の開発者 / 別 OS で生成された record を信頼することになり**、 判定式の選定がそのままキャッシュの健全性とリスクに直結する。 本 ADR では cache hit の判定モデルそのものを 5 案で比較し、 採用案を確定する。
+ローカル単独運用の fingerprint store であれば「input が同じなら output も同じ」という deterministic generator の前提を素直に信用すれば足りるが、 **共有モデルでは別の開発者 / 別 OS で生成された record を信頼することになり**、 判定式の選定がそのまま fingerprint の健全性とリスクに直結する。 本 ADR では fingerprint hit の判定モデルそのものを 5 案で比較し、 採用案を確定する。
 
 ### 前提
 
-- generator output は git 管理されている前提を採る ( typical な monorepo の運用)。 これは cache 設計の制約というよりは、 「正しい状態」のリファレンスが git に常に存在する事実として効いてくる
-- cache record の中に artifact 本体を持つかどうかは別の設計判断 ( record の置き場 / artifact 共有要否は [ADR-0003](./0003-record-storage-strategy.md) で扱う)
+- generator output は git 管理されている前提を採る ( typical な monorepo の運用)。 これは fingerprint 設計の制約というよりは、 「正しい状態」のリファレンスが git に常に存在する事実として効いてくる
+- fingerprint の中に artifact 本体を持つかどうかは別の設計判断 ( record の置き場 / artifact 共有要否は [ADR-0003](./0003-fingerprint-storage-strategy.md) で扱う)
 - ツールバージョンの整合は preflight (lockfile と install 状態の照合) などで別途担保する想定 (詳細は Design Doc 側で扱う)
-- 共有 cache record は何らかの形で複数開発者 / CI 間で同じ内容を読み書きできる場所に置かれる
+- 共有 fingerprint は何らかの形で複数開発者 / CI 間で同じ内容を読み書きできる場所に置かれる
 
 ### References
 
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
-- [ADR-0003: キャッシュレコードのストレージ方式](./0003-record-storage-strategy.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](./0001-fingerprint-aware-codegen-orchestrator-decision.md)
+- [ADR-0003: fingerprint のストレージ方式](./0003-fingerprint-storage-strategy.md)
 - [Design Doc: sloff Architecture](../design/architecture.md)
 
 ## Considered Options
@@ -36,7 +36,7 @@
 
 ### Option 1: input-only
 
-input_hash 一致のみで cache hit と判定する。 record の output 情報は参照しない (そもそも保持しなくてもよい)。
+input_hash 一致のみで fingerprint hit と判定する。 record の output 情報は参照しない (そもそも保持しなくてもよい)。
 
 👍 **Pros**
 
@@ -51,7 +51,7 @@ input_hash 一致のみで cache hit と判定する。 record の output 情報
   - PR レビュー中に手で output を一時的に修正した
   - `go fix` / `goimports` / lefthook 等が走って output が書き換わった
   - 別ブランチの中途状態を残したまま checkout した
-  - cache record だけ pull してまだ output 側を pull しきれていない
+  - fingerprint だけ pull してまだ output 側を pull しきれていない
 - 上記 drift があると正しくない状態のまま skip され、 後段のビルド / テストでようやく顕在化する
 
 ### Option 2: output-comparison (採用)
@@ -88,7 +88,7 @@ input_hash で record を引き、 record に含まれる output 本体で現状
 - record が output 本体を含むためサイズが大きくなる ( Option 2 が KB レンジに対し、 こちらは MB 〜 GB レンジになりうる)
 - 上書き復元は手元の作業ツリーを **無条件で書き換える** ため、 開発者が一時的に手で修正した output / debugging 中の出力 / 未コミットの変更を破壊する可能性がある (drift = 必ずしも "間違った状態" とは限らず、 開発者が意図的に置いている状態のこともある)
 - generator が deterministic である限り、 再生成 ( Option 2) と上書き復元 ( Option 3) の最終結果は同じ。 違いは「実行時間 / CPU 専有時間」と「現状ツリーを無条件上書きするかどうか」
-- 復元するための artifact 配信が別途必要 (リポジトリ内なら容量肥大、 外部ストレージなら依存追加。 [ADR-0003](./0003-record-storage-strategy.md) で Hybrid として将来拡張案として議論)
+- 復元するための artifact 配信が別途必要 (リポジトリ内なら容量肥大、 外部ストレージなら依存追加。 [ADR-0003](./0003-fingerprint-storage-strategy.md) で Hybrid として将来拡張案として議論)
 
 ### Option 4: hybrid (input-only + 整合性 CI)
 
@@ -107,7 +107,7 @@ input_hash で record を引き、 record に含まれる output 本体で現状
 
 ### Option 5: input-only + output stat
 
-input_hash 一致 + output ファイルの `mtime` / `size` 不変で cache hit と判定する。
+input_hash 一致 + output ファイルの `mtime` / `size` 不変で fingerprint hit と判定する。
 
 👍 **Pros**
 
@@ -116,7 +116,7 @@ input_hash 一致 + output ファイルの `mtime` / `size` 不変で cache hit 
 
 👎 **Cons**
 
-- `git checkout` がブランチ切替時にファイル `mtime` を更新するため false miss が頻発する (再生成が走り続け cache の意味が薄れる)
+- `git checkout` がブランチ切替時にファイル `mtime` を更新するため false miss が頻発する (再生成が走り続け fingerprint の意味が薄れる)
 - 同サイズで内容だけ変わった改変は false hit のまま素通り
 - `mtime` を判定材料にする方式は git ベースの開発フローと根本的に相性が悪い
 
@@ -127,7 +127,7 @@ input_hash 一致 + output ファイルの `mtime` / `size` 不変で cache hit 
 採用根拠は以下の連鎖で論証される:
 
 1. Option 1 (input-only) の性能優位は事実だが、 共有モデルでは別環境で作られた record の信頼性を補完する仕組みが必要になる。 ツールバージョンの整合は preflight で担保できるとして、 手元の output が drift していないことは別途検証する必要があり、 その検証は record の output_hash と現状の output_hash を比べる以外に軽量な方法がない
-2. Option 3 (artifact restore) は drift 時の挙動が Option 2 と分かれる ( 再生成 vs 上書き復元) が、 deterministic な generator では最終結果は同じ。 実行時間が長い generator が含まれる monorepo では復元による時間短縮 / CPU 専有時間削減のメリット自体は実在する。 ただし、 (a) 上書き復元が手元の未コミット変更や debugging 中の状態を無条件で破壊するリスク、 (b) record が output 本体を含むためサイズが KB → MB〜GB に膨らむこと、 (c) artifact 配信のための追加ストレージ依存、 という 3 点のコストが上回る。 時間短縮 / CPU 削減を本気で取りに行く場合は、 Option 2 を採用したうえで [ADR-0003](./0003-record-storage-strategy.md) の Hybrid (Option E) で artifact 共有を別レイヤとして追加する形が筋が良く、 本 ADR ではまず Option 2 を採用して将来拡張パスを残す
+2. Option 3 (artifact restore) は drift 時の挙動が Option 2 と分かれる ( 再生成 vs 上書き復元) が、 deterministic な generator では最終結果は同じ。 実行時間が長い generator が含まれる monorepo では復元による時間短縮 / CPU 専有時間削減のメリット自体は実在する。 ただし、 (a) 上書き復元が手元の未コミット変更や debugging 中の状態を無条件で破壊するリスク、 (b) record が output 本体を含むためサイズが KB → MB〜GB に膨らむこと、 (c) artifact 配信のための追加ストレージ依存、 という 3 点のコストが上回る。 時間短縮 / CPU 削減を本気で取りに行く場合は、 Option 2 を採用したうえで [ADR-0003](./0003-fingerprint-storage-strategy.md) の Hybrid (Option E) で artifact 共有を別レイヤとして追加する形が筋が良く、 本 ADR ではまず Option 2 を採用して将来拡張パスを残す
 3. Option 4 (hybrid) は遅延検出が fail-fast invalidate と整合せず、 Option 5 (stat) は git ワークフローと相性が悪い。 除外
 4. 残った Option 2 のコスト (per-task 数十〜数百 ms の hash 計算) は、 generator 実行時間に対して誤差レベルで、 性能上の決定的な不利にはならない
 
@@ -153,5 +153,5 @@ input_hash 一致 + output ファイルの `mtime` / `size` 不変で cache hit 
 
 ### 後続の詳細設計
 
-- record のストレージ方式 (どこに置くか) → [ADR-0003](./0003-record-storage-strategy.md)
+- record のストレージ方式 (どこに置くか) → [ADR-0003](./0003-fingerprint-storage-strategy.md)
 - record の具体 schema、 OS 横断 invalidate 戦略、 preflight、 マイグレーション計画 → [Design Doc](../design/architecture.md)

@@ -96,7 +96,7 @@ func TestGoPackages_ResolvesAgainstNestedModule(t *testing.T) {
 // tagged sources (foo_linux.go, foo_darwin.go, files behind custom -tags)
 // also contribute to the hash. Without this, the same generator would hash
 // to different values depending on the host GOOS/GOARCH and break the
-// resolver's OS-neutral cache contract.
+// resolver's OS-neutral fingerprint contract.
 func TestGoPackages_IncludesIgnoredFilesForBuildTagSources(t *testing.T) {
 	requireGo(t)
 	root := t.TempDir()

@@ -1,6 +1,6 @@
 // Package runner orchestrates spec discovery, preflight, dependency-graph derivation
-// and per-task cache lookup/execute/write. It is the integration point for the
-// foundation packages (spec / glob / hash / cache / depgraph / toolresolver / preflight).
+// and per-task fingerprint lookup/execute/write. It is the integration point for the
+// foundation packages (spec / glob / hash / fingerprint / depgraph / toolresolver / preflight).
 package runner
 
 import (
@@ -19,9 +19,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
-	"github.com/izumin5210/sloff/internal/sloff/cache"
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 	"github.com/izumin5210/sloff/internal/sloff/glob"
 	"github.com/izumin5210/sloff/internal/sloff/hash"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
@@ -46,7 +46,7 @@ func (s stdLogger) Errorf(format string, args ...any) { s.l.Printf("ERROR "+form
 type Options struct {
 	RepoRoot  string
 	Specs     []spec.Spec
-	Storage   cache.Storage
+	Storage   fingerprint.Storage
 	Resolvers *toolresolver.Registry
 	Preflight *preflight.Registry
 
@@ -60,7 +60,7 @@ type Options struct {
 	Logger Logger
 }
 
-// Runner executes all discovered specs in topological order with cache lookup and
+// Runner executes all discovered specs in topological order with fingerprint lookup and
 // output-comparison invalidation.
 type Runner struct {
 	opts   Options
@@ -149,7 +149,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // concurrency. A task starts as soon as every task that produces one of its
 // inputs has finished — depgraph already sorted them, so we only need to
 // re-derive each task's predecessor set from the same output→producer mapping
-// it used. Independent tasks (the common case for cache-hit runs across
+// it used. Independent tasks (the common case for fingerprint-hit runs across
 // service-local gen-db, where each spec's outputs sit in its own service dir)
 // fan out across NumCPU workers; tasks with real producer→consumer chains
 // (buf-default → buf-custom, build-protoc-plugins → buf-custom, …) still
@@ -235,7 +235,7 @@ func taskPredecessorIndices(ordered []depgraph.Task) [][]int {
 
 // taskConcurrency caps how many tasks runTasks executes in parallel.
 // Cache-hit tasks are I/O-bound (re-reading every input + every output to
-// re-hash); cache-miss tasks spawn a child generator. NumCPU is the same
+// re-hash); fingerprint-miss tasks spawn a child generator. NumCPU is the same
 // budget the resolver fan-out uses, mostly because most tasks block on file
 // reads and a few on subprocess wait. Values much higher than NumCPU on
 // SSD-backed APFS show diminishing returns and risk blowing past the
@@ -306,7 +306,7 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 //
 // Drift-style failures arrive as preflight.Issue entries; the runner
 // reports them and either aborts (the default) or, when ReadOnly is set
-// via SLOFF_ALLOW_STALE_DEPS, degrades to read-only so cache records
+// via SLOFF_ALLOW_STALE_DEPS, degrades to read-only so fingerprints
 // are not written for a known-suspect run. Hard errors from a checker
 // (the check itself couldn't execute) bypass the read-only fall-through
 // and fail the run regardless.
@@ -327,7 +327,7 @@ func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, 
 		if !r.opts.ReadOnly {
 			return fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
 		}
-		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; cache records will not be written")
+		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; fingerprints will not be written")
 	}
 	return nil
 }
@@ -655,7 +655,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 	resolvedVersionsHash := hash.ResolvedVersions(versionStrings(versions))
 	inputHash := hash.Input(filesHash, cmdHash, resolvedVersionsHash)
 
-	key := cache.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
+	key := fingerprint.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
 
 	taskLabel := taskLabel(t)
 	existing, hadExisting, err := r.opts.Storage.Load(ctx, key)
@@ -663,13 +663,13 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	}
 	if hadExisting {
-		paths := cache.FilePaths(existing.GetOutput().GetFiles())
+		paths := fingerprint.FilePaths(existing.GetOutput().GetFiles())
 		current, hashErr := hash.Files(r.opts.RepoRoot, paths)
 		if hashErr == nil && current == existing.GetOutput().GetHash() {
 			if err := r.recordProducedPaths(taskLabel, paths); err != nil {
 				return err
 			}
-			r.logger.Infof("SKIP %s/%s (cache hit)", t.SpecRelpath, t.Name)
+			r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
 			return nil
 		}
 	}
@@ -700,21 +700,21 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 		return nil
 	}
 
-	newRec := &cachev1.Record{
-		SchemaVersion: cache.SchemaVersion,
-		Spec: &cachev1.Spec{
+	newRec := &fingerprintv1.Record{
+		SchemaVersion: fingerprint.SchemaVersion,
+		Spec: &fingerprintv1.Spec{
 			Cmd:    strings.Join(info.command.Cmd, " "),
 			Dir:    info.specRelpath,
 			TaskId: info.command.Name,
 		},
-		Input: &cachev1.Input{
+		Input: &fingerprintv1.Input{
 			Hash:                 inputHash,
 			FilesHash:            filesHash,
 			CmdHash:              cmdHash,
 			ResolvedVersionsHash: resolvedVersionsHash,
 			ResolvedVersions:     resolvedVersionsFromTool(versions),
 		},
-		Output: &cachev1.Output{
+		Output: &fingerprintv1.Output{
 			Hash:  outputHash,
 			Files: files,
 		},
@@ -742,15 +742,15 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) error {
 // produced file set. Hash and per-entry (path, hash) tuples must match; field
 // order is normalised by sorting because callers may build Output before the
 // proto Marshal helper sorts FileEntries.
-func outputsEquivalent(a, b *cachev1.Output) bool {
+func outputsEquivalent(a, b *fingerprintv1.Output) bool {
 	if a.GetHash() != b.GetHash() {
 		return false
 	}
 	if len(a.GetFiles()) != len(b.GetFiles()) {
 		return false
 	}
-	left := append([]*cachev1.FileEntry(nil), a.GetFiles()...)
-	right := append([]*cachev1.FileEntry(nil), b.GetFiles()...)
+	left := append([]*fingerprintv1.FileEntry(nil), a.GetFiles()...)
+	right := append([]*fingerprintv1.FileEntry(nil), b.GetFiles()...)
 	sort.Slice(left, func(i, j int) bool { return left[i].GetPath() < left[j].GetPath() })
 	sort.Slice(right, func(i, j int) bool { return right[i].GetPath() < right[j].GetPath() })
 	for i := range left {
@@ -787,8 +787,8 @@ func taskLabel(t depgraph.Task) string {
 
 // resolveOutputs re-expands every declared output pattern after execution and fails when
 // the union of matches is empty. A successful run that produced no declared outputs would
-// otherwise be persisted as a cache record with an empty file set, letting subsequent
-// cache hits permanently mask the broken generator. Individual patterns are allowed to
+// otherwise be persisted as a fingerprint with an empty file set, letting subsequent
+// fingerprint hits permanently mask the broken generator. Individual patterns are allowed to
 // resolve to zero files (conditional artifacts), so long as some pattern produced output.
 func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
 	outputs, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, info.outputPatterns)
@@ -843,25 +843,25 @@ func versionStrings(versions []toolresolver.ResolvedVersion) []string {
 	return out
 }
 
-func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*cachev1.ResolvedVersion {
+func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*fingerprintv1.ResolvedVersion {
 	if len(versions) == 0 {
 		return nil
 	}
-	out := make([]*cachev1.ResolvedVersion, len(versions))
+	out := make([]*fingerprintv1.ResolvedVersion, len(versions))
 	for i, v := range versions {
-		out[i] = &cachev1.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
+		out[i] = &fingerprintv1.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
 	}
 	return out
 }
 
-func perFileHashes(root string, paths []string) ([]*cachev1.FileEntry, error) {
-	out := make([]*cachev1.FileEntry, 0, len(paths))
+func perFileHashes(root string, paths []string) ([]*fingerprintv1.FileEntry, error) {
+	out := make([]*fingerprintv1.FileEntry, 0, len(paths))
 	for _, p := range paths {
 		h, err := hash.File(root, p)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, &cachev1.FileEntry{Path: p, Hash: h})
+		out = append(out, &fingerprintv1.FileEntry{Path: p, Hash: h})
 	}
 	return out, nil
 }

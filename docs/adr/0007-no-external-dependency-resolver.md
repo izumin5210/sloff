@@ -11,7 +11,7 @@ sloff の OS 横断 invalidate 戦略 ( architecture.md の対応節) では、 
 
 ### References
 
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](./0001-fingerprint-aware-codegen-orchestrator-decision.md)
 - [ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一](./0005-eliminate-resolver-auto-dispatch.md)
 - [ADR-0006: sloff は buf を special-case しない](./0006-no-buf-specific-resolver-or-preflight.md)
 - [Resolver: script](../design/resolver-script.md)
@@ -50,7 +50,7 @@ tools:
 
 **O3. 「lockfile を SSoT」 vs 「runtime --version を SSoT」 のトレードオフ**
 
-外部公開パッケージで lockfile-based ( pnpm-external 想定) を選ぶと preflight ( lockfile vs install 整合) が必須になる。 一方 runtime `--version` を取れば preflight 不要 ( runtime バイナリそのものが SSoT なので構造的にズレない、 architecture.md の preflight 要否表を参照)。 sloff の責務は **cache 健全性** であって **依存管理ツール ( pnpm) の運用 lint** ではない、 という ADR-0006 の責務境界に従えば、 後者を選ぶのが一貫する。
+外部公開パッケージで lockfile-based ( pnpm-external 想定) を選ぶと preflight ( lockfile vs install 整合) が必須になる。 一方 runtime `--version` を取れば preflight 不要 ( runtime バイナリそのものが SSoT なので構造的にズレない、 architecture.md の preflight 要否表を参照)。 sloff の責務は **fingerprint の健全性** であって **依存管理ツール ( pnpm) の運用 lint** ではない、 という ADR-0006 の責務境界に従えば、 後者を選ぶのが一貫する。
 
 なお内製ソース resolver ( `pnpm-local`) は lockfile を SSoT として外部 dep を hash に取り込む立場のため、 「 lockfile updated だが `pnpm install` 忘れ」 の install drift だけは別途検出する必要がある ( 検出しないと silent stale 実行が起きる)。 sloff はこれを最小コストで処理する: pnpm が `pnpm install` 時に書く `node_modules/.pnpm/lock.yaml` は `pnpm-lock.yaml` の byte-for-byte コピーなので、 両者の byte 比較で drift detection できる ( 詳細は resolver-pnpm-local.md の「 Install drift check」 節)。 これは「 install 状態を SSoT にする」 ものではなく「 SSoT である lockfile と pnpm が書いた install snapshot の一致確認」 で、 ADR-0007 の責務境界とは矛盾しない。
 
@@ -104,7 +104,7 @@ tools:
 
 ### Responsibility boundary ( ADR-0006 と同じ論)
 
-sloff の core 責務は「OS 横断 / 共有可能な cache を、 generator inputs / outputs / tools の同一性に基づいて管理する」 こと ( ADR-0001 / ADR-0002)。 lockfile drift の検出は依存管理ツール ( go / pnpm) 自体や利用者 CI の責務で、 sloff が機械的に強制するのは越権。
+sloff の core 責務は「OS 横断 / 共有可能な fingerprint store を、 generator inputs / outputs / tools の同一性に基づいて管理する」 こと ( ADR-0001 / ADR-0002)。 lockfile drift の検出は依存管理ツール ( go / pnpm) 自体や利用者 CI の責務で、 sloff が機械的に強制するのは越権。
 
 ### Less is more ( ADR-0006 と同じ論)
 

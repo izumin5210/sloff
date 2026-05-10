@@ -33,7 +33,7 @@ func Build(tasks []Task) ([]Task, error) {
 
 	// outputProducer: file path → idx of the task that produces it. Two tasks producing
 	// the same path is a spec conflict that would leave execution order undefined and
-	// downstream cache decisions wired to the wrong writer; surface every conflicting task.
+	// downstream fingerprint decisions wired to the wrong writer; surface every conflicting task.
 	outputProducer := make(map[string]idx)
 	conflicts := make(map[string][]idx)
 	for i, t := range tasks {

@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/izumin5210/sloff/internal/sloff/cache"
-	"github.com/izumin5210/sloff/internal/sloff/cache/local"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
 	preflightpnpm "github.com/izumin5210/sloff/internal/sloff/preflight/pnpmlocal"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
@@ -192,10 +192,10 @@ func (h *harness) assertExpected(t *testing.T) {
 // root. Symlinks are not followed; the .git directory is skipped because the harness git-
 // inits the workdir for git ls-files but the goldens shouldn't capture that bookkeeping.
 //
-// For each .pb cache record:
+// For each .pb fingerprint:
 //   - the raw bytes are added at the .pb path (byte stability check)
 //   - if there is no committed .json sibling on disk, a synthesised one decoded
-//     via cache.MarshalJSON is added at the .json path
+//     via fingerprint.MarshalJSON is added at the .json path
 //
 // Committed .json siblings (in expectedDir) are read as-is. The asymmetry —
 // workdir synthesises, expectedDir reads from disk — is what catches drift
@@ -222,12 +222,12 @@ func readTree(root string) (map[string]string, error) {
 			return err
 		}
 		out[slashRel] = string(b)
-		if filepath.Ext(p) == cache.FileExt && !hasJSONSibling(p) {
+		if filepath.Ext(p) == fingerprint.FileExt && !hasJSONSibling(p) {
 			j, err := decodeRecordToJSON(b)
 			if err != nil {
 				return fmt.Errorf("decode %s: %w", p, err)
 			}
-			out[strings.TrimSuffix(slashRel, cache.FileExt)+".json"] = string(j)
+			out[strings.TrimSuffix(slashRel, fingerprint.FileExt)+".json"] = string(j)
 		}
 		return nil
 	})
@@ -239,7 +239,7 @@ func readTree(root string) (map[string]string, error) {
 
 // mirrorTree copies all regular files (not symlinks) from src into dst, creating dst and
 // any necessary subdirectories. The .git directory is skipped (see readTree). Each .pb
-// cache record additionally writes a decoded .json sibling so the goldens carry both
+// fingerprint additionally writes a decoded .json sibling so the goldens carry both
 // the canonical bytes and the human-readable view.
 func mirrorTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
@@ -267,12 +267,12 @@ func mirrorTree(src, dst string) error {
 		if err := os.WriteFile(target, b, 0o644); err != nil {
 			return err
 		}
-		if filepath.Ext(p) == cache.FileExt {
+		if filepath.Ext(p) == fingerprint.FileExt {
 			j, err := decodeRecordToJSON(b)
 			if err != nil {
 				return fmt.Errorf("decode %s: %w", p, err)
 			}
-			jsonTarget := strings.TrimSuffix(target, cache.FileExt) + ".json"
+			jsonTarget := strings.TrimSuffix(target, fingerprint.FileExt) + ".json"
 			if err := os.WriteFile(jsonTarget, j, 0o644); err != nil {
 				return err
 			}
@@ -281,18 +281,18 @@ func mirrorTree(src, dst string) error {
 	})
 }
 
-// decodeRecordToJSON unmarshals the proto wire bytes of a cache record and
-// re-encodes them via cache.MarshalJSON, the same path `sloff cache show` uses.
+// decodeRecordToJSON unmarshals the proto wire bytes of a fingerprint and
+// re-encodes them via fingerprint.MarshalJSON, the same path `sloff fingerprint show` uses.
 func decodeRecordToJSON(pb []byte) ([]byte, error) {
-	rec, err := cache.Unmarshal(pb)
+	rec, err := fingerprint.Unmarshal(pb)
 	if err != nil {
 		return nil, err
 	}
-	return cache.MarshalJSON(rec)
+	return fingerprint.MarshalJSON(rec)
 }
 
 func hasJSONSibling(pbPath string) bool {
-	json := strings.TrimSuffix(pbPath, cache.FileExt) + ".json"
+	json := strings.TrimSuffix(pbPath, fingerprint.FileExt) + ".json"
 	_, err := os.Stat(json)
 	return err == nil
 }
@@ -449,7 +449,7 @@ func TestRunner_PnpmLocal_InputChangeInvalidates(t *testing.T) {
 // outputs and persist a record; the second run must locate the same record,
 // re-hash the cross-dir output, and SKIP without re-executing the cmd. The
 // marker.txt counter (incremented on every cmd execution) detects any
-// regression where the runner stops recognising cross-dir outputs as cacheable.
+// regression where the runner stops recognising cross-dir outputs as fingerprintable.
 func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
 	runE2E(t, "cross-dir-outputs", runStep(), runStep())
 }
@@ -460,7 +460,7 @@ func TestRunner_CrossDirOutputsRoundTrip(t *testing.T) {
 // (services/a/internal/foo.gen.go vs services/b/...). Before the fix the runner keyed
 // detectOutputPatternConflicts by raw pattern string and refused to start with
 // "duplicate output pattern producers". After the fix both tasks run, each generator
-// lands its own file, and the cache stores one record per spec.
+// lands its own file, and the fingerprint stores one record per spec.
 func TestRunner_PerSpecDistinctOutputsDoNotCollide(t *testing.T) {
 	runE2E(t, "per-spec-distinct-outputs", runStep())
 }
@@ -468,7 +468,7 @@ func TestRunner_PerSpecDistinctOutputsDoNotCollide(t *testing.T) {
 // TestRunner_EmptyResolvedOutputsErrors guards against silently caching a successful run
 // whose declared output patterns matched zero files. A generator that exits 0 without
 // writing anything must fail loudly; otherwise the empty output set is persisted and
-// future runs hit the cache forever.
+// future runs hit the fingerprint forever.
 func TestRunner_EmptyResolvedOutputsErrors(t *testing.T) {
 	workdir := t.TempDir()
 	specDir := filepath.Join(workdir, "spec")
@@ -516,9 +516,9 @@ commands:
 		t.Errorf("error should mention the failing output pattern, got: %v", err)
 	}
 
-	cacheDir := filepath.Join(workdir, ".sloff", "cache")
-	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
-		t.Errorf("cache record must not be written for failed run: %v", entries)
+	fingerprintDir := filepath.Join(workdir, ".sloff", "fingerprints")
+	if entries, err := os.ReadDir(fingerprintDir); err == nil && len(entries) > 0 {
+		t.Errorf("fingerprint must not be written for failed run: %v", entries)
 	}
 }
 
@@ -587,7 +587,7 @@ commands:
 // preflight end to end: when a task references a pnpm-local tool but
 // node_modules/.pnpm/lock.yaml is missing (pnpm install was never run
 // against this checkout), the runner aborts before any cmd executes.
-// Without the abort, the resolver would hand the cmd a stale-install cache
+// Without the abort, the resolver would hand the cmd a stale-install fingerprint
 // key and silent stale outputs would propagate.
 func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
 	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
@@ -607,7 +607,7 @@ func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
 
 // TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch covers the
 // SLOFF_ALLOW_STALE_DEPS=1 path: drift surfaces as a preflight Issue but
-// the runner continues in read-only mode (cache records are not written).
+// the runner continues in read-only mode (fingerprints are not written).
 // This is the existing preflight escape hatch; pnpm-local's drift checker
 // inherits it by virtue of going through the preflight subsystem instead of
 // failing inside the resolver.
@@ -618,9 +618,9 @@ func TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch(t *testing.T) 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("expected drift to degrade to read-only under SLOFF_ALLOW_STALE_DEPS, got: %v", err)
 	}
-	cacheDir := filepath.Join(workdir, ".sloff", "cache")
-	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
-		t.Errorf("read-only mode must not write cache records, got: %v", entries)
+	fingerprintDir := filepath.Join(workdir, ".sloff", "fingerprints")
+	if entries, err := os.ReadDir(fingerprintDir); err == nil && len(entries) > 0 {
+		t.Errorf("read-only mode must not write fingerprints, got: %v", entries)
 	}
 }
 
@@ -752,7 +752,7 @@ commands:
 // TestRunner_DuplicateToolNameAcrossSpecsErrors guards the ADR-0008 D2
 // invariant: tool names live in a flat repo-wide namespace, so two
 // sloff.yml files defining the same name must fail the run with both
-// definition sites named — silently picking one would diverge cache results
+// definition sites named — silently picking one would diverge fingerprint results
 // from what the user wrote.
 func TestRunner_DuplicateToolNameAcrossSpecsErrors(t *testing.T) {
 	workdir := t.TempDir()
@@ -918,7 +918,7 @@ commands:
 // holds two `<timestamp>-<hash>.pb` files for the same Key. A subsequent
 // `sloff run` must:
 //   - Load the latest by filename timestamp and use it for output-comparison
-//   - cache hit (no cmd execution; marker.txt does not advance)
+//   - fingerprint hit (no cmd execution; marker.txt does not advance)
 //   - leave both files on disk because Save is not invoked on a hit
 //
 // The earlier hash-only filename layout would have produced a byte-level
@@ -971,8 +971,8 @@ commands:
 	if err := build().Run(context.Background()); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
-	cacheDir := filepath.Join(workdir, ".sloff", "cache", "spec", "copy")
-	entries, err := os.ReadDir(cacheDir)
+	fingerprintDir := filepath.Join(workdir, ".sloff", "fingerprints", "spec", "copy")
+	entries, err := os.ReadDir(fingerprintDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,12 +990,12 @@ commands:
 	// to the existing record. Bytes are intentionally identical because the
 	// generator is deterministic; only the filename's timestamp prefix
 	// differs, which is exactly the ADR-0010 disambiguator.
-	bytes, err := os.ReadFile(filepath.Join(cacheDir, original))
+	bytes, err := os.ReadFile(filepath.Join(fingerprintDir, original))
 	if err != nil {
 		t.Fatal(err)
 	}
 	earlier := "20260101000000000" + hashSuffix
-	if err := os.WriteFile(filepath.Join(cacheDir, earlier), bytes, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fingerprintDir, earlier), bytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1006,7 +1006,7 @@ commands:
 		t.Fatal(err)
 	}
 
-	// Second run: must cache hit on output-comparison and not invoke Save.
+	// Second run: must fingerprint hit on output-comparison and not invoke Save.
 	if err := build().Run(context.Background()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
@@ -1015,14 +1015,14 @@ commands:
 		t.Fatal(err)
 	}
 	if string(beforeMarker) != string(afterMarker) {
-		t.Errorf("expected cache hit (no cmd execution) on second run; marker advanced %q -> %q",
+		t.Errorf("expected fingerprint hit (no cmd execution) on second run; marker advanced %q -> %q",
 			beforeMarker, afterMarker)
 	}
 
 	// Both timestamp variants must still be present: a hit does not invoke
 	// Save, so the duplicate-collapse path is not exercised here. (`sloff
-	// cache gc` is the planned collapse trigger for this exact state.)
-	postEntries, err := os.ReadDir(cacheDir)
+	// fingerprint gc` is the planned collapse trigger for this exact state.)
+	postEntries, err := os.ReadDir(fingerprintDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1032,7 +1032,7 @@ commands:
 	}
 	for _, want := range []string{original, earlier} {
 		if !got[want] {
-			t.Errorf("expected %q preserved on cache hit, dir contents=%v", want, got)
+			t.Errorf("expected %q preserved on fingerprint hit, dir contents=%v", want, got)
 		}
 	}
 }
@@ -1040,7 +1040,7 @@ commands:
 // TestRunner_ConcurrentFirstWriteCollapsesOnRewrite covers the rare branch of
 // ADR-0010's Save semantics: when two branches' first-writes were merged
 // (multiple `<timestamp>-<hash>.pb` for the same Key) and a subsequent run
-// happens to land in the cache-miss-with-different-output path, Save must
+// happens to land in the fingerprint-miss-with-different-output path, Save must
 // collapse the duplicates onto the earliest-prefix file. The
 // "different-output for the same input" case is a non-deterministic
 // generator (out of sloff scope), so the test forces the situation by
@@ -1093,8 +1093,8 @@ commands:
 	if err := build().Run(context.Background()); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
-	cacheDir := filepath.Join(workdir, ".sloff", "cache", "spec", "copy")
-	entries, err := os.ReadDir(cacheDir)
+	fingerprintDir := filepath.Join(workdir, ".sloff", "fingerprints", "spec", "copy")
+	entries, err := os.ReadDir(fingerprintDir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("first Run should yield 1 record, got entries=%v err=%v", entries, err)
 	}
@@ -1104,34 +1104,34 @@ commands:
 	// Inject a hand-crafted earlier-prefix record whose output.hash will
 	// fail output-comparison so the runner enters the rewrite path. Bytes
 	// reuse the original record except output.hash is mutated.
-	originalBytes, err := os.ReadFile(filepath.Join(cacheDir, original))
+	originalBytes, err := os.ReadFile(filepath.Join(fingerprintDir, original))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := cache.Unmarshal(originalBytes)
+	rec, err := fingerprint.Unmarshal(originalBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec.Output.Hash = strings.Repeat("0", len(rec.Output.Hash))
-	mutated, err := cache.Marshal(rec)
+	mutated, err := fingerprint.Marshal(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	earlier := "20260101000000000" + hashSuffix
-	if err := os.WriteFile(filepath.Join(cacheDir, earlier), mutated, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fingerprintDir, earlier), mutated, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Drop the legitimate later record so the load path actually picks up
 	// the mutated one (load returns latest; we only want one survivor for
 	// load deterministically). Simulating "two branches each only saw their
 	// own record" in a controlled way.
-	if err := os.Remove(filepath.Join(cacheDir, original)); err != nil {
+	if err := os.Remove(filepath.Join(fingerprintDir, original)); err != nil {
 		t.Fatal(err)
 	}
 	// Add a second duplicate (later than `earlier`) so Save has duplicates
 	// to collapse.
 	later := "20260601000000000" + hashSuffix
-	if err := os.WriteFile(filepath.Join(cacheDir, later), mutated, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fingerprintDir, later), mutated, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1140,7 +1140,7 @@ commands:
 	if err := build().Run(context.Background()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	postEntries, err := os.ReadDir(cacheDir)
+	postEntries, err := os.ReadDir(fingerprintDir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,7 @@
 //
 // It applies to tools that are built from sources living inside the repository
 // (typical examples: bespoke protoc plugins, code generators wired up via
-// `go run ./cmd/...`). These tools have no SemVer to read, so the cache key
+// `go run ./cmd/...`). These tools have no SemVer to read, so the fingerprint key
 // is split across two of sloff's hash buckets:
 //
 //   - Internal source files (main module / repo-local sources) become
@@ -118,7 +118,7 @@ func (r *Resolver) list(ctx context.Context, specDir string, declared *toolresol
 
 // encodeExternalVersion produces the canonical hash-input string for one
 // external Go module. The go.sum line is folded in as a SHA-256 digest so the
-// version stays single-line and bounded length, while still flipping the cache
+// version stays single-line and bounded length, while still flipping the fingerprint
 // when go.sum drifts (Go's classic supply-chain anchor).
 func encodeExternalVersion(m lister.ExternalModule) string {
 	label := DepsPrefix + m.Path + "@" + m.Version

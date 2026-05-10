@@ -4,12 +4,12 @@
 
 関連:
 - [Architecture](./architecture.md)
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](../adr/0001-cache-aware-codegen-orchestrator-decision.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](../adr/0001-fingerprint-aware-codegen-orchestrator-decision.md)
 - [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) — npm / Go OSS パッケージも script で吸収
 
 ## Context
 
-prebuilt binary 配布物 (`darwin-arm64` / `linux-amd64` 等) は OS 別にバイナリ実体が異なるため、 ファイル本体 SHA256 を hash 入力にすると OS 横断キャッシュ共有 ( ADR-0001 の 防御線 (1)) を破壊する。 一方、 これらのバイナリは大抵 `--version` 等の version 取得コマンドを備えており、 出力される version 文字列は OS 横断で同一である。
+prebuilt binary 配布物 (`darwin-arm64` / `linux-amd64` 等) は OS 別にバイナリ実体が異なるため、 ファイル本体 SHA256 を hash 入力にすると OS 横断 fingerprint 共有 ( ADR-0001 の 防御線 (1)) を破壊する。 一方、 これらのバイナリは大抵 `--version` 等の version 取得コマンドを備えており、 出力される version 文字列は OS 横断で同一である。
 
 「実際に install されている binary の `--version` 出力」を hash 入力にすれば、 以下が同時に成り立つ:
 
@@ -77,7 +77,7 @@ cmd 文字列だけで `resolved_versions_hash` を fallback 計算するよう�
 
 ### Dispatch (declared-only)
 
-[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により、 sloff には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も `tools:` map での named 定義を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断キャッシュを壊す可能性があるため、 利用者の明示宣言を必須とする。
+[ADR-0005](../adr/0005-eliminate-resolver-auto-dispatch.md) + [ADR-0008](../adr/0008-tool-as-first-class-spec-entity.md) により、 sloff には cmd 形状から resolver が自動的に名乗り出る auto-dispatch は無く、 script resolver も `tools:` map での named 定義を経由してのみ起動する。 「とりあえず `cmd[0] --version` を呼ぶ」自動推定は、 出力に build timestamp や OS-arch を含むツール ( e.g., `go version go1.26.2 darwin/arm64`) で OS 横断 fingerprint を壊す可能性があるため、 利用者の明示宣言を必須とする。
 
 ```yaml
 tools:

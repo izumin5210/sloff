@@ -43,7 +43,7 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
    - workspace dep walk と並行して、 各 importer の direct external deps を seed に `snapshots` graph を BFS
    - transitive な外部 npm dep を `<pkg>@<version-with-peer-suffix>` で列挙 → `pnpm-deps:` prefix を付けた ResolvedVersion として返す
 
-`.gitignore` で除外されたファイル ( 典型的には `dist/`, `build/`, `node_modules/`) は ExtraInputs に含まれない ( 利用者がローカルで生成する build artefact が cache を汚さない)。
+`.gitignore` で除外されたファイル ( 典型的には `dist/`, `build/`, `node_modules/`) は ExtraInputs に含まれない ( 利用者がローカルで生成する build artefact が fingerprint を汚さない)。
 
 ### Result の形式
 
@@ -87,7 +87,7 @@ commands:
 ここで起きること:
 
 - `gen` の inputs に pnpm-local 経由で `packages/codegen/**` の git-tracked ファイル ( + transitive workspace deps) が contribute される
-- src 編集 → ExtraInputs ( files_hash 経由) が変化 → gen の cache miss → cmd 再実行 → cmd 内の `pnpm build` が走り、 続いて `pnpm exec my-codegen`
+- src 編集 → ExtraInputs ( files_hash 経由) が変化 → gen の fingerprint miss → cmd 再実行 → cmd 内の `pnpm build` が走り、 続いて `pnpm exec my-codegen`
 - 外部 npm dep ( lodash 等) の resolved version 変化 → resolved_versions_hash 変化 → gen 再実行
 - ts-node / tsx で `bin: src/cli.ts` ( build 不要) なら cmd は `["pnpm", "exec", "my-ts-codegen"]` でよい ( ts-node が src を直接読む)
 
@@ -149,13 +149,13 @@ git ls-files --cached --others --exclude-standard -- <pkg-dir>
 - **filepath.Walk + 慣習的な exclude list ( `dist/`, `build/`, `node_modules/`)**: 慣習依存 ( ADR-0008 D7 の精神に反する)
 - **esbuild Go API で bin entry から transitive 解析** ( 旧設計): 精度高いが eval / 動的 require / 動的 import で死角、 esbuild バイナリサイズ増、 build 必要なツールでは bin が存在しない fresh checkout で fall-back 必要、 tool 概念と build task の path overlap link が必要 ( 暗黙性問題)
 
-`git ls-files` 採用は subprocess 1 回の overhead を許容する代わりに、 git の事実だけを SSoT に取る一番素直な選択。 sloff の cache record も git 管理前提なので、 git 依存はすでに implicit。
+`git ls-files` 採用は subprocess 1 回の overhead を許容する代わりに、 git の事実だけを SSoT に取る一番素直な選択。 sloff の fingerprint も git 管理前提なので、 git 依存はすでに implicit。
 
 ### 過剰 invalidate の許容
 
 git-tracked enumeration は「 package dir 内の利用者が置いている全ファイル」 を input にするので、 bin から実際に transitive で import されてないファイル ( e.g., `README.md`、 別の bin の lib) も input に含まれる。 これらの編集で consumer task が rerun する **過剰 invalidate** が起きる:
 
-- false hit ( 古い結果で cache hit) は起きない ( 健全)
+- false hit ( 古い結果で fingerprint hit) は起きない ( 健全)
 - false miss ( 不要な rerun) が起きうる
 - Turborepo の default も同じ精度で、 monorepo 規模での実用上の精度は問題にならないことが知られている
 

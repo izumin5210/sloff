@@ -2,7 +2,7 @@
 
 ## Context
 
-`buf generate` は sloff が対象とする典型的な複合 generator の一つで、 buf module / codegen plugin / `.proto` 入力の組合せが cache 健全性に効く。 当初は他 channel ( script / go-local / pnpm-*) と同様に **buf 専用 resolver + preflight** を導入する方向で実装し、 [PR #8](https://github.com/izumin5210/sloff/pull/8) で:
+`buf generate` は sloff が対象とする典型的な複合 generator の一つで、 buf module / codegen plugin / `.proto` 入力の組合せが fingerprint の健全性に効く。 当初は他 channel ( script / go-local / pnpm-*) と同様に **buf 専用 resolver + preflight** を導入する方向で実装し、 [PR #8](https://github.com/izumin5210/sloff/pull/8) で:
 
 - `buf.gen.yaml` の `plugins[].remote` を parse して `buf-remote:host/owner/name@version+rev<n>` を `ResolvedVersion` に追加
 - `buf.yaml` deps + `buf.lock` の commit を読んで `buf-dep:host/owner/name@<commit>` を `ResolvedVersion` に追加
@@ -12,8 +12,8 @@
 
 ### References
 
-- [ADR-0001: キャッシュ可能コード生成オーケストレーターの選定](./0001-cache-aware-codegen-orchestrator-decision.md)
-- [ADR-0002: キャッシュヒット判定モデル](./0002-cache-hit-decision-model.md)
+- [ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定](./0001-fingerprint-aware-codegen-orchestrator-decision.md)
+- [ADR-0002: fingerprint hit 判定モデル](./0002-fingerprint-hit-decision-model.md)
 - [ADR-0004: Spec 検証と output 重複検出のポリシー](./0004-spec-validation-and-output-conflict-policy.md)
 - [ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一](./0005-eliminate-resolver-auto-dispatch.md)
 - PR #8: feat(buf): add buf resolver and preflight checker ( クローズ済)
@@ -35,15 +35,15 @@ pinned tag (`:vX.Y.Z`) で記述された remote plugin / `protoc_builtin` / `lo
 - セキュリティ上、 unpinned dependency は supply chain attack の温床
 - 再現性の観点でもどの project でも避けるべき practice
 
-であり、 buf 利用者が **buf レベルで規律として担保する** 性質のもの。 sloff が cache 健全性の名のもとに lint を背負うのは越権で、 buf 自身の運用ルール ( CI で `buf format --diff` ならぬ pinned check を回す等) で担保すべき。
+であり、 buf 利用者が **buf レベルで規律として担保する** 性質のもの。 sloff が fingerprint の健全性の名のもとに lint を背負うのは越権で、 buf 自身の運用ルール ( CI で `buf format --diff` ならぬ pinned check を回す等) で担保すべき。
 
 **O4. buf.yaml ↔ buf.lock 整合性は buf 自身が runtime で error を出す**
 
-drift があると `buf generate` が error で落ちる。 sloff が事前に検出するのは「より早く clean な error を出す」UX 改善でしかなく、 cache 健全性には影響しない。
+drift があると `buf generate` が error で落ちる。 sloff が事前に検出するのは「より早く clean な error を出す」UX 改善でしかなく、 fingerprint の健全性には影響しない。
 
 **O5. buf の local cache (`~/.cache/buf/...`) は commit-keyed**
 
-pnpm の `node_modules` のように「lockfile を更新したのに install を忘れた」状態が構造的に起きにくい。 commit hash でディレクトリが分かれており、 `buf generate` 時に missing なら自動 fetch される。 sloff 側で local cache 整合性を check する必要はない。
+pnpm の `node_modules` のように「lockfile を更新したのに install を忘れた」状態が構造的に起きにくい。 commit hash でディレクトリが分かれており、 `buf generate` 時に missing なら自動 fetch される。 sloff 側で local fingerprint store 整合性を check する必要はない。
 
 ## Decision
 
@@ -84,13 +84,13 @@ commands:
 
 ### D4. pinned tag 強制 / buf.yaml ↔ buf.lock 整合検証は buf 利用者の責務
 
-これらは buf レベルの規律として、 利用者の CI (`buf format` / `buf lint` / カスタム pinned-check ) や code review で担保する。 sloff は cache orchestrator としての責務に集中する。
+これらは buf レベルの規律として、 利用者の CI (`buf format` / `buf lint` / カスタム pinned-check ) や code review で担保する。 sloff は fingerprint orchestrator としての責務に集中する。
 
 ## Rationale
 
 ### responsability boundary
 
-sloff の core 責務は「OS 横断 / 共有可能な cache を、 generator inputs / outputs / tools の同一性に基づいて管理する」こと ( ADR-0001 / ADR-0002)。 各 channel の resolver は「lockfile / runtime バイナリ等から **OS 中立な version 文字列を取り出す**」のが本分で、 「その lockfile の書き方が正しいか」 を lint するのは隣接領域。
+sloff の core 責務は「OS 横断 / 共有可能な fingerprint store を、 generator inputs / outputs / tools の同一性に基づいて管理する」こと ( ADR-0001 / ADR-0002)。 各 channel の resolver は「lockfile / runtime バイナリ等から **OS 中立な version 文字列を取り出す**」のが本分で、 「その lockfile の書き方が正しいか」 を lint するのは隣接領域。
 
 buf については O3 で示した通り「pinned 必須」は buf 利用者がそもそも持つべき規律で、 sloff が機械的に強制するのは越権。 また buf-dep / buf-remote の hashing は spec.inputs に該当ファイルを入れる運用と機能的に重複しており、 多重防御として残す価値より「責務が重複している」 デメリットの方が大きい ( buf schema 変更時の追従コスト、 v1 互換性の議論コスト等)。
 
@@ -100,7 +100,7 @@ PR #8 の review で「v1 buf.lock の dep identity フィールド」「v1 buf.
 
 ### `:latest` は本当に問題か
 
-`:latest` を許す利用者は cache 健全性以前に security 問題を抱えている。 sloff が silent に stale を起こすこと自体は問題だが、 「sloff は pinned 前提で動く」と明示し ( このドキュメントで明示した)、 利用者が pinned 規律を守る限り問題は起きない。 守らない利用者は別の問題を先に踏むので、 sloff の lint を待たずとも顕在化する。
+`:latest` を許す利用者は fingerprint の健全性以前に security 問題を抱えている。 sloff が silent に stale を起こすこと自体は問題だが、 「sloff は pinned 前提で動く」と明示し ( このドキュメントで明示した)、 利用者が pinned 規律を守る限り問題は起きない。 守らない利用者は別の問題を先に踏むので、 sloff の lint を待たずとも顕在化する。
 
 ## Consequences
 
@@ -113,7 +113,7 @@ PR #8 の review で「v1 buf.lock の dep identity フィールド」「v1 buf.
 
 ### 負の影響 / 注意点
 
-- `:latest` 等の unpinned 指定が silent stale を起こすケースを sloff 側で検出できない。 利用者の規律 (CI / code review) で担保する必要があり、 これが破られた場合 cache が嘘をつく
+- `:latest` 等の unpinned 指定が silent stale を起こすケースを sloff 側で検出できない。 利用者の規律 (CI / code review) で担保する必要があり、 これが破られた場合 fingerprint が嘘をつく
 - buf.yaml ↔ buf.lock drift は `buf generate` の runtime error として現れるため、 「sloff 起動直後に検出」は得られない ( 数秒〜数十秒後の buf 起動時に error が出る)。 UX の劣化は許容
 - 利用者は spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含める必要がある。 docs / 利用例 ( architecture.md / README) で明示的に案内する
 

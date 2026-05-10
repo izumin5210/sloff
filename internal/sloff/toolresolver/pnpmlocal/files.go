@@ -14,7 +14,7 @@ import (
 // repo-relative slash-form paths, deduplicated, but not necessarily sorted.
 // pkgDir is repo-relative OS-native form. The implementation must respect
 // .gitignore so that build outputs (typically dist/, build/, etc.) don't
-// leak into ExtraInputs (which would tie the cache to artefacts the user
+// leak into ExtraInputs (which would tie the fingerprint to artefacts the user
 // regenerates locally). Production enumerators must also exclude sloff's
 // own state directory (sloffStateDir) — see GitLsFiles for why.
 //
@@ -23,9 +23,9 @@ import (
 type FileEnumerator func(ctx context.Context, repoRoot, pkgDir string) ([]string, error)
 
 // sloffStateDir is the path prefix of the directory sloff owns inside
-// the repo (cache records, etc.). pnpm-local enumeration must drop entries
+// the repo (fingerprints, etc.). pnpm-local enumeration must drop entries
 // under this prefix because hashing them feeds sloff's own writes back
-// into its inputs and self-invalidates the cache on every subsequent run.
+// into its inputs and self-invalidates the fingerprint on every subsequent run.
 // Compared to .git/, which git itself hides from ls-files, .sloff/ is a
 // regular tracked / untracked directory so we filter explicitly.
 const sloffStateDir = ".sloff/"
@@ -44,7 +44,7 @@ const sloffStateDir = ".sloff/"
 //
 // The combination matches Turborepo's default "everything in the package
 // that's in (or could be in) git". We rely on git rather than implementing a
-// .gitignore parser because sloff's cache records are already git-managed
+// .gitignore parser because sloff's fingerprints are already git-managed
 // and `git ls-files` is the bit-exact source of truth for "what's in this
 // repo from git's point of view".
 func GitLsFiles(ctx context.Context, repoRoot, pkgDir string) ([]string, error) {
@@ -77,7 +77,7 @@ func GitLsFiles(ctx context.Context, repoRoot, pkgDir string) ([]string, error) 
 	// git ls-files emits one path per line, slash-form, repo-relative.
 	// Trailing newline produces an empty final line we filter out. We also
 	// drop anything under sloff's own state directory: when pkgDir is the
-	// repo-root importer, ls-files would otherwise return .sloff/cache/**,
+	// repo-root importer, ls-files would otherwise return .sloff/fingerprints/**,
 	// and hashing files sloff itself rewrites every run makes the
 	// resolver self-invalidate forever. Filtering lives here rather than in
 	// the resolver because production callers always need it; the test

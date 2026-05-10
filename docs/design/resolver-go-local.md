@@ -1,6 +1,6 @@
 # Resolver: go-local
 
-`goLocalResolver` はリポジトリ内に実装された **内製 Go CLI** (`go run ./cmd/...` 形式や repo local main package) を扱う。 SemVer を持たないため、 ツールを構成するソース集合と外部 module の resolved version を 2 経路で task の cache key に流し込む。
+`goLocalResolver` はリポジトリ内に実装された **内製 Go CLI** (`go run ./cmd/...` 形式や repo local main package) を扱う。 SemVer を持たないため、 ツールを構成するソース集合と外部 module の resolved version を 2 経路で task の fingerprint key に流し込む。
 
 関連:
 - [Architecture](./architecture.md)
@@ -10,7 +10,7 @@
 
 ## Context
 
-Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ソースファイル + 依存 module 集合** から導出した識別子を cache key に渡す。
+Go の generator は外部配布 module (`go.mod` の `tool` ディレクティブで宣言される SemVer pinned ツール) と、 リポジトリ内 main package として実装された内製ツール (内製 protoc plugin、 内製 codegen 等) の 2 種類に分かれる。 後者は SemVer を持たないため、 **ソースファイル + 依存 module 集合** から導出した識別子を fingerprint key に渡す。
 
 「内製ソース ( = `local`)」 という意味では [pnpm-local](./resolver-pnpm-local.md) と対応物の関係。 両 resolver は同じ shape の Result を返す:
 
@@ -47,7 +47,7 @@ toolresolver.Result{
 }
 ```
 
-`<sha>` は go.sum 行 ( `<path> <version> h1:...` 等) を SHA-256 した hex。 これにより同じ path@version でも go.sum の bytes が変われば ResolvedVersion が変わる ( 公式 Go 配布 + tampered mirror の食い違いを cache が検知できる)。
+`<sha>` は go.sum 行 ( `<path> <version> h1:...` 等) を SHA-256 した hex。 これにより同じ path@version でも go.sum の bytes が変われば ResolvedVersion が変わる ( 公式 Go 配布 + tampered mirror の食い違いを fingerprint が検知できる)。
 
 旧版 ( PR の初期実装) は内部コード + 外部 module を 1 つの sha256 に詰めて `go-local:<entry>@sha256:<hex>` 形式の ResolvedVersion 1 本を返していたが、 現行は ExtraInputs / ResolvedVersion に分離している。 動機は [pnpm-local](./resolver-pnpm-local.md) と shape を揃えること、 および codegen → go-local の依存を depgraph に自動検知させること。
 
@@ -71,7 +71,7 @@ commands:
     tools: [protoc-gen-foo, go]   # Go toolchain bump も併せて取りたい場合は go も並べる
 ```
 
-- entry は `./` / `../` 始まり、 または bare `.` / `..`。 nested 配置で parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral cache 保護のため fail)
+- entry は `./` / `../` 始まり、 または bare `.` / `..`。 nested 配置で parent dir 配下の generator を共有する場合は `../cmd/gen` の形を取れる ( ただし repoRoot を escape する path は OS-neutral fingerprint 保護のため fail)
 - `cmd: ["go", "run", "./cmd/protoc-gen-foo"]` のように `go run` で起動する場合も、 上記の named 定義 + 参照を併記しない限り go-local は動かない ( cmd 形状からの auto-dispatch は持たない)
 - build 済み binary を直接呼ぶケース ( `cmd: protoc-gen-foo`) も同様に named 参照を併記する
 
@@ -141,7 +141,7 @@ import "golang.org/x/tools/go/packages"
 cfg := &packages.Config{
     // NeedEmbedFiles で //go:embed 対象を、 IgnoredFiles ( NeedFiles で取得) で
     // 別 GOOS/GOARCH 用 build-tag ファイルを hash 入力に取り込む。 これらが無いと
-    // embed アセット変更や OS 違いで cache 健全性 / OS 横断キャッシュが破れる。
+    // embed アセット変更や OS 違いで fingerprint の健全性 / OS 横断 fingerprint が破れる。
     Mode: packages.NeedFiles | packages.NeedEmbedFiles |
         packages.NeedImports | packages.NeedDeps | packages.NeedModule,
     // spec の作業ディレクトリ ( <repoRoot>/<specDir>) を Dir にする。
@@ -168,9 +168,9 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 
 | 種別 | 判定 | hash 入力 |
 |---|---|---|
-| stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断キャッシュを壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
+| stdlib | `pkg.Module == nil` | hash 対象から除外 ( $GOROOT 絶対 path が OS 横断 fingerprint を壊すため。 Go toolchain bump は別途 script resolver で `go version` を併記して捕捉する) |
 | 内部コード | `pkg.Module.Main` ( 自リポジトリの module) | `pkg.GoFiles` + `pkg.EmbedFiles` + `pkg.IgnoredFiles` + `pkg.OtherFiles` のファイル本体を SHA256 ( `IgnoredFiles` で GOOS / GOARCH / build-tag に非依存、 `OtherFiles` で `.s` / `.c` / `.cc` / `.syso` 等の非 Go ソース変更も捕捉) |
-| local replace 依存 | `pkg.Module.Replace != nil && Replace.Version == ""` | 内部コードと同じ hash 戦略 ( replace 先 directory の `GoFiles + EmbedFiles + IgnoredFiles + OtherFiles` をファイル本体で SHA256)。 go.sum で守られないため content hash が必須。 ただし replace 先が repoRoot 外を指す場合は OS 横断 cache を壊すため fail する |
+| local replace 依存 | `pkg.Module.Replace != nil && Replace.Version == ""` | 内部コードと同じ hash 戦略 ( replace 先 directory の `GoFiles + EmbedFiles + IgnoredFiles + OtherFiles` をファイル本体で SHA256)。 go.sum で守られないため content hash が必須。 ただし replace 先が repoRoot 外を指す場合は OS 横断 fingerprint を壊すため fail する |
 | versioned replace 依存 | `pkg.Module.Replace != nil && Replace.Version != ""` | 外部パッケージ扱い。 label は元 import path + `replace=<replace path>@<replace version>` で置換先まで含めて識別。 go.sum lookup は **置換先** の `Replace.Path` / `Replace.Version` で引く ( go.sum はその key で記録されるため) |
 | 外部パッケージ ( 通常依存) | `pkg.Module` が外部 module を指す ( replace なし) | `module path@version` 文字列 + go.sum 該当行の hash。 go.sum は **load された全 main module の `Module.GoMod` の隣** から読み、 連結する ( nested-module monorepo / `go.work` で複数の main module が visible なケースでも全 module の go.sum 行が引けるように) |
 
@@ -178,7 +178,7 @@ transitive 依存には「リポジトリ内の `.go` ファイル」と「`$GOM
 for each pkg in transitive(pkgs):
     if pkg.Module == nil {
         // stdlib: ファイル本体は hash しない ( $GOROOT 配下の絶対 path が
-        // OS 横断キャッシュを破壊するため)。 Go toolchain bump は
+        // OS 横断 fingerprint を破壊するため)。 Go toolchain bump は
         // tools: [go] ( go: { exec: ["go", "version"], extract: ... }) を併記して捕捉する。
     } else if pkg.Module.Main {
         // 内部コード: ファイル本体を hash。 GoFiles + EmbedFiles ( //go:embed 対象)
@@ -193,7 +193,7 @@ for each pkg in transitive(pkgs):
         // go.sum で保護されないため、 内部コードと同じく置換先 directory の
         // ファイル本体を hash する。 ただし replace 先が repoRoot 外を指す場合
         // ( 絶対 path / `../sibling-repo` 等) は dev machine ごとに path が
-        // 異なって OS 横断 cache が破れるため fail する ( future work)。
+        // 異なって OS 横断 fingerprint が破れるため fail する ( future work)。
         for f in pkg.GoFiles + pkg.EmbedFiles + pkg.IgnoredFiles + pkg.OtherFiles {
             hash.Write(readFile(f))
         }
@@ -249,7 +249,7 @@ go-local には install drift / build artefact freshness いずれの Checker �
 
 - `GOFLAGS=-mod=readonly`: download 禁止モード。 必要 module 不在なら `go run` が **早期 fail**
 - `GOFLAGS=-mod=vendor` / `vendor/` ディレクトリあり: `vendor/` を SSoT に。 ただし `go mod vendor` で `go.mod` と sync する運用を破ると `go build` が「 vendor の状態が go.mod と合わない」 で **早期 fail**
-- `GOPROXY=off`: cache miss なら **早期 fail**
+- `GOPROXY=off`: fingerprint miss なら **早期 fail**
 
 いずれも「 fail-loudly か正しく動く」 のいずれかで、 silent stale に倒れない。 この性質は ADR-0007 で script resolver について書いた「 runtime バイナリの `--version` を取れば lockfile vs install drift が SSoT を runtime に置いた時点で構造的に発生しない」 と同じ構造で、 Go の場合は cmd ( `go run` 等) 自体が runtime SSoT として振る舞っている。
 

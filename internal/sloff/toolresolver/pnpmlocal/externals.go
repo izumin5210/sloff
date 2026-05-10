@@ -81,7 +81,7 @@ func WalkDeps(lf *Lockfile, importerPath string) (DepWalk, error) {
 				}
 				// `file:` and other non-link non-external entries are skipped:
 				// `file:` deps reference local tarballs the user committed,
-				// which would tie the cache to that file path; covering them
+				// which would tie the fingerprint to that file path; covering them
 				// would need a separate channel and is out of scope for now.
 			}
 		}

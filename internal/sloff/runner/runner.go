@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -25,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 
+	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 	"github.com/izumin5210/sloff/internal/sloff/glob"
@@ -91,10 +91,6 @@ type Options struct {
 
 	Logger Logger
 
-	// Clock supplies the timestamp written to record.GeneratedAt. Defaults to
-	// time.Now().UTC(); tests inject a fixed clock so cache YAML is byte-deterministic.
-	Clock func() time.Time
-
 	// TracerProvider is where runner emits OpenTelemetry spans. nil yields a
 	// noop provider so embedding callers that haven't configured tracing pay
 	// no cost and never accidentally bleed sloff's spans through a host's
@@ -137,9 +133,6 @@ func New(opts Options) *Runner {
 	stderr := opts.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
-	}
-	if opts.Clock == nil {
-		opts.Clock = func() time.Time { return time.Now().UTC() }
 	}
 	tp := opts.TracerProvider
 	if tp == nil {
@@ -210,7 +203,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // collectTasksTraced wraps the ctx-free collectTasks with a span. The
 // underlying call has no cancelable I/O, so the span purely captures phase
 // timing and the resolved task count for the trace tree.
-func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ToolVersion) (tasks []depgraph.Task, err error) {
+func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) (tasks []depgraph.Task, err error) {
 	_, span := r.tracer.Start(ctx, "runner.collect_tasks")
 	defer endSpan(span, &err)
 	tasks, err = r.collectTasks(inputsByTool, versionsByTool)
@@ -353,7 +346,7 @@ func taskConcurrency(n int) int {
 // the exact set of inputs / outputs the runner would orchestrate.
 //
 // Plan deliberately calls `Registry.Inputs` only (not `Versions`) because
-// the depgraph never reads ToolVersions — they only feed `tools_hash`
+// the depgraph never reads ResolvedVersions — they only feed `resolved_versions_hash`
 // (architecture.md, ADR-0008 D6 addendum). Skipping Versions means
 // `script` resolvers don't spawn `<bin> --version` here, which keeps
 // graph-style consumers usable when prebuilt binaries aren't installed.
@@ -519,13 +512,13 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 
 // resolveVersionContribs invokes Registry.Versions once per referenced tool
 // name. Same scoping discipline as resolveInputContribs.
-func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]toolresolver.ToolVersion, err error) {
+func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]toolresolver.ResolvedVersion, err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.resolve.versions", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
 	defer endSpan(span, &err)
 
-	results := make([][]toolresolver.ToolVersion, len(referenced))
+	results := make([][]toolresolver.ResolvedVersion, len(referenced))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(resolverConcurrency(len(referenced)))
 	for i, name := range referenced {
@@ -557,7 +550,7 @@ func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.Tool
 	if err = g.Wait(); err != nil {
 		return nil, err
 	}
-	out = make(map[string][]toolresolver.ToolVersion, len(referenced))
+	out = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
 	for i, name := range referenced {
 		out[name] = results[i]
 	}
@@ -609,11 +602,11 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
-	// versions holds the per-task ToolVersion concatenation in tools[] order,
+	// versions holds the per-task ResolvedVersion concatenation in tools[] order,
 	// pre-computed during collectTasks so runTask can hash without revisiting
 	// the resolver registry. nil when collectTasks ran without versions
 	// (depgraph-only callers).
-	versions []toolresolver.ToolVersion
+	versions []toolresolver.ResolvedVersion
 }
 
 // collectTasks expands inputs/outputs for every spec command and folds each
@@ -622,10 +615,10 @@ type taskInfo struct {
 // their consumers via the usual output-overlap rule, instead of needing a
 // parallel dependency channel.
 //
-// versionsByTool may be nil for callers that don't need tools_hash (graph-
+// versionsByTool may be nil for callers that don't need resolved_versions_hash (graph-
 // style consumers); inputsByTool must always be present so depgraph sees the
 // same inputs the runner would.
-func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ToolVersion) ([]depgraph.Task, error) {
+func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) ([]depgraph.Task, error) {
 	r.byKey = map[string]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
@@ -642,9 +635,9 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			extraInputs := combineToolInputs(c.Tools, inputsByTool)
 			mergedInputs := mergeInputs(inputs, extraInputs)
 
-			var versions []toolresolver.ToolVersion
+			var versions []toolresolver.ResolvedVersion
 			if versionsByTool != nil {
-				versions = combineToolVersions(c.Tools, versionsByTool)
+				versions = combineResolvedVersions(c.Tools, versionsByTool)
 			}
 
 			t := depgraph.Task{
@@ -737,9 +730,9 @@ func combineToolInputs(names []string, inputsByTool map[string][]string) []strin
 	return combined
 }
 
-// combineToolVersions is the Versions sibling of combineToolInputs.
-func combineToolVersions(names []string, versionsByTool map[string][]toolresolver.ToolVersion) []toolresolver.ToolVersion {
-	var combined []toolresolver.ToolVersion
+// combineResolvedVersions is the Versions sibling of combineToolInputs.
+func combineResolvedVersions(names []string, versionsByTool map[string][]toolresolver.ResolvedVersion) []toolresolver.ResolvedVersion {
+	var combined []toolresolver.ResolvedVersion
 	for _, name := range names {
 		v, ok := versionsByTool[name]
 		if !ok {
@@ -797,14 +790,13 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		return fmt.Errorf("%s: hash inputs: %w", t.Name, err)
 	}
 	cmdHash := hash.Cmd(info.command.Cmd)
-	toolsHash := hash.Tools(versionStrings(versions))
-	inputHash := hash.Input(filesHash, cmdHash, toolsHash)
+	resolvedVersionsHash := hash.ResolvedVersions(versionStrings(versions))
+	inputHash := hash.Input(filesHash, cmdHash, resolvedVersionsHash)
 	span.SetAttributes(attribute.String("sloff.input.hash", inputHashAttr(inputHash)))
 
 	key := cache.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
 	taskLabel := taskLabel(t)
-
-	hit, paths, err := r.cacheLookup(ctx, key)
+	hit, existing, paths, err := r.cacheLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	}
@@ -843,28 +835,38 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		return nil
 	}
 
-	newRec := &cache.Record{
-		GeneratedAt:              r.opts.Clock(),
-		GeneratorVersionSnapshot: snapshotFromVersions(versions),
-		Input: cache.Input{
-			Hash: inputHash,
-			Components: cache.InputComponents{
-				CmdHash:   cmdHash,
-				FilesHash: filesHash,
-				ToolsHash: toolsHash,
-			},
+	newRec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec: &cachev1.Spec{
+			Cmd:    strings.Join(info.command.Cmd, " "),
+			Dir:    info.specRelpath,
+			TaskId: info.command.Name,
 		},
-		Output: cache.Output{
+		Input: &cachev1.Input{
+			Hash:                 inputHash,
+			FilesHash:            filesHash,
+			CmdHash:              cmdHash,
+			ResolvedVersionsHash: resolvedVersionsHash,
+			ResolvedVersions:     resolvedVersionsFromTool(versions),
+		},
+		Output: &cachev1.Output{
 			Hash:  outputHash,
 			Files: files,
 		},
-		SchemaVersion: cache.SchemaVersion,
-		Spec: cache.RecordSpec{
-			Cmd:    strings.Join(info.command.Cmd, " "),
-			Dir:    info.specRelpath,
-			TaskID: info.command.Name,
-		},
 	}
+
+	// Write-skip rule (ADR-0009 §"byte stability"): if a record already exists at
+	// this key with the same output identity (hash + per-file (path, hash) set),
+	// the existing entry is still semantically correct. Skip the rewrite so
+	// proto runtime byte-level drift never reaches git and the informational
+	// resolved_versions[*].source field keeps its first-observed value. The
+	// initial-creation-time concern that motivated keeping generated_at stable
+	// has migrated to the filename's timestamp prefix (ADR-0010), which the
+	// Storage backend preserves on in-place overwrites.
+	if existing != nil && outputsEquivalent(existing.GetOutput(), newRec.GetOutput()) {
+		return nil
+	}
+
 	if err := r.cacheStore(ctx, key, newRec); err != nil {
 		return fmt.Errorf("%s: save record: %w", t.Name, err)
 	}
@@ -872,12 +874,18 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 }
 
 // cacheLookup wraps Storage.Load with a runner.cache.load span. Returns
-// (hit=true, paths, nil) only when the record exists AND its output files still
-// hash to the recorded value; stale records and missing records both return
-// hit=false with nil paths so the caller falls through to exec. The span's
-// sloff.cache.state attribute distinguishes hit / stale / not_found / error so
-// trace consumers can analyse cache health without re-running.
-func (r *Runner) cacheLookup(ctx context.Context, key cache.Key) (hit bool, paths []string, err error) {
+// (hit, existing, paths, err) where:
+//   - hit=true only when a record exists AND its output files still hash to
+//     the recorded value; paths is the recorded output paths so the caller
+//     can skip exec.
+//   - hit=false otherwise; existing may still be non-nil if a stale record
+//     was loaded (the caller uses it for the post-exec write-skip check
+//     against the freshly-built record's output identity).
+//
+// The span's sloff.cache.state attribute distinguishes hit / stale /
+// not_found / error so trace consumers can analyse cache health without
+// re-running.
+func (r *Runner) cacheLookup(ctx context.Context, key cache.Key) (hit bool, existing *cachev1.Record, paths []string, err error) {
 	_, span := r.tracer.Start(ctx, "runner.cache.load")
 	defer func() {
 		if err != nil {
@@ -889,30 +897,53 @@ func (r *Runner) cacheLookup(ctx context.Context, key cache.Key) (hit bool, path
 	rec, ok, loadErr := r.opts.Storage.Load(ctx, key)
 	if loadErr != nil {
 		err = loadErr
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	if !ok {
 		span.SetAttributes(attribute.String("sloff.cache.state", "not_found"))
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
-	candidate := rec.Output.Files.Paths()
+	candidate := cache.FilePaths(rec.GetOutput().GetFiles())
 	current, hashErr := hash.Files(r.opts.RepoRoot, candidate)
-	if hashErr == nil && current == rec.Output.Hash {
+	if hashErr == nil && current == rec.GetOutput().GetHash() {
 		span.SetAttributes(attribute.String("sloff.cache.state", "hit"))
-		return true, candidate, nil
+		return true, rec, candidate, nil
 	}
 	span.SetAttributes(attribute.String("sloff.cache.state", "stale"))
-	return false, nil, nil
+	return false, rec, nil, nil
 }
 
 // cacheStore wraps Storage.Save with a runner.cache.save span tagged with the
 // output file count.
-func (r *Runner) cacheStore(ctx context.Context, key cache.Key, rec *cache.Record) (err error) {
+func (r *Runner) cacheStore(ctx context.Context, key cache.Key, rec *cachev1.Record) (err error) {
 	_, span := r.tracer.Start(ctx, "runner.cache.save", trace.WithAttributes(
-		attribute.Int("sloff.output.file_count", len(rec.Output.Files)),
+		attribute.Int("sloff.output.file_count", len(rec.GetOutput().GetFiles())),
 	))
 	defer endSpan(span, &err)
 	return r.opts.Storage.Save(ctx, key, rec)
+}
+
+// outputsEquivalent reports whether two Output values represent the same
+// produced file set. Hash and per-entry (path, hash) tuples must match; field
+// order is normalised by sorting because callers may build Output before the
+// proto Marshal helper sorts FileEntries.
+func outputsEquivalent(a, b *cachev1.Output) bool {
+	if a.GetHash() != b.GetHash() {
+		return false
+	}
+	if len(a.GetFiles()) != len(b.GetFiles()) {
+		return false
+	}
+	left := append([]*cachev1.FileEntry(nil), a.GetFiles()...)
+	right := append([]*cachev1.FileEntry(nil), b.GetFiles()...)
+	sort.Slice(left, func(i, j int) bool { return left[i].GetPath() < left[j].GetPath() })
+	sort.Slice(right, func(i, j int) bool { return right[i].GetPath() < right[j].GetPath() })
+	for i := range left {
+		if left[i].GetPath() != right[i].GetPath() || left[i].GetHash() != right[i].GetHash() {
+			return false
+		}
+	}
+	return true
 }
 
 // recordProducedPaths registers the resolved output paths of a task and fails when one
@@ -1020,7 +1051,7 @@ func toolresolverDeclared(t spec.DeclaredTool) toolresolver.DeclaredTool {
 	}
 }
 
-func versionStrings(versions []toolresolver.ToolVersion) []string {
+func versionStrings(versions []toolresolver.ResolvedVersion) []string {
 	out := make([]string, len(versions))
 	for i, v := range versions {
 		out[i] = v.Version
@@ -1028,25 +1059,25 @@ func versionStrings(versions []toolresolver.ToolVersion) []string {
 	return out
 }
 
-func snapshotFromVersions(versions []toolresolver.ToolVersion) cache.GeneratorVersions {
+func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*cachev1.ResolvedVersion {
 	if len(versions) == 0 {
 		return nil
 	}
-	out := make(cache.GeneratorVersions, len(versions))
+	out := make([]*cachev1.ResolvedVersion, len(versions))
 	for i, v := range versions {
-		out[i] = cache.GeneratorVersion{Name: v.Name, Source: v.Source, Version: v.Version}
+		out[i] = &cachev1.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
 	}
 	return out
 }
 
-func perFileHashes(root string, paths []string) (cache.FileHashes, error) {
-	out := make(cache.FileHashes, 0, len(paths))
+func perFileHashes(root string, paths []string) ([]*cachev1.FileEntry, error) {
+	out := make([]*cachev1.FileEntry, 0, len(paths))
 	for _, p := range paths {
 		h, err := hash.File(root, p)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, cache.FileHash{Path: p, Hash: h})
+		out = append(out, &cachev1.FileEntry{Path: p, Hash: h})
 	}
 	return out, nil
 }

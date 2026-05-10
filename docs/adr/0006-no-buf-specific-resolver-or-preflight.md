@@ -4,8 +4,8 @@
 
 `buf generate` は sloff が対象とする典型的な複合 generator の一つで、 buf module / codegen plugin / `.proto` 入力の組合せが cache 健全性に効く。 当初は他 channel ( script / go-local / pnpm-*) と同様に **buf 専用 resolver + preflight** を導入する方向で実装し、 [PR #8](https://github.com/izumin5210/sloff/pull/8) で:
 
-- `buf.gen.yaml` の `plugins[].remote` を parse して `buf-remote:host/owner/name@version+rev<n>` を `ToolVersion` に追加
-- `buf.yaml` deps + `buf.lock` の commit を読んで `buf-dep:host/owner/name@<commit>` を `ToolVersion` に追加
+- `buf.gen.yaml` の `plugins[].remote` を parse して `buf-remote:host/owner/name@version+rev<n>` を `ResolvedVersion` に追加
+- `buf.yaml` deps + `buf.lock` の commit を読んで `buf-dep:host/owner/name@<commit>` を `ResolvedVersion` に追加
 - preflight で remote plugin の pinned tag lint と `buf.yaml` ↔ `buf.lock` 整合検証
 
 を実装した。 しかし PR #8 の review プロセスで「これらは本当に sloff 側の責務か」を問い直し、 以下の観察に至った。
@@ -22,7 +22,7 @@
 
 **O1. buf.lock の commit は immutable で、 spec.inputs に入れれば files_hash で完結する**
 
-`buf.lock` は BSR module の resolved commit を記録する。 BSR の commit は git commit と同じく immutable ( 同 commit ⇒ 同内容) で、 `buf dep update` を走らせると `buf.lock` の content が書き変わる。 つまり「BSR module dep が変わった」事実は **`buf.lock` のファイル内容変化** として現れる。 spec の `inputs:` に `buf.lock` を含めれば、 sloff の `files_hash` 経路で確実に invalidate される。 `buf-dep:` ToolVersion を別途 emit する積極的な理由は無い。
+`buf.lock` は BSR module の resolved commit を記録する。 BSR の commit は git commit と同じく immutable ( 同 commit ⇒ 同内容) で、 `buf dep update` を走らせると `buf.lock` の content が書き変わる。 つまり「BSR module dep が変わった」事実は **`buf.lock` のファイル内容変化** として現れる。 spec の `inputs:` に `buf.lock` を含めれば、 sloff の `files_hash` 経路で確実に invalidate される。 `buf-dep:` ResolvedVersion を別途 emit する積極的な理由は無い。
 
 **O2. buf.gen.yaml も同様**
 

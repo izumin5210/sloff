@@ -51,10 +51,9 @@ func runOnceForTrace(t *testing.T, h *harness) *tracetest.SpanRecorder {
 	r := runner.New(runner.Options{
 		RepoRoot:       h.workdir,
 		Specs:          specs,
-		Storage:        local.New(h.workdir),
+		Storage:        local.New(h.workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers:      resolverReg,
 		Preflight:      preflightReg,
-		Clock:          func() time.Time { return fixedClock },
 		TracerProvider: tp,
 	})
 	if err := r.Run(context.Background()); err != nil {

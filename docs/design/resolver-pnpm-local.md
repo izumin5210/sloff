@@ -15,7 +15,7 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 設計上、 `pnpm-local` は go-local と **同じ責務分担** に揃えている ( ADR-0008 D7):
 
-- **sloff の役割**: workspace package のソース集合を hash 入力に取り、 transitive 外部 dep の resolved version を ToolVersion として contribute する。 これだけ
+- **sloff の役割**: workspace package のソース集合を hash 入力に取り、 transitive 外部 dep の resolved version を ResolvedVersion として contribute する。 これだけ
 - **利用者の役割**: build が必要なら task の cmd 内に build を含める ( go-local の `go run ./cmd/foo` が compile + run を 1 cmd に閉じるのと同じ責務分担)
 
 つまり sloff は build orchestration をしない。 spec から「 build task と consumer task の path overlap で連携」 のような暗黙概念は消えている。
@@ -41,7 +41,7 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
    - 全 dir のファイル集合を union → ExtraInputs として返す
 3. **外部 dep version 経路**:
    - workspace dep walk と並行して、 各 importer の direct external deps を seed に `snapshots` graph を BFS
-   - transitive な外部 npm dep を `<pkg>@<version-with-peer-suffix>` で列挙 → `pnpm-deps:` prefix を付けた ToolVersion として返す
+   - transitive な外部 npm dep を `<pkg>@<version-with-peer-suffix>` で列挙 → `pnpm-deps:` prefix を付けた ResolvedVersion として返す
 
 `.gitignore` で除外されたファイル ( 典型的には `dist/`, `build/`, `node_modules/`) は ExtraInputs に含まれない ( 利用者がローカルで生成する build artefact が cache を汚さない)。
 
@@ -56,7 +56,7 @@ toolresolver.Result{
         "packages/util/package.json",         // ← workspace transitive dep
         "packages/util/src/index.ts",
     },
-    Versions: []toolresolver.ToolVersion{
+    Versions: []toolresolver.ResolvedVersion{
         {Name: "lodash@4.17.21",      Source: "pnpm-local:@org/codegen", Version: "pnpm-deps:lodash@4.17.21"},
         {Name: "some-helper@1.2.3",   Source: "pnpm-local:@org/codegen", Version: "pnpm-deps:some-helper@1.2.3"},
     },
@@ -88,7 +88,7 @@ commands:
 
 - `gen` の inputs に pnpm-local 経由で `packages/codegen/**` の git-tracked ファイル ( + transitive workspace deps) が contribute される
 - src 編集 → ExtraInputs ( files_hash 経由) が変化 → gen の cache miss → cmd 再実行 → cmd 内の `pnpm build` が走り、 続いて `pnpm exec my-codegen`
-- 外部 npm dep ( lodash 等) の resolved version 変化 → tools_hash 変化 → gen 再実行
+- 外部 npm dep ( lodash 等) の resolved version 変化 → resolved_versions_hash 変化 → gen 再実行
 - ts-node / tsx で `bin: src/cli.ts` ( build 不要) なら cmd は `["pnpm", "exec", "my-ts-codegen"]` でよい ( ts-node が src を直接読む)
 
 build が必要かどうかは **cmd の中身次第** で、 sloff は知らない。 dist/src のような慣習名前を一切前提しない。
@@ -120,10 +120,10 @@ func (r *Resolver) Resolve(ctx context.Context, _ string, _ []string, declared *
     // 各 workspace dir で git-tracked ファイルを enumerate
     extraInputs := r.collectFiles(ctx, walk.Workspaces)
 
-    // 外部 deps を ToolVersion 化
-    versions := []toolresolver.ToolVersion{}
+    // 外部 deps を ResolvedVersion 化
+    versions := []toolresolver.ResolvedVersion{}
     for _, e := range walk.Externals {
-        versions = append(versions, toolresolver.ToolVersion{
+        versions = append(versions, toolresolver.ResolvedVersion{
             Name:    e,
             Source:  Name + ":" + pkg.Name,
             Version: DepsPrefix + e,

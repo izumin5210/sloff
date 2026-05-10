@@ -51,9 +51,12 @@ func Cmd(cmd []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Tools returns the SHA-256 digest of a sorted concatenation of tool version strings.
+// ResolvedVersions returns the SHA-256 digest of a sorted concatenation of
+// resolved version strings (covers user-declared tools, transitive Go module
+// pins, and transitive npm package pins — see ADR-0009 for the rename from
+// the older "tools" framing).
 // Sort is applied internally so that resolver dispatch order does not affect the digest.
-func Tools(versions []string) string {
+func ResolvedVersions(versions []string) string {
 	sorted := append([]string(nil), versions...)
 	sort.Strings(sorted)
 	h := sha256.New()
@@ -68,9 +71,9 @@ func Tools(versions []string) string {
 
 // Input combines the three component digests deterministically into the input_hash.
 // Components are taken as opaque hex strings; Input does not validate their format.
-func Input(filesHash, cmdHash, toolsHash string) string {
+func Input(filesHash, cmdHash, resolvedVersionsHash string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\n%s\n%s\n", filesHash, cmdHash, toolsHash)
+	fmt.Fprintf(h, "%s\n%s\n%s\n", filesHash, cmdHash, resolvedVersionsHash)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

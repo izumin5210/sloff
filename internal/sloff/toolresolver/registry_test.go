@@ -12,7 +12,7 @@ import (
 
 type fakeResolver struct {
 	name         string
-	versions     []toolresolver.ToolVersion
+	versions     []toolresolver.ResolvedVersion
 	extraInputs  []string
 	versionsErr  error
 	inputsErr    error
@@ -29,15 +29,15 @@ func (f *fakeResolver) Inputs(_ context.Context, _ string, declared *toolresolve
 	return f.extraInputs, f.inputsErr
 }
 
-func (f *fakeResolver) Versions(_ context.Context, _ string, declared *toolresolver.DeclaredTool) ([]toolresolver.ToolVersion, error) {
+func (f *fakeResolver) Versions(_ context.Context, _ string, declared *toolresolver.DeclaredTool) ([]toolresolver.ResolvedVersion, error) {
 	f.versionCalls++
 	f.lastDeclared = declared
 	return f.versions, f.versionsErr
 }
 
 func TestRegistry_VersionsRoutesToNamedResolver(t *testing.T) {
-	a := &fakeResolver{name: "a", versions: []toolresolver.ToolVersion{{Name: "a", Version: "vA"}}}
-	b := &fakeResolver{name: "b", versions: []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}}
+	a := &fakeResolver{name: "a", versions: []toolresolver.ResolvedVersion{{Name: "a", Version: "vA"}}}
+	b := &fakeResolver{name: "b", versions: []toolresolver.ResolvedVersion{{Name: "b", Version: "vB"}}}
 
 	reg := toolresolver.NewRegistry()
 	reg.Register(a)
@@ -48,7 +48,7 @@ func TestRegistry_VersionsRoutesToNamedResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}
+	want := []toolresolver.ResolvedVersion{{Name: "b", Version: "vB"}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
@@ -85,8 +85,8 @@ func TestRegistry_InputsDoesNotInvokeVersions(t *testing.T) {
 }
 
 func TestRegistry_MultipleDeclaredConcatenateVersionsInOrder(t *testing.T) {
-	a := &fakeResolver{name: "a", versions: []toolresolver.ToolVersion{{Name: "a", Version: "vA"}}}
-	b := &fakeResolver{name: "b", versions: []toolresolver.ToolVersion{{Name: "b", Version: "vB"}}}
+	a := &fakeResolver{name: "a", versions: []toolresolver.ResolvedVersion{{Name: "a", Version: "vA"}}}
+	b := &fakeResolver{name: "b", versions: []toolresolver.ResolvedVersion{{Name: "b", Version: "vB"}}}
 
 	reg := toolresolver.NewRegistry()
 	reg.Register(a)
@@ -98,7 +98,7 @@ func TestRegistry_MultipleDeclaredConcatenateVersionsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The result preserves the spec's tools[] order, not the registration order.
-	want := []toolresolver.ToolVersion{
+	want := []toolresolver.ResolvedVersion{
 		{Name: "b", Version: "vB"},
 		{Name: "a", Version: "vA"},
 	}

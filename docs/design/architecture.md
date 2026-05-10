@@ -9,6 +9,7 @@
 - [ADR-0006: sloff は buf を special-case しない](../adr/0006-no-buf-specific-resolver-or-preflight.md) (= 汎用プリミティブで完結させる)
 - [ADR-0007: sloff は外部依存専用 resolver を持たない](../adr/0007-no-external-dependency-resolver.md) (= 外部公開パッケージは script で吸収)
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
+- [ADR-0010: キャッシュレコード filename への timestamp prefix](../adr/0010-cache-record-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
@@ -24,7 +25,7 @@
 
 - **[ADR-0001](../adr/0001-cache-aware-codegen-orchestrator-decision.md)**: 既製品 ( Turborepo / Nx / Bazel / moonrepo / Pants) は「キャッシュ健全性 2 防御線」を満たさないため **自作する**
 - **[ADR-0002](../adr/0002-cache-hit-decision-model.md)**: cache hit 判定は **output-comparison** ( input_hash 一致 + record の output_hash と現状ツリーの output_hash 一致)
-- **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
+- **[ADR-0003](../adr/0003-record-storage-strategy.md)**: record は **git per-task per-input ファイル** で管理 (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb`)
 
 本 Design Doc はこれら 3 つの決定を所与として、 `sloff` の **全体アーキテクチャ** をまとめる。 各 distribution channel に対応する Resolver の詳細は別 doc に分割している ( 本 doc 冒頭の関連リンク参照)。
 
@@ -32,7 +33,7 @@
 
 - generator output は git 管理されている前提を採る ( typical な monorepo の運用)
 - ヒット判定は output-comparison 方式 ( record の output_hash と現状ツリーの output_hash を照合)
-- record は git 管理の per-task per-input ファイル (`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml`)
+- record は git 管理の per-task per-input ファイル (`.sloff/cache/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb`、 ADR-0010)
 - 開発者の OS は `darwin/arm64` / `linux/amd64` / `linux/arm64` のいずれかが基本対象。 Windows は対象外
 
 ### Goal
@@ -48,7 +49,7 @@
 - generator 自体の高速化 ( generator 本体の処理時間短縮)
 - Windows 対応
 - watch モード ( 初版では非対応)
-- record の `schema_version` 移行戦略 ( 初版は schema_version 1 固定、 将来 schema を変える必要が生じた段階で別途検討)
+- record の `schema_version` 跨ぎの後方互換読み込み ( 異なる schema_version の record を同じバイナリで両対応する経路は実装しない、 ADR-0009)。 wire-incompatible な変更が発生した場合は proto package を `sloff.cache.v2` に切り出す運用
 - 環境構築タスク ( パッケージマネージャの install 等) のオーケストレーション。 sloff は「pure な代入関数 ( inputs → outputs) としての generator」だけを扱い、 副作用が大きい install タスクは利用者の Makefile / shell スクリプト側に委ねる
 
 ## 要件
@@ -68,7 +69,7 @@
 
 - 単一バイナリ `sloff` ( Go 製) として実装
 - spec ファイル形式は `sloff.yml` ( spec dir 単位で 1 ファイル)
-- record は `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` に git 管理で配置
+- record は `.sloff/cache/<spec_relpath>/<task_id>/<initial_creation_timestamp>-<input_hash>.pb` に git 管理で配置 (protobuf binary、 ADR-0009 / ADR-0010)
 - record は **input hash → output hash + output ファイル一覧** の mapping のみ ( artifact は含まない)
 - cache hit 判定は **output-comparison** ( ADR-0002): record を input_hash で引き、 record の output_hash と現状ツリーの output_hash が一致したら skip
 - ツール invalidate は **OS 非依存な論理 version 文字列** を入力源別に取得して実現:
@@ -80,18 +81,20 @@
 
 ```mermaid
 flowchart TD
-    START["sloff run task"] --> CALC["input_hash 計算<br/>= hash(files_hash, cmd_hash, tools_hash)"]
+    START["sloff run task"] --> CALC["input_hash 計算<br/>= hash(files_hash, cmd_hash, resolved_versions_hash)"]
     CALC --> LOOKUP{"record (input_hash) 存在?"}
     LOOKUP -- No --> RUN1["generator 実行"]
     LOOKUP -- Yes --> SCAN["record の output.files を<br/>現在の作業ツリーから読み込み<br/>output_hash 再計算"]
     SCAN --> CMP{"output_hash<br/>== record.output.hash?"}
     CMP -- Yes --> SKIP["SKIP (cache hit)"]
     CMP -- No --> RUN2["generator 実行"]
-    RUN1 --> WRITE["record 書き込み<br/>(deterministic YAML)"]
+    RUN1 --> WRITE["record 書き込み<br/>(deterministic protobuf, write-skip)"]
     RUN2 --> WRITE
     WRITE --> DONE["done"]
     SKIP --> DONE
 ```
+
+> **filename layout (ADR-0010)**: 同 `(spec, task, input_hash)` Key の record は `{YYYYMMDDHHMMSSsss}-{input_hash}.pb` という timestamp prefix 付き filename で保存される。 timestamp は **そのファイルの initial creation 時刻** で in-place 上書きでも保持される。 path uniqueness で別 branch 独立 first-write の衝突を構造的に回避する。 Load は同 hash の最新 timestamp を返す ( deterministic generator 前提下で複数 record は意味的に等価)。
 
 ### spec ファイル形式
 
@@ -134,63 +137,79 @@ commands:
 ```
 <repo_root>/
 └── .sloff/cache/
-    └── <spec_relpath>/             # spec dir からの相対パス ( ディレクトリ階層をそのまま展開)
-        └── <task_id>/              # spec.commands[*].name の slug
-            └── <input_hash>.yml    # 1 ファイル = 1 record
+    └── <spec_relpath>/                                # spec dir からの相対パス ( ディレクトリ階層をそのまま展開)
+        └── <task_id>/                                 # spec.commands[*].name の slug
+            └── <YYYYMMDDHHMMSSsss>-<input_hash>.pb    # 1 ファイル = 1 record (protobuf binary, ADR-0009 / ADR-0010)
 ```
 
-例: `path/to/spec/sloff.yml` の `protoc-gen-go` タスクの場合
+例: `path/to/spec/sloff.yml` の `protoc-gen-go` タスクが `2026-05-10 12:34:56.789 UTC` に initial 作成された場合
 
 ```
-.sloff/cache/path/to/spec/protoc-gen-go/3f9a1c....yml
+.sloff/cache/path/to/spec/protoc-gen-go/20260510123456789-3f9a1c....pb
 ```
+
+filename 構造:
+
+- prefix `YYYYMMDDHHMMSSsss` (17 桁固定) は **initial creation 時刻** を millisecond 精度で表現。 lexicographic 順 = chronological 順 ([ADR-0010](../adr/0010-cache-record-filename-timestamp-prefix.md))
+- `-` 1 文字で prefix と input_hash を区切る
+- 同 input への in-place 上書き時に prefix は変わらない ( disambiguator ではなく path-level nonce)
+- 異 branch で同 input を independently に initial 作成すると別 prefix の別 file になり、 git merge は両方を共存させる ( R5 を path uniqueness で構造的に担保)
+- 通常運用時は Key あたり 1 ファイル。 merge 直後だけ複数併存し、 GC で 1 件に収斂する
 
 `spec_relpath` は階層を verbatim に保持する ( `"/"` を `"_"` 等に置換しない)。これにより `Storage.List` が record パスから `spec_relpath` をロスレスに復元でき、 spec dir 名にアンダースコアを含むケースでも識別が破綻しない。
 
-#### YAML schema
+#### Schema (protobuf)
 
-```yaml
-# .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml
-schema_version: 1
-spec:
-  dir: path/to/spec
-  task_id: protoc-gen-go
-  cmd: "buf generate --template buf.gen.yaml"
-input:
-  hash: 3f9a1c...                       # ファイル名と一致 (self-describing)
-  components:
-    files_hash: a1b2...                 # inputs glob にマッチしたファイル群の SHA256
-    cmd_hash: c3d4...                   # cmd 文字列の SHA256
-    tools_hash: e5f6...                 # OS 横断 invalidate 戦略で詳述する論理 version の sorted concat の SHA256
-output:
-  hash: 7e2b...                         # outputs glob にマッチしたファイル群の SHA256
-  files:                                # path → SHA256 (path 昇順)
-    path/to/spec/foo.pb.go: 11aa...
-    path/to/spec/bar.pb.go: 22bb...
-generator_version_snapshot:             # 情報用。hash 計算には含めない
-  - name: buf
-    version: 1.30.0
-    source: aqua.yaml
-  - name: protoc-gen-go
-    version: v1.34.2
-    source: go.mod
-generated_at: 2026-05-05T12:34:56Z      # 情報用。hash 計算には含めない
+record の wire schema は [`proto/sloff/cache/v1/cache.proto`](../../proto/sloff/cache/v1/cache.proto) が SSoT。 generated Go code は `internal/proto/sloff/cache/v1/cache.pb.go` ( package `cachev1`)。
+
+論理構造を JSON 表記で示すと:
+
+```json
+// .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb (decoded via `sloff cache show`)
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "path/to/spec",
+    "task_id": "protoc-gen-go",
+    "cmd": "buf generate --template buf.gen.yaml"
+  },
+  "input": {
+    "hash": "3f9a1c...",                  // ファイル名の hash 部と一致 (self-describing)
+    "files_hash": "a1b2...",              // inputs glob にマッチしたファイル群の SHA256
+    "cmd_hash": "c3d4...",                // cmd 文字列の SHA256
+    "resolved_versions_hash": "e5f6...",  // OS 横断 invalidate 戦略で詳述する論理 version の sorted concat の SHA256
+    "resolved_versions": [                // hash 入力 + informational detail を 1 箇所に統合
+      { "name": "buf",            "version": "script:buf@1.30.0",                  "source": "script:buf" },
+      { "name": "protoc-gen-go",  "version": "go-deps:.../protobuf@v1.34.2+sum:...", "source": "go-local:./cmd/..." }
+    ]
+  },
+  "output": {
+    "hash": "7e2b...",
+    "files": [
+      { "path": "path/to/spec/bar.pb.go", "hash": "22bb..." },
+      { "path": "path/to/spec/foo.pb.go", "hash": "11aa..." }
+    ]
+  }
+  // initial creation 時刻は filename prefix が担う ( ADR-0010)。
+  // schema レベルに wall-clock field は持たない ( wire bytes が input から完全 deterministic に派生)。
+}
 ```
 
 #### Deterministic ordering 規約 ( R2)
 
-- YAML key は alphabetical 固定順 ( `goccy/go-yaml` の struct field 宣言順出力を利用するため、 Go struct 側の field 順を alphabetical に揃える)
-- `output.files` および `generator_version_snapshot` は path / name 昇順
-- `generated_at` / `generator_version_snapshot` は人間可読性のためだけに保持し、 hash 計算には絶対に含めない
-- ファイル末尾は LF 1 個で終端
+- proto wire format は `proto.MarshalOptions{Deterministic: true}` で encode する (`internal/sloff/cache/record.go` の `Marshal` が単一の呼び出し点)
+- `output.files` ( `repeated FileEntry`) は path 昇順、 `input.resolved_versions` ( `repeated ResolvedVersion`) は name 昇順で marshal 前に sort
+- `input.resolved_versions[*].source` は人間可読性のためだけに保持し、 hash 計算には絶対に含めない (initial creation 時刻は filename prefix が担う、 ADR-0010)
+- runner は `Storage.Save` の前に既存 record を load し、 `output.hash` および `output.files` の (path, hash) 集合が一致するなら **書き戻しをスキップ** する ( ADR-0009 §"byte stability の担保")。 これにより proto runtime の minor / patch upgrade 由来の bit-level drift が git diff に現れない
+- 別 branch 独立 first-write 同士の競合は filename への timestamp prefix で構造的に解消されている ( ADR-0010)。 上記書き戻しスキップは proto runtime micro drift / informational field drift への safety net として残る
 
 #### Cache lookup アルゴリズム
 
 ```go
 func runTask(spec CmdSpec) error {
     inputHash := computeInputHash(spec)
-    recordPath := recordPath(spec, inputHash) // .sloff/cache/<dir>/<task>/<hash>.yml
-    if record, ok := loadRecord(recordPath); ok {
+    // Storage 実装が <dir>/<task>/*-<hash>.pb を listing し最新 timestamp を返す ( ADR-0010)
+    if record, ok := loadRecord(spec, inputHash); ok {
         currentOutputHash, err := hashOutputsOnDisk(record.Output.Files)
         if err == nil && currentOutputHash == record.Output.Hash {
             return nil // cache hit (ADR-0002: output-comparison)
@@ -199,6 +218,7 @@ func runTask(spec CmdSpec) error {
     if err := runGenerator(spec); err != nil {
         return err
     }
+    // Save 内部で existing *-<hash>.pb を listing → 0 件なら新規 / 1+ 件なら最古に collapse + 上書き
     return writeRecord(spec, inputHash)
 }
 
@@ -206,7 +226,7 @@ func computeInputHash(spec CmdSpec) string {
     return sha256Concat(
         hashFiles(globMatches(spec.Inputs)),         // files_hash
         sha256(strings.Join(spec.Cmd, " ")),         // cmd_hash
-        toolsHash(spec),                             // tools_hash
+        toolsHash(spec),                             // resolved_versions_hash
     )
 }
 ```
@@ -230,10 +250,14 @@ type Storage interface {
     // Name は backend 識別子 (例: "local", "s3", "hybrid")
     Name() string
 
-    // Load は key に対応する record を取得する。 見つからなければ (nil, false, nil)
+    // Load は key に対応する record を取得する。 見つからなければ (nil, false, nil)。
+    // 同 key で複数 file が併存した場合 ( ADR-0010 §merge 直後の併存状態)、 最新 timestamp の
+    // record を返す。 deterministic generator 前提下で複数 record は意味的に等価のため arbitrary 選択。
     Load(ctx context.Context, key Key) (*Record, bool, error)
 
-    // Save は record を永続化する ( deterministic YAML エンコード)
+    // Save は record を永続化する ( deterministic protobuf エンコード、 ADR-0009)。
+    // filename への timestamp prefix 付与 ( ADR-0010) は実装内部の責務で、 外部からは
+    // 3-tuple Key で書き込む。 同 Key が複数 file を持っていた場合は最古を残して collapse する。
     Save(ctx context.Context, key Key, record *Record) error
 
     // Delete は record を削除する ( GC で使用)
@@ -258,7 +282,7 @@ type ListFilter struct {
 
 組み込み実装 ( 初版):
 
-- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
+- **`LocalStorage`** ( ADR-0003 で採用): `.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb` にローカルファイルとして書き出す。 git 管理は backend の責務外で、 利用者が monorepo 運用上 commit する想定 ( ADR-0003 参照)
 
 将来追加候補 ( 必要が生じた段階で対応):
 
@@ -302,7 +326,7 @@ SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
 
 #### 採用: 論理 version 文字列を resolver で取得
 
-ツール identifier から、 distribution channel 別の resolver で **OS 非依存な論理 version 文字列** を取得する。 複数ツールを使う cmd では各 version を sorted concat → SHA256 して `tools_hash` とする。
+ツール identifier から、 distribution channel 別の resolver で **OS 非依存な論理 version 文字列** を取得する。 複数ツールを使う cmd では各 version を sorted concat → SHA256 して `resolved_versions_hash` とする。
 
 各 channel の resolver は独立 doc にまとめている ( 本 doc 冒頭の関連リンク参照)。 概要だけ表で示す:
 
@@ -314,8 +338,8 @@ SLOFF_CACHE_BACKEND=s3 SLOFF_S3_BUCKET=sloff-cache-prod sloff run ...
 | Channel | Resolver Name | 取得元 | preflight | 詳細 doc |
 |---|---|---|---|---|
 | prebuilt binary ( nix / mise / aqua 等の version manager 配布物 / `go tool` 経由 / `pnpm exec` 経由 / その他 `--version` 持ちバイナリ) | `script` | spec で宣言された `exec` の stdout (任意で `extract` regex) | 不要 | [resolver-script.md](./resolver-script.md) |
-| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を tools_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
-| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で tools_hash に注入 | 必要 ( install drift: `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致。 build / run は cmd 責務 — ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
+| Go 内製 ソース ( repo local main package) | `go-local` | `go/packages` 経由の transitive 依存。 内部 .go ファイルを ExtraInputs として inputs に contribute + 外部 module の `<path>@<version>+sum:<go.sum-sha>` を resolved_versions_hash に注入 | 不要 ( ソース解析が実 build 経路の存在確認も兼ねる) | [resolver-go-local.md](./resolver-go-local.md) |
+| pnpm 内製 ソース ( workspace 内 local package) | `pnpm-local` | git-tracked + transitive workspace dep ( link:) の git-tracked ファイル ( `git ls-files`) を ExtraInputs として inputs に contribute + 外部 npm dep ( `pnpm-lock.yaml` snapshots BFS) を `pnpm-deps:<pkg>@<version>` で resolved_versions_hash に注入 | 必要 ( install drift: `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致。 build / run は cmd 責務 — ADR-0008 D7) | [resolver-pnpm-local.md](./resolver-pnpm-local.md) |
 | その他 (シェル等) | — | 専用 resolver なし。 spec で `inputs` に当該スクリプトを含める運用 | — | — |
 
 `buf generate` のような複合 generator も専用 resolver は持たない ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))。 spec.inputs に `buf.gen.yaml` / `buf.yaml` / `buf.lock` を含めて files_hash で invalidate を成立させ、 buf 本体や local plugin の version は script resolver で個別に declare する運用。
@@ -331,7 +355,7 @@ flowchart LR
     GOLOC --> CACHE
     PNPMLOC --> CACHE
     CACHE --> COMBINE["combine per task ( commands[*].tools の順)"]
-    COMBINE --> CONCAT["sorted concat &<br/>SHA256 → tools_hash"]
+    COMBINE --> CONCAT["sorted concat &<br/>SHA256 → resolved_versions_hash"]
     COMBINE --> INPUTS["fold ExtraInputs into<br/>task.inputs → files_hash"]
 ```
 
@@ -407,7 +431,7 @@ buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight
 - **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
 - **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 cache record は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 
-代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `tools_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
+代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `resolved_versions_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
 
 ### resolver / preflight の拡張性 (interface 設計)
 
@@ -436,12 +460,12 @@ type Resolver interface {
     // nil を返す。
     Inputs(ctx context.Context, specDir string, declared *DeclaredTool) ([]string, error)
 
-    // Versions は tools_hash に乗る OS 非依存な ToolVersion 集合を返す。
+    // Versions は resolved_versions_hash に乗る OS 非依存な ResolvedVersion 集合を返す。
     // Inputs しか contribute しない resolver ( 現状なし) は nil を返す。
-    Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ToolVersion, error)
+    Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ResolvedVersion, error)
 }
 
-type ToolVersion struct {
+type ResolvedVersion struct {
     Name    string // 表示用 (例: "buf")
     Version string // 論理 version 文字列 (例: "v1.30.0", "sha256:abcd...")
     Source  string // 取得元 (例: "<bin> --version", "go.mod", "pnpm-local:@org/my-codegen")
@@ -468,7 +492,7 @@ func (r *Registry) Register(rs Resolver) { /* ... */ }
 // 対応する Resolver メソッドを呼んだ結果を declared 順で concatenate する。
 // declared が空の経路は spec.validate ( ADR-0004 D1) で弾かれているため到達しない。
 func (r *Registry) Inputs(ctx context.Context, specDir string, declared []DeclaredTool) ([]string, error)
-func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ToolVersion, error)
+func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ResolvedVersion, error)
 ```
 
 新 channel ( 例: 既存と異なる lockfile-based エコシステム) を追加するときは、 対応 `Resolver` を実装し `Registry.Register` で登録するだけで済む。 prebuilt binary 系の追加対応は基本 `scriptResolver` で吸収できるため、 新 Resolver の追加は本質的に新しい lockfile / 新しい source-hash 戦略を必要とするケースに限られる。
@@ -591,7 +615,7 @@ sloff のキャッシュが信頼できる前提は、 **「generator は spec �
 
 #### invalidate チェーン
 
-invalidate チェーンの実装は、 **「上流 task の最新 output hash を、 下流 task の `tools_hash` 隣に sorted concat で混ぜる」** ことで自然に成立する。 上流のいずれかの output が変われば下流の `input.hash` も変わり、 別の record ファイルを引くため、 明示的な force フラグなどは不要 ( record の不一致で自動的に miss する)。
+invalidate チェーンの実装は、 **「上流 task の最新 output hash を、 下流 task の `resolved_versions_hash` 隣に sorted concat で混ぜる」** ことで自然に成立する。 上流のいずれかの output が変われば下流の `input.hash` も変わり、 別の record ファイルを引くため、 明示的な force フラグなどは不要 ( record の不一致で自動的に miss する)。
 
 #### 実装上の留意点
 
@@ -615,7 +639,7 @@ invalidate チェーンの実装は、 **「上流 task の最新 output hash �
 per-task per-input ファイル方式では record が累積する。 容量見積りは保守的に試算しても、 `1 record ≒ 2KB × タスク数 200 × 並走世代 10 ≒ 4MB` 程度に収まる見込み。 ただし長期運用では掃除機構が必要。 4 段で提供する:
 
 - **CI nightly sweep**: GitHub Actions の scheduled job で、 git mtime が直近 90 日以内に触れられていない record を列挙し、 削除 PR を bot 投稿する
-- **`sloff cache gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる
+- **`sloff cache gc` サブコマンド**: 同一 task 配下の record 数が閾値 ( デフォルト 50) を超えたら mtime 古い順に削除。 手元で生成後に実行できる。 **同 input_hash に対して複数 timestamp の record が併存した場合は、 最古 timestamp の 1 件に collapse する処理も担う ( ADR-0010 §duplicate collapse の責務)**
 - **task rename / 削除コミットでの自動削除**: lefthook / pre-commit hook に「 spec を変更/削除する diff があれば、 対応する `.sloff/cache/<spec_dir>/<task_id>/` も削除する」step を追加
 - **長期的オプション ( 本 Doc スコープ外)**: record 容量が想定を超えたら git LFS 化、 または Hybrid ( ADR-0003 Option E) への拡張余地は残す
 
@@ -636,7 +660,7 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 
 ```
 .sloff/cache/                             # ★ cache record root (利用者リポジトリ側に作成)
-  <spec_relpath>/<task_id>/<input_hash>.yml
+  <spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb
 
 # sloff 自身のコードベース ( github.com/izumin5210/sloff):
 cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff cache gc` 等)
@@ -657,7 +681,7 @@ internal/sloff/
     #   hybrid/hybrid.go     (HybridStorage, ADR-0003 Option E)
     #   memory/memory.go     (MemoryStorage, テスト用)
   toolresolver/                             # ★ Resolver interface + Registry
-    resolver.go                             # Resolver interface, ToolVersion 型
+    resolver.go                             # Resolver interface, ResolvedVersion 型
     registry.go                             # Registry (byName + dispatch order)
     script/                                 # ★ 各 Resolver は独立 Go package
       script.go                             # package script (prebuilt binary 全般、 詳細は resolver-script.md)

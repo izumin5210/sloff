@@ -123,7 +123,7 @@ func TestGoPackages_IncludesIgnoredFilesForBuildTagSources(t *testing.T) {
 // TestGoPackages_IncludesOtherFiles guards that non-Go source files reported
 // by packages.Package.OtherFiles (.s / .c / .cc / .syso) are also folded into
 // the hash. `go run` rebuilds when these files change, so omitting them would
-// let edits to assembly or cgo sources pass without invalidating tools_hash.
+// let edits to assembly or cgo sources pass without invalidating resolved_versions_hash.
 func TestGoPackages_IncludesOtherFiles(t *testing.T) {
 	requireGo(t)
 	root := t.TempDir()

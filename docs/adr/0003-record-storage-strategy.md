@@ -40,7 +40,7 @@
 
 ### Option A: git に per-task per-input ファイル (採用)
 
-`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.yml` の 1 ファイル / 1 record で git 管理する。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
+`.sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb` の 1 ファイル / 1 record で git 管理する ( 拡張子と直列化 format は ADR-0009 で proto binary に確定)。 record は input_hash → output_hash + output ファイル一覧の mapping のみ ( artifact は含まない)。
 
 👍 **Pros**
 
@@ -52,7 +52,7 @@
 👎 **Cons**
 
 - record が累積する。 GC 機構が別途必要 (R6)
-- record 自体は YAML の hash 値とパス羅列で **人間がレビューすべきフォーマットではない** ため、 PR diff にとってはノイズになる側面がある (PR template や `.gitattributes` の `linguist-generated` で diff 抑制する等の緩和は可能)
+- record 自体は **人間がレビューすべきフォーマットではない**。 PR diff / grep / エディタ search index に対するノイズは ADR-0009 で proto binary 化することで format レベルで opaque にしたが、 PR diff の collapsed 表示は別途 `.gitattributes` の `linguist-generated` 指定が必要
 - record ファイル数の増加に伴う `git status` / `git add` のスループットは将来的に再評価の余地
 
 ### Option B: 単一 hash ファイル
@@ -134,12 +134,16 @@ git に小さな mapping (record) を持ち、 artifact を S3 に置く。
    - C の主たるメリットは「PR diff にノイズが現れない」「容量無制限」だが、 一般的 monorepo 規模ではどちらも決定的ではない
 5. **結果、 A の素朴さ ( git pull で完結、 ネットワーク不要、 外部 infra ゼロ) が、 一般的 monorepo の規模と運用フローに最も適合する**
 
-PR ノイズの懸念 (A の Cons) については、
+PR ノイズ / grep ノイズの懸念 (A の Cons) については、 二段階で緩和する:
 
+- record 直列化を proto binary にする ( ADR-0009)。 これにより grep / 各種エディタ search index / file indexer に対して **format レベルで opaque** になり、 ツール別の ignore 設定配布が不要になる
 - `.sloff/cache/**` を `.gitattributes` で `linguist-generated` 指定し、 GitHub PR diff の default collapsed にする
+- `git config diff.sloff-cache.textconv "sloff cache show"` を README で案内し、 ローカル `git diff` では decode 後の内容が見えるようにする
 - PR template に「`.sloff/cache/` 配下の差分は人間レビュー対象外」と明記する
 
 で運用上緩和する。
+
+R5 (コンフリクト無し) の達成手段は本 ADR 採用時点では「物理的なファイル分割」 を意図していたが、 ADR-0009 で proto binary 化した結果、 **同 input に対する別 branch 独立 first-write 同士で `generated_at` 等の壁時計依存 field が drift して同 filename で byte 競合する経路** が残っていた。 これは [ADR-0010](./0010-cache-record-filename-timestamp-prefix.md) で filename に timestamp prefix を導入することで構造的に解消され、 R5 の達成手段は **path uniqueness を primary** とする形に格上げされている。
 
 ## Consequences
 
@@ -156,7 +160,7 @@ PR ノイズの懸念 (A の Cons) については、
   - CI nightly sweep で古い record の削除 PR を bot 投稿
   - `sloff cache gc` サブコマンドで同一 task 配下の record を mtime 古い順に削除
   - lefthook / pre-commit hook で task rename / 削除コミット時に対応 record も削除
-- record 差分が PR diff に現れるため、 `linguist-generated` 等のノイズ抑制設定が必要
+- record 差分が PR diff に現れるため、 `linguist-generated` の diff collapsed 設定 + `sloff cache show` textconv 等のノイズ抑制設定が必要 ( ADR-0009 で format-level opacity を確保した上で、 PR レビューでの折りたたみは別レイヤで対応)
 - record ファイル数の増加に伴う git operations のスループットは将来的に再評価
 - 容量が想定を超えた場合、 もしくは将来 artifact 共有が必要になった場合は Hybrid (Option E) への拡張余地を残す
 

@@ -209,9 +209,9 @@ func TestResolver_InternalFilesBecomeExtraInputs(t *testing.T) {
 }
 
 // TestResolver_ExternalModulesBecomeGoDepsVersions is the contract test for
-// the tools_hash side: each external module surfaces as one ToolVersion of
+// the resolved_versions_hash side: each external module surfaces as one ResolvedVersion of
 // the canonical form `go-deps:<path>@<version>+sum:<digest>`. Without the
-// per-module emission, dep bumps would not invalidate tools_hash and stale
+// per-module emission, dep bumps would not invalidate resolved_versions_hash and stale
 // runs could leak through.
 func TestResolver_ExternalModulesBecomeGoDepsVersions(t *testing.T) {
 	stub := &fakeLister{listing: lister.Listing{
@@ -243,7 +243,7 @@ func TestResolver_ExternalModulesBecomeGoDepsVersions(t *testing.T) {
 
 // TestResolver_GoSumDriftFlipsDepsVersion guards the cryptographic-anchor
 // invariant: same path@version with a different go.sum line must produce a
-// different ToolVersion string (otherwise replaced/republished modules would
+// different ResolvedVersion string (otherwise replaced/republished modules would
 // silently reuse the cache).
 func TestResolver_GoSumDriftFlipsDepsVersion(t *testing.T) {
 	listing := func(sum string) lister.Listing {

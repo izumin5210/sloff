@@ -48,13 +48,13 @@ func (r *Registry) Inputs(ctx context.Context, specDir string, declared []Declar
 	return out, nil
 }
 
-// Versions concatenates every declared tool's ToolVersion contribution in the
+// Versions concatenates every declared tool's ResolvedVersion contribution in the
 // order they appear in declared. Same empty-slice contract as Inputs.
-func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ToolVersion, error) {
+func (r *Registry) Versions(ctx context.Context, specDir string, declared []DeclaredTool) ([]ResolvedVersion, error) {
 	if len(declared) == 0 {
 		return nil, fmt.Errorf("toolresolver: empty tools[] declaration (spec validation should have caught this)")
 	}
-	var out []ToolVersion
+	var out []ResolvedVersion
 	for i := range declared {
 		d := &declared[i]
 		res, ok := r.byName[d.Resolver]

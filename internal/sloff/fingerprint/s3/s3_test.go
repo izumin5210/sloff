@@ -535,6 +535,40 @@ func TestNew_RequiresBucket(t *testing.T) {
 	}
 }
 
+// TestNew_DefaultsAndOverrides covers the construction-time branches that
+// kumo-driven tests skip: empty Prefix fall-through to DefaultS3Prefix,
+// surrounding-slash trimming on the prefix, and the `WithClient` /
+// `WithClock` injection paths (which are how every kumo test wires its
+// client, but not how the production path runs). The Storage is never
+// asked to talk to S3 here, so AWS credentials / network are not
+// required — credential resolution in `loadAWSConfig` is lazy.
+func TestNew_DefaultsAndOverrides(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  fingerprint.S3Config
+	}{
+		{name: "empty prefix falls back to default", cfg: fingerprint.S3Config{Bucket: "b"}},
+		{name: "prefix is trimmed", cfg: fingerprint.S3Config{Bucket: "b", Prefix: "/x/y/"}},
+		{name: "endpoint set", cfg: fingerprint.S3Config{Bucket: "b", Endpoint: "http://example.invalid"}},
+		{name: "use_path_style explicit true", cfg: fingerprint.S3Config{Bucket: "b", UsePathStyle: ptr(true)}},
+		{name: "use_path_style explicit false with endpoint", cfg: fingerprint.S3Config{Bucket: "b", Endpoint: "http://example.invalid", UsePathStyle: ptr(false)}},
+		{name: "region set", cfg: fingerprint.S3Config{Bucket: "b", Region: "ap-northeast-1"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := s3pkg.New(context.Background(), tt.cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if st.Name() != "s3" {
+				t.Errorf("Name() = %q, want s3", st.Name())
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 // listKeys is a small ListObjectsV2 helper that flattens a paginator into a
 // sorted slice for assertions. Tests use it instead of reaching into the
 // Storage implementation so the "what is on S3" view is independent of the

@@ -796,11 +796,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 
 	key := fingerprint.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
 	taskLabel := taskLabel(t)
-	hit, existing, paths, err := r.cacheLookup(ctx, key)
+	hit, existing, paths, err := r.fingerprintLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
 	}
-	span.SetAttributes(attribute.Bool("sloff.cache.hit", hit))
+	span.SetAttributes(attribute.Bool("sloff.fingerprint.hit", hit))
 	if hit {
 		if err := r.recordProducedPaths(taskLabel, paths); err != nil {
 			return err
@@ -867,13 +867,13 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		return nil
 	}
 
-	if err := r.cacheStore(ctx, key, newRec); err != nil {
+	if err := r.fingerprintStore(ctx, key, newRec); err != nil {
 		return fmt.Errorf("%s: save record: %w", t.Name, err)
 	}
 	return nil
 }
 
-// cacheLookup wraps Storage.Load with a runner.cache.load span. Returns
+// fingerprintLookup wraps Storage.Load with a runner.fingerprint.load span. Returns
 // (hit, existing, paths, err) where:
 //   - hit=true only when a record exists AND its output files still hash to
 //     the recorded value; paths is the recorded output paths so the caller
@@ -882,14 +882,14 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 //     was loaded (the caller uses it for the post-exec write-skip check
 //     against the freshly-built record's output identity).
 //
-// The span's sloff.cache.state attribute distinguishes hit / stale /
+// The span's sloff.fingerprint.state attribute distinguishes hit / stale /
 // not_found / error so trace consumers can analyse cache health without
 // re-running.
-func (r *Runner) cacheLookup(ctx context.Context, key fingerprint.Key) (hit bool, existing *fingerprintv1.Record, paths []string, err error) {
-	_, span := r.tracer.Start(ctx, "runner.cache.load")
+func (r *Runner) fingerprintLookup(ctx context.Context, key fingerprint.Key) (hit bool, existing *fingerprintv1.Record, paths []string, err error) {
+	_, span := r.tracer.Start(ctx, "runner.fingerprint.load")
 	defer func() {
 		if err != nil {
-			span.SetAttributes(attribute.String("sloff.cache.state", "error"))
+			span.SetAttributes(attribute.String("sloff.fingerprint.state", "error"))
 		}
 		endSpan(span, &err)
 	}()
@@ -900,23 +900,23 @@ func (r *Runner) cacheLookup(ctx context.Context, key fingerprint.Key) (hit bool
 		return false, nil, nil, err
 	}
 	if !ok {
-		span.SetAttributes(attribute.String("sloff.cache.state", "not_found"))
+		span.SetAttributes(attribute.String("sloff.fingerprint.state", "not_found"))
 		return false, nil, nil, nil
 	}
 	candidate := fingerprint.FilePaths(rec.GetOutput().GetFiles())
 	current, hashErr := hash.Files(r.opts.RepoRoot, candidate)
 	if hashErr == nil && current == rec.GetOutput().GetHash() {
-		span.SetAttributes(attribute.String("sloff.cache.state", "hit"))
+		span.SetAttributes(attribute.String("sloff.fingerprint.state", "hit"))
 		return true, rec, candidate, nil
 	}
-	span.SetAttributes(attribute.String("sloff.cache.state", "stale"))
+	span.SetAttributes(attribute.String("sloff.fingerprint.state", "stale"))
 	return false, rec, nil, nil
 }
 
-// cacheStore wraps Storage.Save with a runner.cache.save span tagged with the
+// fingerprintStore wraps Storage.Save with a runner.fingerprint.save span tagged with the
 // output file count.
-func (r *Runner) cacheStore(ctx context.Context, key fingerprint.Key, rec *fingerprintv1.Record) (err error) {
-	_, span := r.tracer.Start(ctx, "runner.cache.save", trace.WithAttributes(
+func (r *Runner) fingerprintStore(ctx context.Context, key fingerprint.Key, rec *fingerprintv1.Record) (err error) {
+	_, span := r.tracer.Start(ctx, "runner.fingerprint.save", trace.WithAttributes(
 		attribute.Int("sloff.output.file_count", len(rec.GetOutput().GetFiles())),
 	))
 	defer endSpan(span, &err)

@@ -127,6 +127,8 @@ binary だが schema 強制 / 公式 breaking 検出ツールが proto と比べ
 
 ### byte stability の担保
 
+> **Note**: 本節の write-skip ルール (#4) は本 ADR 確定時点で R5 (コンフリクト無し) の達成に必須の構成要素だったが、 [ADR-0010](./0010-cache-record-filename-timestamp-prefix.md) で filename に timestamp prefix を導入したことで R5 の primary 達成手段は **path uniqueness** に移行している。 write-skip ルールは proto runtime micro drift / informational field drift の救済として残るが、 別 branch 独立 first-write の衝突回避は filename 構造で構造的に守られる。 ADR-0010 ではこの整理を踏まえて `generated_at` field を schema から削除している (schema_version V2 → V3)。
+
 proto wire format はデフォルトで決定論的でない (`proto.Marshal` は map 順序や unknown field 順序が実装依存)。 git にコミットする record で byte stability を保つために、 以下を **規約として固める**:
 
 1. **`protoc-gen-go` / `google.golang.org/protobuf` を `go.mod` で pin**。 既存 `tool ( ... )` ブロック ( gofumpt / lefthook と同じ機構) に追加し、 `go tool buf generate` で再現可能に codegen する
@@ -164,6 +166,8 @@ binary 化で失う inspect 容易性を、 同 PR で以下のサブコマン�
 ### File 拡張子
 
 `.yml` → `.pb` に変更する。 `linguist-generated` 設定は `.sloff/cache/**` 配下の `*.pb` 全体を対象にできるよう `.gitattributes` を更新する。
+
+> **Update (ADR-0010)**: 本 ADR 確定時の filename は `<input_hash>.pb` だったが、 [ADR-0010](./0010-cache-record-filename-timestamp-prefix.md) で `<initial_creation_timestamp>-<input_hash>.pb` に拡張された。 拡張子 `.pb` は不変。
 
 ## Consequences
 

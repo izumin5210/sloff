@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cachev1 "github.com/izumin5210/sloff/internal/proto/sloff/cache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/cache"
@@ -123,7 +122,7 @@ func TestRunCacheShow_HappyPath(t *testing.T) {
 	if err := runCacheShow(&out, p); err != nil {
 		t.Fatalf("runCacheShow: %v", err)
 	}
-	for _, want := range []string{`"schema_version": "SCHEMA_VERSION_V2"`, `"task_id": "copy"`, `"hash": "deadbeef"`} {
+	for _, want := range []string{`"schema_version": "SCHEMA_VERSION_V3"`, `"task_id": "copy"`, `"hash": "deadbeef"`} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
@@ -224,10 +223,10 @@ func TestExitCodeError(t *testing.T) {
 }
 
 // TestRunCacheDiff_IgnoresInformationalFieldDrift covers the "semantic" promise
-// of `sloff cache diff`: differences that ADR-0009 marks as informational
-// (generated_at, resolved_versions[*].source) must not change the exit code
-// or produce a diff because they do not feed into the cache hash and the
-// runner's write-skip rule already preserves their first-observed value.
+// of `sloff cache diff`: drift in fields ADR-0009 marks as informational
+// (resolved_versions[*].source) must not change the exit code or produce a
+// diff. ADR-0010 dropped the previous generated_at drift case from this
+// guarantee by removing the field entirely.
 func TestRunCacheDiff_IgnoresInformationalFieldDrift(t *testing.T) {
 	dir := t.TempDir()
 
@@ -248,14 +247,11 @@ func TestRunCacheDiff_IgnoresInformationalFieldDrift(t *testing.T) {
 				Hash:  "out",
 				Files: []*cachev1.FileEntry{{Path: "a.txt", Hash: "h-a"}},
 			},
-			GeneratedAt: timestamppb.New(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)),
 		}
 	}
 
 	a := base()
 	b := base()
-	// generated_at drift: same cache identity, later first-observed time.
-	b.GeneratedAt = timestamppb.New(time.Date(2026, 5, 6, 13, 0, 0, 0, time.UTC))
 	// source drift: imagine the user migrated aqua → mise; same Version,
 	// new label.
 	b.Input.ResolvedVersions[0].Source = "mise:buf"
@@ -269,6 +265,184 @@ func TestRunCacheDiff_IgnoresInformationalFieldDrift(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("expected silent output for informational-only drift, got: %q", out.String())
+	}
+}
+
+// TestRunCacheGC_CollapsesDuplicates exercises the duplicate-collapse safety
+// net introduced for ADR-0010. After a hand-crafted post-merge state with
+// three timestamp variants of the same (spec, task, input_hash) Key,
+// `sloff cache gc` must leave only the earliest-prefix file.
+func TestRunCacheGC_CollapsesDuplicates(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, ".sloff", "cache", "spec", "copy")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec:          &cachev1.Spec{Dir: "spec", TaskId: "copy", Cmd: "echo hi"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
+	}
+	pb, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		"20260101000000000-deadbeef.pb",
+		"20260301000000000-deadbeef.pb",
+		"20260601000000000-deadbeef.pb",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), pb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	if err := runCacheGC(context.Background(), &out, root); err != nil {
+		t.Fatalf("runCacheGC: %v", err)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != files[0] {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only %q to remain, got %v", files[0], names)
+	}
+	if !strings.Contains(out.String(), "2") {
+		t.Errorf("expected gc output to mention removal count, got %q", out.String())
+	}
+}
+
+// TestCacheGCCommandViaRootCmd exercises the cobra wiring for `cache gc`,
+// including the `--repo-root` flag plumb-through that the helper-only
+// runCacheGC test does not cover. Without this, the RunE branch (cwd
+// resolution + context propagation) drops out of the coverage profile.
+func TestCacheGCCommandViaRootCmd(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, ".sloff", "cache", "spec", "copy")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec:          &cachev1.Spec{Dir: "spec", TaskId: "copy", Cmd: "echo hi"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
+	}
+	pb, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"20260101000000000-deadbeef.pb",
+		"20260601000000000-deadbeef.pb",
+	} {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), pb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"cache", "gc", "--repo-root", root})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(cache gc): %v", err)
+	}
+	if !strings.Contains(out.String(), "collapsed") {
+		t.Errorf("expected gc summary in output, got: %q", out.String())
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "20260101000000000-deadbeef.pb" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only earliest-prefix file remaining, got %v", names)
+	}
+}
+
+// TestRunCacheGC_NoRecordsIsNoop covers the happy-zero path: a repo without
+// any cache records must succeed with `collapsed 0 ...` rather than failing
+// loudly. Captures the empty-list branch through CollapseDuplicates.
+func TestRunCacheGC_NoRecordsIsNoop(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+	if err := runCacheGC(context.Background(), &out, root); err != nil {
+		t.Fatalf("runCacheGC: %v", err)
+	}
+	if !strings.Contains(out.String(), "collapsed 0") {
+		t.Errorf("expected zero-collapse output, got: %q", out.String())
+	}
+}
+
+// TestCacheGC_DefaultsToCwd covers the `--repo-root` omitted branch of
+// newCacheGCCmd, where the command resolves repo root from cwd. We chdir
+// into a tempdir, invoke `sloff cache gc` with no flags, and assert it
+// operated against the tempdir.
+func TestCacheGC_DefaultsToCwd(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, ".sloff", "cache", "spec", "copy")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &cachev1.Record{
+		SchemaVersion: cache.SchemaVersion,
+		Spec:          &cachev1.Spec{Dir: "spec", TaskId: "copy", Cmd: "echo hi"},
+		Input:         &cachev1.Input{Hash: "deadbeef"},
+		Output:        &cachev1.Output{Hash: "cafebabe"},
+	}
+	pb, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"20260101000000000-deadbeef.pb",
+		"20260601000000000-deadbeef.pb",
+	} {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), pb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prevWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWd) })
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"cache", "gc"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(cache gc): %v", err)
+	}
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only earliest preserved after cwd-default gc, got %v", names)
 	}
 }
 

@@ -35,9 +35,10 @@ import (
 //	go test ./internal/sloff/runner/... -update
 var updateGolden = flag.Bool("update", false, "rewrite expected/ fixtures from actual outputs")
 
-// fixedClock is the timestamp injected into runner.Options.Clock for every E2E test so
-// that record.GeneratedAt is deterministic and the YAML files can be committed as
-// goldens.
+// fixedClock is injected via local.WithClock for every E2E run so the
+// timestamp prefix on the on-disk record filenames (ADR-0010,
+// `<YYYYMMDDHHMMSSsss>-<input_hash>.pb`) is deterministic and the goldens
+// under testdata/e2e/runner/<case>/expected/ are byte-stable.
 var fixedClock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
 
 // step is one operation applied to the test working directory.
@@ -114,7 +115,7 @@ func gitInitWorkdir(t *testing.T, dir string) {
 }
 
 // runStep runs the runner once against the current workdir state, with the fixed clock so
-// generated_at is deterministic.
+// the on-disk record filename's timestamp prefix is deterministic for golden compare.
 func runStep() step {
 	return func(t *testing.T, h *harness) {
 		t.Helper()
@@ -135,10 +136,9 @@ func runStep() step {
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
-			Storage:   local.New(h.workdir),
+			Storage:   local.New(h.workdir, local.WithClock(func() time.Time { return fixedClock })),
 			Resolvers: resolverReg,
 			Preflight: preflightReg,
-			Clock:     func() time.Time { return fixedClock },
 		})
 		if err := r.Run(context.Background()); err != nil {
 			t.Fatalf("Run: %v", err)
@@ -504,10 +504,9 @@ commands:
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	err = r.Run(context.Background())
 	if err == nil {
@@ -569,10 +568,9 @@ commands:
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	err = r.Run(context.Background())
 	if err == nil {
@@ -691,11 +689,10 @@ func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnl
 	return runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflightReg,
 		ReadOnly:  readOnly,
-		Clock:     func() time.Time { return fixedClock },
 	})
 }
 
@@ -743,10 +740,9 @@ commands:
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run must succeed when broken tool is unreferenced, got: %v", err)
@@ -806,10 +802,9 @@ commands:
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	err = r.Run(context.Background())
 	if err == nil {
@@ -854,10 +849,9 @@ func TestRunner_UndefinedToolReferenceErrors(t *testing.T) {
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	err = r.Run(context.Background())
 	if err == nil {
@@ -909,12 +903,255 @@ commands:
 	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
-		Storage:   local.New(workdir),
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: resolverReg,
 		Preflight: preflight.NewRegistry(),
-		Clock:     func() time.Time { return fixedClock },
 	})
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("expected success when at least one declared pattern produced files, got: %v", err)
+	}
+}
+
+// TestRunner_ConcurrentFirstWriteMergeHits exercises the post-merge state that
+// motivated ADR-0010: two branches independently produce a first-time record
+// for the same (spec, task, input_hash) Key, so after merge the directory
+// holds two `<timestamp>-<hash>.pb` files for the same Key. A subsequent
+// `sloff run` must:
+//   - Load the latest by filename timestamp and use it for output-comparison
+//   - cache hit (no cmd execution; marker.txt does not advance)
+//   - leave both files on disk because Save is not invoked on a hit
+//
+// The earlier hash-only filename layout would have produced a byte-level
+// merge conflict at this exact moment (different `generated_at`); under the
+// new layout this scenario is a no-op for git, the runner, and the user.
+func TestRunner_ConcurrentFirstWriteMergeHits(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt; printf x >> ../marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [versioner]
+`
+	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	build := func() *runner.Runner {
+		t.Helper()
+		specs, err := spec.Discover(workdir, "**/sloff.yml")
+		if err != nil {
+			t.Fatalf("discover: %v", err)
+		}
+		resolverReg := toolresolver.NewRegistry()
+		resolverReg.Register(script.New(workdir))
+		resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+		return runner.New(runner.Options{
+			RepoRoot:  workdir,
+			Specs:     specs,
+			Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+			Resolvers: resolverReg,
+			Preflight: preflight.NewRegistry(),
+		})
+	}
+
+	// First run produces the canonical record at fixedClock's timestamp.
+	if err := build().Run(context.Background()); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	cacheDir := filepath.Join(workdir, ".sloff", "cache", "spec", "copy")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("first Run should yield exactly one record, got %d: %v", len(entries), entries)
+	}
+	original := entries[0].Name()
+	suffixIdx := strings.IndexByte(original, '-')
+	if suffixIdx < 0 {
+		t.Fatalf("unexpected filename %q (no timestamp prefix)", original)
+	}
+	hashSuffix := original[suffixIdx:]
+
+	// Simulate the merge: drop a sibling `<earlier-timestamp>-<hash>.pb` next
+	// to the existing record. Bytes are intentionally identical because the
+	// generator is deterministic; only the filename's timestamp prefix
+	// differs, which is exactly the ADR-0010 disambiguator.
+	bytes, err := os.ReadFile(filepath.Join(cacheDir, original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := "20260101000000000" + hashSuffix
+	if err := os.WriteFile(filepath.Join(cacheDir, earlier), bytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot marker.txt before the second run so we can assert no cmd ran.
+	markerPath := filepath.Join(workdir, "marker.txt")
+	beforeMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second run: must cache hit on output-comparison and not invoke Save.
+	if err := build().Run(context.Background()); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	afterMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeMarker) != string(afterMarker) {
+		t.Errorf("expected cache hit (no cmd execution) on second run; marker advanced %q -> %q",
+			beforeMarker, afterMarker)
+	}
+
+	// Both timestamp variants must still be present: a hit does not invoke
+	// Save, so the duplicate-collapse path is not exercised here. (`sloff
+	// cache gc` is the planned collapse trigger for this exact state.)
+	postEntries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]bool, len(postEntries))
+	for _, e := range postEntries {
+		got[e.Name()] = true
+	}
+	for _, want := range []string{original, earlier} {
+		if !got[want] {
+			t.Errorf("expected %q preserved on cache hit, dir contents=%v", want, got)
+		}
+	}
+}
+
+// TestRunner_ConcurrentFirstWriteCollapsesOnRewrite covers the rare branch of
+// ADR-0010's Save semantics: when two branches' first-writes were merged
+// (multiple `<timestamp>-<hash>.pb` for the same Key) and a subsequent run
+// happens to land in the cache-miss-with-different-output path, Save must
+// collapse the duplicates onto the earliest-prefix file. The
+// "different-output for the same input" case is a non-deterministic
+// generator (out of sloff scope), so the test forces the situation by
+// hand-crafting a pre-existing record whose output.hash deliberately
+// disagrees with what the generator currently produces.
+func TestRunner_ConcurrentFirstWriteCollapsesOnRewrite(t *testing.T) {
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: copy
+    cmd: ["sh", "-c", "cp input.txt output.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [versioner]
+`
+	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	build := func() *runner.Runner {
+		t.Helper()
+		specs, err := spec.Discover(workdir, "**/sloff.yml")
+		if err != nil {
+			t.Fatalf("discover: %v", err)
+		}
+		resolverReg := toolresolver.NewRegistry()
+		resolverReg.Register(script.New(workdir))
+		resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+		return runner.New(runner.Options{
+			RepoRoot:  workdir,
+			Specs:     specs,
+			Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+			Resolvers: resolverReg,
+			Preflight: preflight.NewRegistry(),
+		})
+	}
+
+	// First run lays down the legitimate record so we know the input_hash on disk.
+	if err := build().Run(context.Background()); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	cacheDir := filepath.Join(workdir, ".sloff", "cache", "spec", "copy")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("first Run should yield 1 record, got entries=%v err=%v", entries, err)
+	}
+	original := entries[0].Name()
+	hashSuffix := original[strings.IndexByte(original, '-'):]
+
+	// Inject a hand-crafted earlier-prefix record whose output.hash will
+	// fail output-comparison so the runner enters the rewrite path. Bytes
+	// reuse the original record except output.hash is mutated.
+	originalBytes, err := os.ReadFile(filepath.Join(cacheDir, original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := cache.Unmarshal(originalBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Output.Hash = strings.Repeat("0", len(rec.Output.Hash))
+	mutated, err := cache.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := "20260101000000000" + hashSuffix
+	if err := os.WriteFile(filepath.Join(cacheDir, earlier), mutated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Drop the legitimate later record so the load path actually picks up
+	// the mutated one (load returns latest; we only want one survivor for
+	// load deterministically). Simulating "two branches each only saw their
+	// own record" in a controlled way.
+	if err := os.Remove(filepath.Join(cacheDir, original)); err != nil {
+		t.Fatal(err)
+	}
+	// Add a second duplicate (later than `earlier`) so Save has duplicates
+	// to collapse.
+	later := "20260601000000000" + hashSuffix
+	if err := os.WriteFile(filepath.Join(cacheDir, later), mutated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run again. Output-comparison fails (mutated record has all-zeros
+	// output.hash), generator runs, Save fires, duplicates are collapsed.
+	if err := build().Run(context.Background()); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	postEntries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(postEntries) != 1 {
+		var names []string
+		for _, e := range postEntries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected exactly 1 record after collapse, got %d: %v", len(postEntries), names)
+	}
+	if postEntries[0].Name() != earlier {
+		t.Errorf("expected earliest-prefix retained (%q), got %q", earlier, postEntries[0].Name())
 	}
 }

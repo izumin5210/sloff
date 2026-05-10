@@ -143,6 +143,8 @@ PR ノイズ / grep ノイズの懸念 (A の Cons) については、 二段階
 
 で運用上緩和する。
 
+R5 (コンフリクト無し) の達成手段は本 ADR 採用時点では「物理的なファイル分割」 を意図していたが、 ADR-0009 で proto binary 化した結果、 **同 input に対する別 branch 独立 first-write 同士で `generated_at` 等の壁時計依存 field が drift して同 filename で byte 競合する経路** が残っていた。 これは [ADR-0010](./0010-cache-record-filename-timestamp-prefix.md) で filename に timestamp prefix を導入することで構造的に解消され、 R5 の達成手段は **path uniqueness を primary** とする形に格上げされている。
+
 ## Consequences
 
 ### 正の影響

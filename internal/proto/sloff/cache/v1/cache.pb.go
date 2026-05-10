@@ -23,7 +23,6 @@ package cachev1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
-	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -43,8 +42,13 @@ type SchemaVersion int32
 
 const (
 	SchemaVersion_SCHEMA_VERSION_UNSPECIFIED SchemaVersion = 0
-	// First protobuf-encoded schema. Introduced by ADR-0009.
+	// First protobuf-encoded schema. Introduced by ADR-0009. Superseded by V3
+	// and intentionally retained as a closed enum value so legacy on-disk
+	// records can be detected and rejected explicitly.
 	SchemaVersion_SCHEMA_VERSION_V2 SchemaVersion = 2
+	// Drops Record.generated_at; the filename's timestamp prefix replaces it
+	// (ADR-0010).
+	SchemaVersion_SCHEMA_VERSION_V3 SchemaVersion = 3
 )
 
 // Enum value maps for SchemaVersion.
@@ -52,10 +56,12 @@ var (
 	SchemaVersion_name = map[int32]string{
 		0: "SCHEMA_VERSION_UNSPECIFIED",
 		2: "SCHEMA_VERSION_V2",
+		3: "SCHEMA_VERSION_V3",
 	}
 	SchemaVersion_value = map[string]int32{
 		"SCHEMA_VERSION_UNSPECIFIED": 0,
 		"SCHEMA_VERSION_V2":          2,
+		"SCHEMA_VERSION_V3":          3,
 	}
 )
 
@@ -87,16 +93,16 @@ func (SchemaVersion) EnumDescriptor() ([]byte, []int) {
 }
 
 // Record is one cache entry on disk. Lives at
-// .sloff/cache/<spec_relpath>/<task_id>/<input_hash>.pb.
+// .sloff/cache/<spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb.
+// The filename's timestamp prefix encodes the record's initial creation time
+// (ADR-0010); no wall-clock field is carried in the wire format so that the
+// bytes are a deterministic function of the input.
 type Record struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SchemaVersion SchemaVersion          `protobuf:"varint,1,opt,name=schema_version,json=schemaVersion,proto3,enum=sloff.cache.v1.SchemaVersion" json:"schema_version,omitempty"`
 	Spec          *Spec                  `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
 	Input         *Input                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
 	Output        *Output                `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`
-	// Informational. Not part of cache identity. Drift alone does not trigger
-	// a write per ADR-0009 §"byte stability の担保".
-	GeneratedAt   *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=generated_at,json=generatedAt,proto3" json:"generated_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -155,13 +161,6 @@ func (x *Record) GetInput() *Input {
 func (x *Record) GetOutput() *Output {
 	if x != nil {
 		return x.Output
-	}
-	return nil
-}
-
-func (x *Record) GetGeneratedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.GeneratedAt
 	}
 	return nil
 }
@@ -489,13 +488,12 @@ var File_sloff_cache_v1_cache_proto protoreflect.FileDescriptor
 
 const file_sloff_cache_v1_cache_proto_rawDesc = "" +
 	"\n" +
-	"\x1asloff/cache/v1/cache.proto\x12\x0esloff.cache.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x94\x02\n" +
+	"\x1asloff/cache/v1/cache.proto\x12\x0esloff.cache.v1\"\xe9\x01\n" +
 	"\x06Record\x12D\n" +
 	"\x0eschema_version\x18\x01 \x01(\x0e2\x1d.sloff.cache.v1.SchemaVersionR\rschemaVersion\x12(\n" +
 	"\x04spec\x18\x02 \x01(\v2\x14.sloff.cache.v1.SpecR\x04spec\x12+\n" +
 	"\x05input\x18\x03 \x01(\v2\x15.sloff.cache.v1.InputR\x05input\x12.\n" +
-	"\x06output\x18\x04 \x01(\v2\x16.sloff.cache.v1.OutputR\x06output\x12=\n" +
-	"\fgenerated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\"C\n" +
+	"\x06output\x18\x04 \x01(\v2\x16.sloff.cache.v1.OutputR\x06outputJ\x04\b\x05\x10\x06R\fgenerated_at\"C\n" +
 	"\x04Spec\x12\x10\n" +
 	"\x03dir\x18\x01 \x01(\tR\x03dir\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x10\n" +
@@ -516,10 +514,11 @@ const file_sloff_cache_v1_cache_proto_rawDesc = "" +
 	"\x0fResolvedVersion\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x16\n" +
-	"\x06source\x18\x03 \x01(\tR\x06source*F\n" +
+	"\x06source\x18\x03 \x01(\tR\x06source*]\n" +
 	"\rSchemaVersion\x12\x1e\n" +
 	"\x1aSCHEMA_VERSION_UNSPECIFIED\x10\x00\x12\x15\n" +
-	"\x11SCHEMA_VERSION_V2\x10\x02B\xbd\x01\n" +
+	"\x11SCHEMA_VERSION_V2\x10\x02\x12\x15\n" +
+	"\x11SCHEMA_VERSION_V3\x10\x03B\xbd\x01\n" +
 	"\x12com.sloff.cache.v1B\n" +
 	"CacheProtoP\x01ZAgithub.com/izumin5210/sloff/internal/proto/sloff/cache/v1;cachev1\xa2\x02\x03SCX\xaa\x02\x0eSloff.Cache.V1\xca\x02\x0eSloff\\Cache\\V1\xe2\x02\x1aSloff\\Cache\\V1\\GPBMetadata\xea\x02\x10Sloff::Cache::V1b\x06proto3"
 
@@ -538,28 +537,26 @@ func file_sloff_cache_v1_cache_proto_rawDescGZIP() []byte {
 var file_sloff_cache_v1_cache_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_sloff_cache_v1_cache_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_sloff_cache_v1_cache_proto_goTypes = []any{
-	(SchemaVersion)(0),            // 0: sloff.cache.v1.SchemaVersion
-	(*Record)(nil),                // 1: sloff.cache.v1.Record
-	(*Spec)(nil),                  // 2: sloff.cache.v1.Spec
-	(*Input)(nil),                 // 3: sloff.cache.v1.Input
-	(*Output)(nil),                // 4: sloff.cache.v1.Output
-	(*FileEntry)(nil),             // 5: sloff.cache.v1.FileEntry
-	(*ResolvedVersion)(nil),       // 6: sloff.cache.v1.ResolvedVersion
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(SchemaVersion)(0),      // 0: sloff.cache.v1.SchemaVersion
+	(*Record)(nil),          // 1: sloff.cache.v1.Record
+	(*Spec)(nil),            // 2: sloff.cache.v1.Spec
+	(*Input)(nil),           // 3: sloff.cache.v1.Input
+	(*Output)(nil),          // 4: sloff.cache.v1.Output
+	(*FileEntry)(nil),       // 5: sloff.cache.v1.FileEntry
+	(*ResolvedVersion)(nil), // 6: sloff.cache.v1.ResolvedVersion
 }
 var file_sloff_cache_v1_cache_proto_depIdxs = []int32{
 	0, // 0: sloff.cache.v1.Record.schema_version:type_name -> sloff.cache.v1.SchemaVersion
 	2, // 1: sloff.cache.v1.Record.spec:type_name -> sloff.cache.v1.Spec
 	3, // 2: sloff.cache.v1.Record.input:type_name -> sloff.cache.v1.Input
 	4, // 3: sloff.cache.v1.Record.output:type_name -> sloff.cache.v1.Output
-	7, // 4: sloff.cache.v1.Record.generated_at:type_name -> google.protobuf.Timestamp
-	6, // 5: sloff.cache.v1.Input.resolved_versions:type_name -> sloff.cache.v1.ResolvedVersion
-	5, // 6: sloff.cache.v1.Output.files:type_name -> sloff.cache.v1.FileEntry
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	6, // 4: sloff.cache.v1.Input.resolved_versions:type_name -> sloff.cache.v1.ResolvedVersion
+	5, // 5: sloff.cache.v1.Output.files:type_name -> sloff.cache.v1.FileEntry
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_sloff_cache_v1_cache_proto_init() }

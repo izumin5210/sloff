@@ -2,9 +2,9 @@ package s3_test
 
 // kumo is run via `go tool kumo` (declared in go.mod's tool block) so the
 // suite needs no manually installed binary on developer machines or CI. The
-// emulator is spawned once in TestMain on a random free port and shared by
-// all tests; each test creates its own bucket to avoid cross-test
-// interference.
+// emulator is spawned once in TestMain on its hardcoded port 4566 (kumo
+// v0.18.2 ignores KUMO_PORT / --port) and shared across tests; each test
+// creates its own bucket to avoid cross-test interference.
 
 import (
 	"bytes"

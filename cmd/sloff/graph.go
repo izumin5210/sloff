@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/izumin5210/sloff/internal/sloff/explain"
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
 )
 
@@ -88,18 +89,17 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		return err
 	}
 
-	storage, err := loadStorage(ctx, root)
-	if err != nil {
-		return fmt.Errorf("load fingerprint storage: %w", err)
-	}
-
-	// Plan never touches Storage; we still resolve it here so graph honours
-	// the same .sloff/config.yml as run / gc. Preflight is left nil so
-	// install drift does not block rendering.
+	// Plan never reads Storage, but runner.Options.Storage is a non-pointer
+	// interface field, so something has to live there. Pin local.New(root)
+	// as a cheap no-op stub instead of going through loadStorage; that way
+	// graph keeps rendering even when an opt-in remote backend is selected
+	// but its config / network is misconfigured. Preflight is left nil so
+	// install drift does not block rendering either.
+	// TODO(DEV-21): drop this stub once Plan no longer requires a Storage.
 	r := runner.New(runner.Options{
 		RepoRoot:       root,
 		Specs:          specs,
-		Storage:        storage,
+		Storage:        local.New(root),
 		Resolvers:      resolvers,
 		TracerProvider: tp,
 	})

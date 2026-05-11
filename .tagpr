@@ -1,6 +1,6 @@
 [tagpr]
 	vPrefix = true
 	releaseBranch = main
-	versionFile = cmd/sloff/version.go
+	versionFile = -
 	release = draft
 	changelog = true

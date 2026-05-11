@@ -52,7 +52,7 @@ func TestKeyFromItem_RejectsMalformedSortKey(t *testing.T) {
 	}
 }
 
-func TestKeyFromItem_KeepsItemWithoutExpiresAtUnderOlderThan(t *testing.T) {
+func TestKeyFromItem_KeepsItemWithoutCreatedAtUnderOlderThan(t *testing.T) {
 	item := map[string]ddbtypes.AttributeValue{
 		pkAttr: &ddbtypes.AttributeValueMemberS{Value: "spec"},
 		skAttr: &ddbtypes.AttributeValueMemberS{Value: "task#h"},
@@ -61,26 +61,27 @@ func TestKeyFromItem_KeepsItemWithoutExpiresAtUnderOlderThan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// "Conservative keep" branch: items predating the TTL feature should
-	// not silently disappear from list-based GC sweeps.
+	// "Conservative keep" branch: items predating the created_at
+	// attribute (legacy entries) should not silently disappear from
+	// list-based GC sweeps.
 	if !ok {
-		t.Error("expected item without expires_at to be kept under OlderThan filter")
+		t.Error("expected item without created_at to be kept under OlderThan filter")
 	}
 }
 
-func TestKeyFromItem_PropagatesReadExpiresAtError(t *testing.T) {
+func TestKeyFromItem_PropagatesReadCreatedAtError(t *testing.T) {
 	item := map[string]ddbtypes.AttributeValue{
 		pkAttr:        &ddbtypes.AttributeValueMemberS{Value: "spec"},
 		skAttr:        &ddbtypes.AttributeValueMemberS{Value: "task#h"},
-		expiresAtAttr: &ddbtypes.AttributeValueMemberS{Value: "not-a-number"},
+		createdAtAttr: &ddbtypes.AttributeValueMemberS{Value: "not-a-number"},
 	}
 	if _, _, err := keyFromItem(item, &fingerprint.ListFilter{OlderThan: time.Now()}); err == nil {
-		t.Error("expected error when expires_at is the wrong type")
+		t.Error("expected error when created_at is the wrong type")
 	}
 }
 
-func TestReadExpiresAt_AbsentReturnsFalse(t *testing.T) {
-	got, ok, err := readExpiresAt(map[string]ddbtypes.AttributeValue{})
+func TestReadUnixNumber_AbsentReturnsFalse(t *testing.T) {
+	got, ok, err := readUnixNumber(map[string]ddbtypes.AttributeValue{}, createdAtAttr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,21 +90,21 @@ func TestReadExpiresAt_AbsentReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestReadExpiresAt_RejectsNonNumeric(t *testing.T) {
+func TestReadUnixNumber_RejectsNonNumeric(t *testing.T) {
 	item := map[string]ddbtypes.AttributeValue{
-		expiresAtAttr: &ddbtypes.AttributeValueMemberN{Value: "abc"},
+		createdAtAttr: &ddbtypes.AttributeValueMemberN{Value: "abc"},
 	}
-	if _, _, err := readExpiresAt(item); err == nil {
-		t.Error("expected error for non-numeric expires_at")
+	if _, _, err := readUnixNumber(item, createdAtAttr); err == nil {
+		t.Error("expected error for non-numeric value")
 	}
 }
 
-func TestReadExpiresAt_RejectsWrongType(t *testing.T) {
+func TestReadUnixNumber_RejectsWrongType(t *testing.T) {
 	item := map[string]ddbtypes.AttributeValue{
-		expiresAtAttr: &ddbtypes.AttributeValueMemberS{Value: "1234"},
+		createdAtAttr: &ddbtypes.AttributeValueMemberS{Value: "1234"},
 	}
-	if _, _, err := readExpiresAt(item); err == nil {
-		t.Error("expected error when expires_at is not Number type")
+	if _, _, err := readUnixNumber(item, createdAtAttr); err == nil {
+		t.Error("expected error when attribute is not Number type")
 	}
 }
 

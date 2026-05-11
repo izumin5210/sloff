@@ -28,7 +28,8 @@
 | `pk` ( partition key) | S ( String) | `spec_relpath` ( 例: `path/to/spec`) |
 | `sk` ( sort key) | S ( String) | `<task_id>#<input_hash>` ( 例: `protoc-gen-go#3f9a1c...`) |
 | `record` | B ( Binary) | `fingerprintv1.Record` の deterministic protobuf bytes ( ADR-0009) |
-| `expires_at` | N ( Number、 任意) | Unix epoch seconds、 DynamoDB TTL の対象属性 ( opt-in) |
+| `created_at` | N ( Number) | Unix epoch seconds、 record の write 時刻。 `ListFilter.OlderThan` のフィルタ基準として使う ( local backend の mtime に相当)。 常に書き込む |
+| `expires_at` | N ( Number、 任意) | Unix epoch seconds、 DynamoDB TTL の対象属性 ( opt-in)。 `ExpiresAfterDays > 0` のときだけ書く |
 
 #### partition key と sort key の設計理由
 

@@ -2,6 +2,7 @@ package dynamodb_test
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"testing"
@@ -140,6 +141,42 @@ func TestSave_WritesExpiresAtWhenTTLEnabled(t *testing.T) {
 	}
 }
 
+func TestSave_AlwaysWritesCreatedAt(t *testing.T) {
+	// created_at must be written regardless of TTL configuration, since
+	// ListFilter.OlderThan reads it. Verify both TTL-on and TTL-off
+	// modes carry the attribute.
+	for _, ttlDays := range []int{0, 30} {
+		ttlDays := ttlDays
+		t.Run(fmt.Sprintf("ttl=%dd", ttlDays), func(t *testing.T) {
+			st, table, client := newStorage(t, ttlDays, fixedClock)
+			ctx := context.Background()
+			key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+			if err := st.Save(ctx, key, newRecord("gen")); err != nil {
+				t.Fatal(err)
+			}
+			out, err := client.GetItem(ctx, &awsddb.GetItemInput{
+				TableName: aws.String(table),
+				Key: map[string]ddbtypes.AttributeValue{
+					"pk": &ddbtypes.AttributeValueMemberS{Value: key.SpecRelpath},
+					"sk": &ddbtypes.AttributeValueMemberS{Value: key.TaskID + "#" + key.InputHash},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cAttr, ok := out.Item["created_at"].(*ddbtypes.AttributeValueMemberN)
+			if !ok {
+				t.Fatalf("expected created_at attribute, got %#v", out.Item["created_at"])
+			}
+			want := fixedClock.Unix()
+			got, _ := strconv.ParseInt(cAttr.Value, 10, 64)
+			if got != want {
+				t.Errorf("created_at = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
 func TestSave_NoTTLAttributeWhenDisabled(t *testing.T) {
 	st, table, client := newStorage(t, 0, fixedClock)
 	ctx := context.Background()
@@ -224,7 +261,12 @@ func TestList_AllAndFiltered(t *testing.T) {
 	}
 }
 
-func TestList_OlderThanReadsExpiresAt(t *testing.T) {
+// TestList_OlderThanComparesAgainstCreatedAt locks the contract that
+// ListFilter.OlderThan is a write-time cutoff, not a TTL cutoff. With
+// TTL enabled the two timestamps differ by `ExpiresAfterDays`, so a
+// bug that compares against `expires_at` would pass cutoffs near
+// `fixedClock` but fail cutoffs near `fixedClock + 30d`.
+func TestList_OlderThanComparesAgainstCreatedAt(t *testing.T) {
 	st, _, _ := newStorage(t, 30, fixedClock)
 	ctx := context.Background()
 	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
@@ -232,21 +274,34 @@ func TestList_OlderThanReadsExpiresAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expiresAt := fixedClock.Add(30 * 24 * time.Hour)
-	got, err := st.List(ctx, fingerprint.ListFilter{OlderThan: expiresAt.Add(time.Second)})
+	got, err := st.List(ctx, fingerprint.ListFilter{OlderThan: fixedClock.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {
-		t.Errorf("expected key included when expires_at < cutoff, got %+v", got)
+		t.Errorf("expected key included when created_at < cutoff, got %+v", got)
 	}
 
-	got, err = st.List(ctx, fingerprint.ListFilter{OlderThan: expiresAt.Add(-time.Second)})
+	got, err = st.List(ctx, fingerprint.ListFilter{OlderThan: fixedClock.Add(-time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Errorf("expected key excluded when expires_at >= cutoff, got %+v", got)
+		t.Errorf("expected key excluded when created_at >= cutoff, got %+v", got)
+	}
+
+	// Sanity check: a cutoff that is *after* expires_at must still
+	// exclude the recent entry (its created_at is `fixedClock`, well
+	// before that cutoff would be considered "old enough" — but the
+	// previous bug compared against expires_at and would have wrongly
+	// included it).
+	expiresAt := fixedClock.Add(30 * 24 * time.Hour)
+	got, err = st.List(ctx, fingerprint.ListFilter{OlderThan: expiresAt.Add(-time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected key included when created_at < cutoff < expires_at, got %+v", got)
 	}
 }
 

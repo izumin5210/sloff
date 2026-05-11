@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -220,15 +221,29 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.producedBy = map[string]string{}
 	runErr := r.runTasks(ctx, ordered)
 	// Flush even when runTasks returned an error so records queued by tasks
-	// that completed *before* a later failure are still persisted. The
-	// alternative (skip flush on error) would force every successful task
-	// to re-execute on the next run, just because some unrelated task at
-	// the tail of the DAG happened to fail. Failed tasks never enqueue a
-	// record (runTask only calls fingerprintStore after a successful
-	// generator + output hash), so the queue holds only good entries.
-	flushErr := r.flushFingerprints(ctx)
+	// that completed *before* a later failure are still persisted. Failed
+	// tasks never enqueue a record (runTask only calls fingerprintStore
+	// after a successful generator + output hash), so the queue holds only
+	// good entries.
+	//
+	// Use a detached context for the flush: if the run was canceled via
+	// the parent ctx (Ctrl-C, CI timeout, parent process abort), passing
+	// the canceled ctx straight through would make Storage.SaveMany abort
+	// immediately and drop every queued record. We instead allow a short
+	// budget for the bulk write to drain — modeled after the OTel
+	// shutdown drain in cmd/sloff — so an interrupted run still warms
+	// the cache for the next invocation.
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flushTimeout)
+	defer cancel()
+	flushErr := r.flushFingerprints(flushCtx)
 	return errors.Join(runErr, flushErr)
 }
+
+// flushTimeout caps the post-run SaveMany. Generous enough to give a
+// remote backend (DynamoDB BatchWriteItem fan-out) time to drain a
+// large queue, but bounded so a hung backend cannot block process
+// exit indefinitely.
+const flushTimeout = 30 * time.Second
 
 // prefetchFingerprints computes an optimistic input_hash for every task using
 // the on-disk state at run start, then issues a single Storage.LoadMany to pull

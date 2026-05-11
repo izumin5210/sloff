@@ -361,20 +361,23 @@ func (s *Storage) SaveMany(ctx context.Context, items []fingerprint.KeyRecord) e
 }
 
 // encodeItem renders a record into the attribute map a PutItem expects.
-// Adds expires_at when TTL is configured so the table's TTL setting can
-// auto-evict the item without sloff sweeping it.
+// Always writes created_at so ListFilter.OlderThan has a stable timestamp
+// to filter on. Adds expires_at only when TTL is configured so the
+// table's TTL setting can auto-evict the item without sloff sweeping it.
 func (s *Storage) encodeItem(key fingerprint.Key, rec *fingerprintv1.Record) (map[string]ddbtypes.AttributeValue, error) {
 	body, err := fingerprint.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
+	now := s.clock()
 	item := map[string]ddbtypes.AttributeValue{
-		pkAttr:     &ddbtypes.AttributeValueMemberS{Value: partitionKey(key)},
-		skAttr:     &ddbtypes.AttributeValueMemberS{Value: sortKey(key)},
-		recordAttr: &ddbtypes.AttributeValueMemberB{Value: body},
+		pkAttr:        &ddbtypes.AttributeValueMemberS{Value: partitionKey(key)},
+		skAttr:        &ddbtypes.AttributeValueMemberS{Value: sortKey(key)},
+		recordAttr:    &ddbtypes.AttributeValueMemberB{Value: body},
+		createdAtAttr: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
 	}
 	if s.expiresIn > 0 {
-		expiresAt := s.clock().Add(s.expiresIn).Unix()
+		expiresAt := now.Add(s.expiresIn).Unix()
 		item[expiresAtAttr] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)}
 	}
 	return item, nil
@@ -433,9 +436,11 @@ func pkSkFromItem(item map[string]ddbtypes.AttributeValue) (pk, sk string, ok bo
 
 // keyFromItem reconstructs a fingerprint.Key from a stored item. Used by
 // List / Scan to filter foreign items and report only well-formed records.
-// The OlderThan filter is applied here when expires_at is present;
-// otherwise time-based filtering is skipped (the local backend uses mtime,
-// which has no DynamoDB equivalent for items that don't carry TTL).
+// The OlderThan filter is applied here against the item's created_at
+// (record write time, mirroring the local backend's mtime semantics).
+// Records without created_at are conservatively kept so list-based GC
+// sweeps don't drop legacy entries written before this attribute was
+// introduced.
 func keyFromItem(item map[string]ddbtypes.AttributeValue, filter *fingerprint.ListFilter) (fingerprint.Key, bool, error) {
 	pk, sk, ok := pkSkFromItem(item)
 	if !ok {
@@ -446,29 +451,33 @@ func keyFromItem(item map[string]ddbtypes.AttributeValue, filter *fingerprint.Li
 		return fingerprint.Key{}, false, nil
 	}
 	if !filter.OlderThan.IsZero() {
-		exp, ok, err := readExpiresAt(item)
+		created, ok, err := readUnixNumber(item, createdAtAttr)
 		if err != nil {
 			return fingerprint.Key{}, false, err
 		}
-		// "older than" semantics: skip items whose timestamp is at or after
-		// the cutoff. When expires_at is absent we conservatively keep the
-		// entry so list-based GC sweeps don't drop records that pre-date
-		// the TTL feature being enabled.
-		if ok && !exp.Before(filter.OlderThan) {
+		// "older than" semantics: skip items whose write time is at or
+		// after the cutoff (i.e. recent enough to keep). When created_at
+		// is absent we conservatively keep the entry so list-based GC
+		// sweeps don't drop records that pre-date the attribute being
+		// introduced.
+		if ok && !created.Before(filter.OlderThan) {
 			return fingerprint.Key{}, false, nil
 		}
 	}
 	return fingerprint.Key{SpecRelpath: pk, TaskID: taskID, InputHash: hash}, true, nil
 }
 
-func readExpiresAt(item map[string]ddbtypes.AttributeValue) (time.Time, bool, error) {
-	v, ok := item[expiresAtAttr]
+// readUnixNumber decodes a Number attribute as a Unix-epoch-seconds
+// time.Time. Used for both created_at (write time) and expires_at (TTL
+// target); kept symmetric so the same parsing rules apply to both.
+func readUnixNumber(item map[string]ddbtypes.AttributeValue, attr string) (time.Time, bool, error) {
+	v, ok := item[attr]
 	if !ok {
 		return time.Time{}, false, nil
 	}
 	n, ok := v.(*ddbtypes.AttributeValueMemberN)
 	if !ok {
-		return time.Time{}, false, fmt.Errorf("%s attribute is not Number", expiresAtAttr)
+		return time.Time{}, false, fmt.Errorf("%s attribute is not Number", attr)
 	}
 	sec, err := strconv.ParseInt(n.Value, 10, 64)
 	if err != nil {

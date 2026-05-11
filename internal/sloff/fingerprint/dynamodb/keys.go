@@ -9,7 +9,13 @@
 //	pk (S)         partition key, holds spec_relpath
 //	sk (S)         sort key, holds "<task_id>#<input_hash>"
 //	record (B)     deterministic protobuf bytes
+//	created_at (N) Unix epoch seconds at write time; drives ListFilter.OlderThan
 //	expires_at (N) optional, Unix epoch seconds for DynamoDB TTL
+//
+// created_at is written unconditionally so List(OlderThan: ...) has a
+// stable timestamp to filter on regardless of whether TTL is enabled.
+// expires_at is written only when ExpiresAfterDays > 0; the TTL setting
+// on the table consumes it for auto-eviction independent of List.
 package dynamodb
 
 import (
@@ -18,12 +24,13 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 )
 
-// pkAttr / skAttr are the DynamoDB attribute names the table schema uses.
-// Kept as constants because the runtime never queries on different keys.
+// Attribute names the DynamoDB schema uses. Kept as constants because the
+// runtime never queries on different names.
 const (
 	pkAttr        = "pk"
 	skAttr        = "sk"
 	recordAttr    = "record"
+	createdAtAttr = "created_at"
 	expiresAtAttr = "expires_at"
 
 	// skSeparator splits task_id from input_hash inside the composite sort

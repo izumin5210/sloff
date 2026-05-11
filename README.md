@@ -95,6 +95,109 @@ commands:
 
 git-tracked files in the workspace package (and transitive workspace deps) contribute to `inputs`; external npm dep versions come from `pnpm-lock.yaml`. Build steps stay in the task `cmd`.
 
+## Fingerprint storage
+
+By default sloff persists fingerprint records to `.sloff/fingerprints/` under the repo root and expects them to be committed to git (the "shared via git" model from ADR-0003). For monorepos with hundreds of tasks where git-noise / clone-size pressure starts mattering, sloff can also offload the store to **Amazon DynamoDB** with a transparent local disk cache in front so per-task lookups stay sub-millisecond on warm runs.
+
+Both backends speak the same wire format and can be swapped without re-generating records.
+
+### Default: local (git-managed)
+
+No configuration needed. Records land at `.sloff/fingerprints/<spec>/<task>/<TS>-<input_hash>.pb` and the user commits them. See [ADR-0003](./docs/adr/0003-fingerprint-storage-strategy.md) for the rationale and operational notes (`.gitattributes` setup, gc, etc.).
+
+### DynamoDB backend (opt-in)
+
+Selected via `.sloff/config.yml` at the repo root. Credentials are resolved through the aws-sdk-go-v2 default chain (env vars / `~/.aws/credentials` / IRSA / IMDS), so config does not carry secrets and is safe to commit.
+
+```yaml
+# .sloff/config.yml
+fingerprint:
+  backend: dynamodb           # omit or set to "local" for the default
+  dynamodb:
+    table: sloff-fingerprints # required
+    region: us-east-1         # optional; falls back to AWS_REGION / shared config
+    endpoint: ""              # optional; emulator URL (e.g. http://localhost:4566)
+    expires_after_days: 0     # optional; 0 = no TTL, >0 enables DynamoDB TTL
+```
+
+#### Table provisioning
+
+sloff does **not** create the table for you — give the table to your infra team (IaC or AWS Console) so the deployment surface stays explicit.
+
+AWS CLI:
+
+```sh
+aws dynamodb create-table \
+  --table-name sloff-fingerprints \
+  --attribute-definitions \
+      AttributeName=pk,AttributeType=S \
+      AttributeName=sk,AttributeType=S \
+  --key-schema \
+      AttributeName=pk,KeyType=HASH \
+      AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
+```
+
+Terraform:
+
+```hcl
+resource "aws_dynamodb_table" "sloff_fingerprints" {
+  name         = "sloff-fingerprints"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute { name = "pk"; type = "S" }
+  attribute { name = "sk"; type = "S" }
+
+  # Only required when `.sloff/config.yml` sets expires_after_days > 0.
+  # Safe to enable unconditionally if you might enable TTL later.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+```
+
+#### Required IAM permissions
+
+sloff needs these DynamoDB actions on the table's ARN:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem",
+      "dynamodb:Query", "dynamodb:Scan",
+      "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
+      "dynamodb:DescribeTable"
+    ],
+    "Resource": "arn:aws:dynamodb:<region>:<account>:table/sloff-fingerprints"
+  }]
+}
+```
+
+#### Two-tier local cache
+
+When the DynamoDB backend is selected, sloff transparently mirrors every record to a disk cache under `$XDG_CACHE_HOME/sloff/fingerprints/<host>/<owner>/<repo>/...` (path derived from `git config --get remote.origin.url` in ghq style, so multiple worktrees of the same repo share the cache).
+
+Implications:
+- The first lookup after a fresh clone goes to DynamoDB; subsequent identical lookups hit the disk cache and skip the network entirely.
+- Cache invalidation is structural — `input_hash` is content-addressable so a stale cache entry can never match a different input.
+- The cache is per-user, never shared across machines, and safe to delete (`rm -rf "$XDG_CACHE_HOME/sloff"`) at any time.
+
+#### Operational notes
+
+- **`sloff fingerprint gc` is a no-op for DynamoDB.** The per-item schema has no duplicate variants to collapse; set `expires_after_days` to a positive value if you want automatic cleanup of stale records via DynamoDB's TTL.
+- **Reads are eventually consistent.** A record written by another developer or CI run becomes visible to your `sloff run` within ~1 second under normal operation. The occasional pre-replication miss costs one extra generator run; correctness is preserved (the generator simply writes the same record again).
+- **Concurrent writes are wire-byte identical for deterministic generators**, so last-write-wins on `PutItem` is safe; no `ConditionExpression` is needed.
+
+Cost estimate at moderate scale (~10k tasks × 100 runs/day, mostly hits): ~$10–15/month on-demand, drops to ~$3 with the two-tier cache absorbing the bulk of reads.
+
+See [Storage: DynamoDB](./docs/design/storage-dynamodb.md) for the schema, access pattern, and design trade-offs.
+
 ## When to use sloff (vs alternatives)
 
 sloff is well-suited when:
@@ -122,6 +225,7 @@ sloff is intentionally narrow — **codegen orchestration with honest fingerprin
 - [Resolver: script](./docs/design/resolver-script.md)
 - [Resolver: go-local](./docs/design/resolver-go-local.md)
 - [Resolver: pnpm-local](./docs/design/resolver-pnpm-local.md)
+- [Storage: DynamoDB](./docs/design/storage-dynamodb.md)
 - [ADRs](./docs/adr/) — design decision records (in Japanese)
 
 ## License

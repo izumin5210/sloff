@@ -189,7 +189,7 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 	for _, c := range taskChildren {
 		gotChildNames[c.Name()]++
 	}
-	for _, want := range []string{"runner.fingerprint.load", "runner.task.exec", "runner.fingerprint.save"} {
+	for _, want := range []string{"runner.fingerprint.load", "runner.task.exec", "runner.fingerprint.queue"} {
 		if gotChildNames[want] != 1 {
 			t.Errorf("child %q under runner.task.run: got %d, want 1\nchildren: %v", want, gotChildNames[want], gotChildNames)
 		}
@@ -229,8 +229,8 @@ func TestTrace_SecondRunCacheHit(t *testing.T) {
 		switch c.Name() {
 		case "runner.task.exec":
 			t.Errorf("runner.task.exec should not run on cache hit; got span")
-		case "runner.fingerprint.save":
-			t.Errorf("runner.fingerprint.save should not run on cache hit; got span")
+		case "runner.fingerprint.queue":
+			t.Errorf("runner.fingerprint.queue should not run on cache hit; got span")
 		}
 	}
 

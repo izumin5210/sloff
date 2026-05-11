@@ -93,3 +93,21 @@ func TestRun_InvalidRoot(t *testing.T) {
 		t.Fatal("expected error for missing --root, got nil")
 	}
 }
+
+// TestRun_StorageLoadFailureSurfacesError covers runE's loadStorage error
+// branch: a malformed .sloff/config.yml fails to parse, the storage builder
+// rejects the run, and the error is surfaced through the cobra command
+// instead of being swallowed.
+func TestRun_StorageLoadFailureSurfacesError(t *testing.T) {
+	workdir := setupRunHarness(t, "first-run-writes-record")
+	dir := filepath.Join(workdir, ".sloff")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("fingerprint: [malformed]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRunCmd(t, workdir); err == nil {
+		t.Fatal("expected error when .sloff/config.yml fails to parse")
+	}
+}

@@ -95,6 +95,78 @@ commands:
 
 git-tracked files in the workspace package (and transitive workspace deps) contribute to `inputs`; external npm dep versions come from `pnpm-lock.yaml`. Build steps stay in the task `cmd`.
 
+## Fingerprint storage
+
+By default sloff persists records to `.sloff/fingerprints/` under the repo root and commits them to git (ADR-0003). For monorepos where git-noise / clone-size pressure starts mattering, switch to the **DynamoDB backend** via `.sloff/config.yml`:
+
+```yaml
+# .sloff/config.yml
+fingerprint:
+  backend: dynamodb
+  dynamodb:
+    table: sloff-fingerprints # required
+    region: us-east-1         # optional; falls back to AWS_REGION / shared config
+    # endpoint: ""            # optional; emulator URL
+    # expires_after_days: 0   # optional; >0 enables DynamoDB TTL-based GC
+```
+
+Credentials are resolved through the aws-sdk-go-v2 default chain (env vars / `~/.aws/credentials` / IRSA / IMDS), so the config file carries no secrets and is safe to commit. The DynamoDB backend is fronted by a transparent `$XDG_CACHE_HOME`-rooted disk cache so warm lookups stay local; see [Storage: DynamoDB](./docs/design/storage-dynamodb.md) for the full design (schema, caching, consistency, cost).
+
+sloff does **not** auto-create the DynamoDB table — provision it once with your IaC of choice.
+
+<details>
+<summary>Table provisioning (AWS CLI / Terraform)</summary>
+
+```sh
+aws dynamodb create-table \
+  --table-name sloff-fingerprints \
+  --attribute-definitions \
+      AttributeName=pk,AttributeType=S \
+      AttributeName=sk,AttributeType=S \
+  --key-schema \
+      AttributeName=pk,KeyType=HASH \
+      AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
+```
+
+```hcl
+resource "aws_dynamodb_table" "sloff_fingerprints" {
+  name         = "sloff-fingerprints"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute { name = "pk"; type = "S" }
+  attribute { name = "sk"; type = "S" }
+
+  # Required only when expires_after_days > 0 in .sloff/config.yml.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>Required IAM actions</summary>
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem",
+    "dynamodb:Query", "dynamodb:Scan",
+    "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
+    "dynamodb:DescribeTable"
+  ],
+  "Resource": "arn:aws:dynamodb:<region>:<account>:table/sloff-fingerprints"
+}
+```
+
+</details>
+
 ## When to use sloff (vs alternatives)
 
 sloff is well-suited when:
@@ -122,6 +194,7 @@ sloff is intentionally narrow — **codegen orchestration with honest fingerprin
 - [Resolver: script](./docs/design/resolver-script.md)
 - [Resolver: go-local](./docs/design/resolver-go-local.md)
 - [Resolver: pnpm-local](./docs/design/resolver-pnpm-local.md)
+- [Storage: DynamoDB](./docs/design/storage-dynamodb.md)
 - [ADRs](./docs/adr/) — design decision records (in Japanese)
 
 ## License

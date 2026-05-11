@@ -319,6 +319,25 @@ func TestRunCacheGC_CollapsesDuplicates(t *testing.T) {
 	}
 }
 
+// TestFingerprintGC_StorageLoadFailureSurfacesError covers the
+// loadStorage error branch in runFingerprintGC: an invalid
+// .sloff/config.yml fails to parse, the gc command surfaces that
+// error rather than silently falling back to local.
+func TestFingerprintGC_StorageLoadFailureSurfacesError(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".sloff")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("fingerprint: [malformed]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runFingerprintGC(context.Background(), &out, root); err == nil {
+		t.Fatal("expected error when .sloff/config.yml fails to parse")
+	}
+}
+
 // TestFingerprintGCCommandViaRootCmd exercises the cobra wiring for `fingerprint gc`,
 // including the `--repo-root` flag plumb-through that the helper-only
 // runFingerprintGC test does not cover. Without this, the RunE branch (cwd

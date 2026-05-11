@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
 	preflightpnpm "github.com/izumin5210/sloff/internal/sloff/preflight/pnpmlocal"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
@@ -85,10 +84,15 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 		return err
 	}
 
+	storage, err := loadStorage(ctx, root)
+	if err != nil {
+		return fmt.Errorf("load fingerprint storage: %w", err)
+	}
+
 	r := runner.New(runner.Options{
 		RepoRoot:       root,
 		Specs:          specs,
-		Storage:        local.New(root),
+		Storage:        storage,
 		Resolvers:      resolvers,
 		Preflight:      buildPreflight(root),
 		ReadOnly:       readOnly,

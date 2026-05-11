@@ -20,12 +20,14 @@ package dynamodb
 
 import (
 	"strings"
+	"time"
 
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 )
 
 // Attribute names the DynamoDB schema uses. Kept as constants because the
-// runtime never queries on different names.
+// runtime never queries on different names and several of them appear in
+// the typed-struct tags below.
 const (
 	pkAttr        = "pk"
 	skAttr        = "sk"
@@ -39,8 +41,37 @@ const (
 	skSeparator = "#"
 )
 
-func partitionKey(key fingerprint.Key) string { return key.SpecRelpath }
+// item is the typed projection of a DynamoDB item stored by the backend.
+// Marshalling goes through aws-sdk-go-v2/feature/dynamodb/attributevalue
+// so the schema lives on the struct tags instead of being open-coded
+// across encode / decode / scan paths.
+//
+// CreatedAt is always populated (it backs ListFilter.OlderThan); ExpiresAt
+// is a pointer so the omitempty tag can drop it from the marshalled map
+// when TTL is disabled. unixtime tells attributevalue to serialize each
+// time.Time as a Number attribute containing Unix epoch seconds.
+type item struct {
+	PK        string     `dynamodbav:"pk"`
+	SK        string     `dynamodbav:"sk"`
+	Record    []byte     `dynamodbav:"record"`
+	CreatedAt time.Time  `dynamodbav:"created_at,unixtime"`
+	ExpiresAt *time.Time `dynamodbav:"expires_at,unixtime,omitempty"`
+}
 
+// primaryKey is the {pk, sk} subset of item, used as the request payload
+// for GetItem / DeleteItem / BatchGetItem where the body attributes are
+// irrelevant.
+type primaryKey struct {
+	PK string `dynamodbav:"pk"`
+	SK string `dynamodbav:"sk"`
+}
+
+func newPrimaryKey(k fingerprint.Key) primaryKey {
+	return primaryKey{PK: k.SpecRelpath, SK: sortKey(k)}
+}
+
+// sortKey is the on-disk encoding of the (TaskID, InputHash) tuple as a
+// single sort-key string.
 func sortKey(key fingerprint.Key) string {
 	return key.TaskID + skSeparator + key.InputHash
 }
@@ -61,4 +92,15 @@ func parseSortKey(s string) (taskID, inputHash string, ok bool) {
 // "y#<hash>", not "yy#<hash>" or "y" by itself.
 func sortKeyTaskPrefix(taskID string) string {
 	return taskID + skSeparator
+}
+
+// toKey reconstructs the fingerprint.Key from the decoded item. Returns
+// ok=false for malformed sort keys so callers can skip foreign items
+// without producing bogus Keys.
+func (i item) toKey() (fingerprint.Key, bool) {
+	taskID, hash, ok := parseSortKey(i.SK)
+	if !ok {
+		return fingerprint.Key{}, false
+	}
+	return fingerprint.Key{SpecRelpath: i.PK, TaskID: taskID, InputHash: hash}, true
 }

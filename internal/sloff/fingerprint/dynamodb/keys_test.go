@@ -14,14 +14,13 @@ func TestKeyEncoding_RoundTrip(t *testing.T) {
 	}
 	for _, k := range cases {
 		t.Run(k.SpecRelpath+"/"+k.TaskID, func(t *testing.T) {
-			pk := partitionKey(k)
-			sk := sortKey(k)
-			if pk != k.SpecRelpath {
-				t.Errorf("partitionKey = %q, want %q", pk, k.SpecRelpath)
+			pk := newPrimaryKey(k)
+			if pk.PK != k.SpecRelpath {
+				t.Errorf("PK = %q, want %q", pk.PK, k.SpecRelpath)
 			}
-			task, hash, ok := parseSortKey(sk)
+			task, hash, ok := parseSortKey(pk.SK)
 			if !ok {
-				t.Fatalf("parseSortKey(%q) failed", sk)
+				t.Fatalf("parseSortKey(%q) failed", pk.SK)
 			}
 			if task != k.TaskID || hash != k.InputHash {
 				t.Errorf("parseSortKey = (%q, %q), want (%q, %q)", task, hash, k.TaskID, k.InputHash)

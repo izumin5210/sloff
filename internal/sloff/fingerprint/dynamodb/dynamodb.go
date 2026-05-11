@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"golang.org/x/sync/errgroup"
@@ -132,9 +132,13 @@ func (s *Storage) Name() string { return backendName }
 // consistent — strong consistency is unnecessary because fingerprint cache
 // is self-healing and EC reads are half the price).
 func (s *Storage) Load(ctx context.Context, key fingerprint.Key) (*fingerprintv1.Record, bool, error) {
+	keyAttrs, err := marshalKey(key)
+	if err != nil {
+		return nil, false, err
+	}
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
-		Key:       primaryKeyAttrs(key),
+		Key:       keyAttrs,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("fingerprint/dynamodb: get %+v: %w", key, err)
@@ -142,7 +146,7 @@ func (s *Storage) Load(ctx context.Context, key fingerprint.Key) (*fingerprintv1
 	if out.Item == nil {
 		return nil, false, nil
 	}
-	rec, err := decodeItem(out.Item)
+	rec, err := recordFromAttrs(out.Item)
 	if err != nil {
 		return nil, false, fmt.Errorf("fingerprint/dynamodb: decode %+v: %w", key, err)
 	}
@@ -153,13 +157,13 @@ func (s *Storage) Load(ctx context.Context, key fingerprint.Key) (*fingerprintv1
 // (Key) writes are wire-byte identical (deterministic Marshal) so concurrent
 // writers don't lose data.
 func (s *Storage) Save(ctx context.Context, key fingerprint.Key, rec *fingerprintv1.Record) error {
-	item, err := s.encodeItem(key, rec)
+	attrs, err := s.itemAttrs(key, rec)
 	if err != nil {
 		return err
 	}
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.table),
-		Item:      item,
+		Item:      attrs,
 	})
 	if err != nil {
 		return fmt.Errorf("fingerprint/dynamodb: put %+v: %w", key, err)
@@ -169,9 +173,13 @@ func (s *Storage) Save(ctx context.Context, key fingerprint.Key, rec *fingerprin
 
 // Delete implements fingerprint.Storage. Missing keys are a no-op.
 func (s *Storage) Delete(ctx context.Context, key fingerprint.Key) error {
-	_, err := s.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+	keyAttrs, err := marshalKey(key)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(s.table),
-		Key:       primaryKeyAttrs(key),
+		Key:       keyAttrs,
 	})
 	if err != nil {
 		return fmt.Errorf("fingerprint/dynamodb: delete %+v: %w", key, err)
@@ -215,8 +223,11 @@ func (s *Storage) listByQuery(ctx context.Context, filter fingerprint.ListFilter
 		if err != nil {
 			return nil, fmt.Errorf("fingerprint/dynamodb: query %s: %w", filter.SpecRelpath, err)
 		}
-		for _, item := range page.Items {
-			k, ok, _ := keyFromItem(item, &filter)
+		for _, attrs := range page.Items {
+			k, ok, err := keyFromAttrs(attrs, &filter)
+			if err != nil {
+				return nil, fmt.Errorf("fingerprint/dynamodb: query %s: %w", filter.SpecRelpath, err)
+			}
 			if ok {
 				keys = append(keys, k)
 			}
@@ -235,8 +246,11 @@ func (s *Storage) listByScan(ctx context.Context, filter fingerprint.ListFilter)
 		if err != nil {
 			return nil, fmt.Errorf("fingerprint/dynamodb: scan: %w", err)
 		}
-		for _, item := range page.Items {
-			k, ok, _ := keyFromItem(item, &filter)
+		for _, attrs := range page.Items {
+			k, ok, err := keyFromAttrs(attrs, &filter)
+			if err != nil {
+				return nil, fmt.Errorf("fingerprint/dynamodb: scan: %w", err)
+			}
 			if !ok {
 				continue
 			}
@@ -270,8 +284,10 @@ func (s *Storage) LoadMany(ctx context.Context, keys []fingerprint.Key) (map[fin
 	out := make(map[fingerprint.Key]*fingerprintv1.Record, len(keys))
 	var mu sync.Mutex
 
-	// Index by composite identifier so we can map an item back to the
-	// fingerprint.Key after the SDK round-trips it as raw attribute values.
+	// Index by composite identifier so a returned item can be mapped back
+	// to the caller's original Key (preserves the SpecRelpath / TaskID /
+	// InputHash split that DynamoDB serialises into the composite sort
+	// key).
 	keyByPair := make(map[[2]string]fingerprint.Key, len(keys))
 	for _, k := range keys {
 		keyByPair[[2]string{k.SpecRelpath, sortKey(k)}] = k
@@ -287,32 +303,38 @@ func (s *Storage) LoadMany(ctx context.Context, keys []fingerprint.Key) (map[fin
 				if err := gctx.Err(); err != nil {
 					return err
 				}
-				items := make([]map[string]ddbtypes.AttributeValue, 0, len(pending))
+				reqKeys := make([]map[string]ddbtypes.AttributeValue, 0, len(pending))
 				for _, k := range pending {
-					items = append(items, primaryKeyAttrs(k))
+					attrs, err := marshalKey(k)
+					if err != nil {
+						return err
+					}
+					reqKeys = append(reqKeys, attrs)
 				}
 				resp, err := s.client.BatchGetItem(gctx, &dynamodb.BatchGetItemInput{
 					RequestItems: map[string]ddbtypes.KeysAndAttributes{
-						s.table: {Keys: items},
+						s.table: {Keys: reqKeys},
 					},
 				})
 				if err != nil {
 					return fmt.Errorf("fingerprint/dynamodb: batch get: %w", err)
 				}
-				for _, item := range resp.Responses[s.table] {
-					rec, err := decodeItem(item)
+				for _, attrs := range resp.Responses[s.table] {
+					it, err := itemFromAttrs(attrs)
 					if err != nil {
 						return fmt.Errorf("fingerprint/dynamodb: decode item: %w", err)
 					}
-					pk, sk, ok := pkSkFromItem(item)
+					k, ok := keyByPair[[2]string{it.PK, it.SK}]
 					if !ok {
 						continue
 					}
-					if k, ok := keyByPair[[2]string{pk, sk}]; ok {
-						mu.Lock()
-						out[k] = rec
-						mu.Unlock()
+					rec, err := fingerprint.Unmarshal(it.Record)
+					if err != nil {
+						return fmt.Errorf("fingerprint/dynamodb: decode %+v: %w", k, err)
 					}
+					mu.Lock()
+					out[k] = rec
+					mu.Unlock()
 				}
 				pending = unprocessedKeys(resp.UnprocessedKeys[s.table], keyByPair)
 			}
@@ -360,130 +382,100 @@ func (s *Storage) SaveMany(ctx context.Context, items []fingerprint.KeyRecord) e
 	return g.Wait()
 }
 
-// encodeItem renders a record into the attribute map a PutItem expects.
-// Always writes created_at so ListFilter.OlderThan has a stable timestamp
-// to filter on. Adds expires_at only when TTL is configured so the
-// table's TTL setting can auto-evict the item without sloff sweeping it.
-func (s *Storage) encodeItem(key fingerprint.Key, rec *fingerprintv1.Record) (map[string]ddbtypes.AttributeValue, error) {
+// itemAttrs builds the attribute map a PutItem expects by marshalling the
+// typed item struct. The schema (which fields are written, with what
+// types, under which attribute names) lives entirely on the struct tags
+// in keys.go — there is no parallel layout description to keep in sync.
+func (s *Storage) itemAttrs(key fingerprint.Key, rec *fingerprintv1.Record) (map[string]ddbtypes.AttributeValue, error) {
 	body, err := fingerprint.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
 	now := s.clock()
-	item := map[string]ddbtypes.AttributeValue{
-		pkAttr:        &ddbtypes.AttributeValueMemberS{Value: partitionKey(key)},
-		skAttr:        &ddbtypes.AttributeValueMemberS{Value: sortKey(key)},
-		recordAttr:    &ddbtypes.AttributeValueMemberB{Value: body},
-		createdAtAttr: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
+	it := item{
+		PK:        key.SpecRelpath,
+		SK:        sortKey(key),
+		Record:    body,
+		CreatedAt: now,
 	}
 	if s.expiresIn > 0 {
-		expiresAt := now.Add(s.expiresIn).Unix()
-		item[expiresAtAttr] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)}
+		exp := now.Add(s.expiresIn)
+		it.ExpiresAt = &exp
 	}
-	return item, nil
+	return attributevalue.MarshalMap(it)
 }
 
 func (s *Storage) encodeBatchWrites(batch []fingerprint.KeyRecord) ([]ddbtypes.WriteRequest, error) {
 	out := make([]ddbtypes.WriteRequest, 0, len(batch))
-	for _, it := range batch {
-		item, err := s.encodeItem(it.Key, it.Record)
+	for _, kr := range batch {
+		attrs, err := s.itemAttrs(kr.Key, kr.Record)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, ddbtypes.WriteRequest{
-			PutRequest: &ddbtypes.PutRequest{Item: item},
+			PutRequest: &ddbtypes.PutRequest{Item: attrs},
 		})
 	}
 	return out, nil
 }
 
-// primaryKeyAttrs builds the {pk, sk} attribute map a GetItem / DeleteItem
-// expects.
-func primaryKeyAttrs(key fingerprint.Key) map[string]ddbtypes.AttributeValue {
-	return map[string]ddbtypes.AttributeValue{
-		pkAttr: &ddbtypes.AttributeValueMemberS{Value: partitionKey(key)},
-		skAttr: &ddbtypes.AttributeValueMemberS{Value: sortKey(key)},
-	}
+// marshalKey produces the {pk, sk} attribute map a GetItem / DeleteItem /
+// BatchGetItem call needs. Mirrors itemAttrs in going through
+// attributevalue + a typed struct so the attribute names live in one
+// place (the dynamodbav tags on primaryKey).
+func marshalKey(k fingerprint.Key) (map[string]ddbtypes.AttributeValue, error) {
+	return attributevalue.MarshalMap(newPrimaryKey(k))
 }
 
-// decodeItem extracts the proto bytes from a stored item and unmarshals
-// them. Returns an error if the record attribute is missing or the wrong
-// type — both indicate a foreign item the table happens to share with
-// sloff records, which the runner cannot interpret.
-func decodeItem(item map[string]ddbtypes.AttributeValue) (*fingerprintv1.Record, error) {
-	bAttr, ok := item[recordAttr]
-	if !ok {
+// itemFromAttrs decodes a returned attribute map into the typed item.
+// Foreign items missing pk / sk surface as zero values on the struct
+// fields; callers check item.SK / parseSortKey before treating the
+// result as a sloff record.
+func itemFromAttrs(attrs map[string]ddbtypes.AttributeValue) (item, error) {
+	var it item
+	if err := attributevalue.UnmarshalMap(attrs, &it); err != nil {
+		return item{}, fmt.Errorf("decode item: %w", err)
+	}
+	return it, nil
+}
+
+// recordFromAttrs unmarshals the typed item and decodes its Record proto
+// bytes. Returns an error if the attribute map is foreign (no record
+// bytes) or the proto bytes are malformed.
+func recordFromAttrs(attrs map[string]ddbtypes.AttributeValue) (*fingerprintv1.Record, error) {
+	it, err := itemFromAttrs(attrs)
+	if err != nil {
+		return nil, err
+	}
+	if len(it.Record) == 0 {
 		return nil, fmt.Errorf("missing %s attribute", recordAttr)
 	}
-	bytes, ok := bAttr.(*ddbtypes.AttributeValueMemberB)
-	if !ok {
-		return nil, fmt.Errorf("%s attribute is not Binary", recordAttr)
-	}
-	return fingerprint.Unmarshal(bytes.Value)
+	return fingerprint.Unmarshal(it.Record)
 }
 
-// pkSkFromItem extracts the (pk, sk) string pair from a returned item, used
-// to map BatchGetItem responses back to the caller's fingerprint.Key set.
-// Foreign items missing pk / sk return ok=false.
-func pkSkFromItem(item map[string]ddbtypes.AttributeValue) (pk, sk string, ok bool) {
-	pkAttrV, pkOk := item[pkAttr].(*ddbtypes.AttributeValueMemberS)
-	skAttrV, skOk := item[skAttr].(*ddbtypes.AttributeValueMemberS)
-	if !pkOk || !skOk {
-		return "", "", false
-	}
-	return pkAttrV.Value, skAttrV.Value, true
-}
-
-// keyFromItem reconstructs a fingerprint.Key from a stored item. Used by
+// keyFromAttrs reconstructs a fingerprint.Key from a stored item. Used by
 // List / Scan to filter foreign items and report only well-formed records.
-// The OlderThan filter is applied here against the item's created_at
-// (record write time, mirroring the local backend's mtime semantics).
-// Records without created_at are conservatively kept so list-based GC
-// sweeps don't drop legacy entries written before this attribute was
-// introduced.
-func keyFromItem(item map[string]ddbtypes.AttributeValue, filter *fingerprint.ListFilter) (fingerprint.Key, bool, error) {
-	pk, sk, ok := pkSkFromItem(item)
+// The OlderThan filter is applied against item.CreatedAt (record write
+// time, mirroring the local backend's mtime semantics); items without a
+// CreatedAt are conservatively kept so list-based GC sweeps don't drop
+// legacy entries written before this attribute was introduced.
+func keyFromAttrs(attrs map[string]ddbtypes.AttributeValue, filter *fingerprint.ListFilter) (fingerprint.Key, bool, error) {
+	it, err := itemFromAttrs(attrs)
+	if err != nil {
+		return fingerprint.Key{}, false, err
+	}
+	key, ok := it.toKey()
 	if !ok {
 		return fingerprint.Key{}, false, nil
 	}
-	taskID, hash, ok := parseSortKey(sk)
-	if !ok {
-		return fingerprint.Key{}, false, nil
-	}
-	if !filter.OlderThan.IsZero() {
-		created, ok, err := readUnixNumber(item, createdAtAttr)
-		if err != nil {
-			return fingerprint.Key{}, false, err
-		}
+	if !filter.OlderThan.IsZero() && !it.CreatedAt.IsZero() {
 		// "older than" semantics: skip items whose write time is at or
-		// after the cutoff (i.e. recent enough to keep). When created_at
-		// is absent we conservatively keep the entry so list-based GC
-		// sweeps don't drop records that pre-date the attribute being
-		// introduced.
-		if ok && !created.Before(filter.OlderThan) {
+		// after the cutoff (i.e. recent enough to keep).
+		if !it.CreatedAt.Before(filter.OlderThan) {
 			return fingerprint.Key{}, false, nil
 		}
 	}
-	return fingerprint.Key{SpecRelpath: pk, TaskID: taskID, InputHash: hash}, true, nil
-}
-
-// readUnixNumber decodes a Number attribute as a Unix-epoch-seconds
-// time.Time. Used for both created_at (write time) and expires_at (TTL
-// target); kept symmetric so the same parsing rules apply to both.
-func readUnixNumber(item map[string]ddbtypes.AttributeValue, attr string) (time.Time, bool, error) {
-	v, ok := item[attr]
-	if !ok {
-		return time.Time{}, false, nil
-	}
-	n, ok := v.(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return time.Time{}, false, fmt.Errorf("%s attribute is not Number", attr)
-	}
-	sec, err := strconv.ParseInt(n.Value, 10, 64)
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	return time.Unix(sec, 0).UTC(), true, nil
+	return key, true, nil
 }
 
 // chunkKeys / chunkItems split slices into DynamoDB-batch-sized pieces.
@@ -517,12 +509,14 @@ func chunkItems(in []fingerprint.KeyRecord, size int) [][]fingerprint.KeyRecord 
 func unprocessedKeys(left ddbtypes.KeysAndAttributes, byPair map[[2]string]fingerprint.Key) []fingerprint.Key {
 	var out []fingerprint.Key
 	for _, raw := range left.Keys {
-		pkAttrV, pkOk := raw[pkAttr].(*ddbtypes.AttributeValueMemberS)
-		skAttrV, skOk := raw[skAttr].(*ddbtypes.AttributeValueMemberS)
-		if !pkOk || !skOk {
+		var pk primaryKey
+		if err := attributevalue.UnmarshalMap(raw, &pk); err != nil {
 			continue
 		}
-		if k, ok := byPair[[2]string{pkAttrV.Value, skAttrV.Value}]; ok {
+		if pk.PK == "" || pk.SK == "" {
+			continue
+		}
+		if k, ok := byPair[[2]string{pk.PK, pk.SK}]; ok {
 			out = append(out, k)
 		}
 	}

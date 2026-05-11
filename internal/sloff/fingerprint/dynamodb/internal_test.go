@@ -9,55 +9,50 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 )
 
-func TestDecodeItem_RejectsMissingRecordAttribute(t *testing.T) {
-	if _, err := decodeItem(map[string]ddbtypes.AttributeValue{}); err == nil {
+func TestRecordFromAttrs_RejectsMissingRecord(t *testing.T) {
+	// pk / sk present but record bytes absent: itemFromAttrs succeeds
+	// (record decodes to a nil []byte), recordFromAttrs surfaces the
+	// missing-attribute error so callers don't synthesise an empty proto.
+	attrs := map[string]ddbtypes.AttributeValue{
+		pkAttr: &ddbtypes.AttributeValueMemberS{Value: "spec"},
+		skAttr: &ddbtypes.AttributeValueMemberS{Value: "task#h"},
+	}
+	if _, err := recordFromAttrs(attrs); err == nil {
 		t.Error("expected error when record attribute is missing")
 	}
 }
 
-func TestDecodeItem_RejectsWrongType(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
-		recordAttr: &ddbtypes.AttributeValueMemberS{Value: "not bytes"},
+func TestRecordFromAttrs_RejectsCorruptProtoBytes(t *testing.T) {
+	attrs := map[string]ddbtypes.AttributeValue{
+		pkAttr:     &ddbtypes.AttributeValueMemberS{Value: "spec"},
+		skAttr:     &ddbtypes.AttributeValueMemberS{Value: "task#h"},
+		recordAttr: &ddbtypes.AttributeValueMemberB{Value: []byte("not a proto")},
 	}
-	if _, err := decodeItem(item); err == nil {
-		t.Error("expected error when record attribute is not Binary")
-	}
-}
-
-func TestPkSkFromItem_RejectsMissingAttrs(t *testing.T) {
-	cases := []map[string]ddbtypes.AttributeValue{
-		{},
-		{pkAttr: &ddbtypes.AttributeValueMemberS{Value: "spec"}}, // sk missing
-		{skAttr: &ddbtypes.AttributeValueMemberS{Value: "task#h"}},
-		{
-			pkAttr: &ddbtypes.AttributeValueMemberN{Value: "1"}, // wrong type
-			skAttr: &ddbtypes.AttributeValueMemberS{Value: "task#h"},
-		},
-	}
-	for i, item := range cases {
-		if _, _, ok := pkSkFromItem(item); ok {
-			t.Errorf("case %d: expected ok=false, item=%#v", i, item)
-		}
+	if _, err := recordFromAttrs(attrs); err == nil {
+		t.Error("expected proto decode error for corrupt record bytes")
 	}
 }
 
-func TestKeyFromItem_RejectsMalformedSortKey(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
+func TestKeyFromAttrs_SkipsMalformedSortKey(t *testing.T) {
+	attrs := map[string]ddbtypes.AttributeValue{
 		pkAttr: &ddbtypes.AttributeValueMemberS{Value: "spec"},
 		skAttr: &ddbtypes.AttributeValueMemberS{Value: "no-separator"},
 	}
-	_, ok, _ := keyFromItem(item, &fingerprint.ListFilter{})
+	_, ok, err := keyFromAttrs(attrs, &fingerprint.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ok {
-		t.Error("expected keyFromItem to skip items with malformed sort key")
+		t.Error("expected keyFromAttrs to skip items with malformed sort key")
 	}
 }
 
-func TestKeyFromItem_KeepsItemWithoutCreatedAtUnderOlderThan(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
+func TestKeyFromAttrs_KeepsItemWithoutCreatedAtUnderOlderThan(t *testing.T) {
+	attrs := map[string]ddbtypes.AttributeValue{
 		pkAttr: &ddbtypes.AttributeValueMemberS{Value: "spec"},
 		skAttr: &ddbtypes.AttributeValueMemberS{Value: "task#h"},
 	}
-	_, ok, err := keyFromItem(item, &fingerprint.ListFilter{OlderThan: time.Now()})
+	_, ok, err := keyFromAttrs(attrs, &fingerprint.ListFilter{OlderThan: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,42 +64,16 @@ func TestKeyFromItem_KeepsItemWithoutCreatedAtUnderOlderThan(t *testing.T) {
 	}
 }
 
-func TestKeyFromItem_PropagatesReadCreatedAtError(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
+func TestKeyFromAttrs_PropagatesUnmarshalError(t *testing.T) {
+	// CreatedAt is declared as time.Time with `,unixtime`, so a String
+	// value at that attribute fails the SDK's typed unmarshal.
+	attrs := map[string]ddbtypes.AttributeValue{
 		pkAttr:        &ddbtypes.AttributeValueMemberS{Value: "spec"},
 		skAttr:        &ddbtypes.AttributeValueMemberS{Value: "task#h"},
 		createdAtAttr: &ddbtypes.AttributeValueMemberS{Value: "not-a-number"},
 	}
-	if _, _, err := keyFromItem(item, &fingerprint.ListFilter{OlderThan: time.Now()}); err == nil {
+	if _, _, err := keyFromAttrs(attrs, &fingerprint.ListFilter{OlderThan: time.Now()}); err == nil {
 		t.Error("expected error when created_at is the wrong type")
-	}
-}
-
-func TestReadUnixNumber_AbsentReturnsFalse(t *testing.T) {
-	got, ok, err := readUnixNumber(map[string]ddbtypes.AttributeValue{}, createdAtAttr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok || !got.IsZero() {
-		t.Errorf("expected (zero, false, nil), got (%v, %v)", got, ok)
-	}
-}
-
-func TestReadUnixNumber_RejectsNonNumeric(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
-		createdAtAttr: &ddbtypes.AttributeValueMemberN{Value: "abc"},
-	}
-	if _, _, err := readUnixNumber(item, createdAtAttr); err == nil {
-		t.Error("expected error for non-numeric value")
-	}
-}
-
-func TestReadUnixNumber_RejectsWrongType(t *testing.T) {
-	item := map[string]ddbtypes.AttributeValue{
-		createdAtAttr: &ddbtypes.AttributeValueMemberS{Value: "1234"},
-	}
-	if _, _, err := readUnixNumber(item, createdAtAttr); err == nil {
-		t.Error("expected error when attribute is not Number type")
 	}
 }
 

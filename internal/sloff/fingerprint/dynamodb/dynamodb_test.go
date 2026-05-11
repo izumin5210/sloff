@@ -146,7 +146,6 @@ func TestSave_AlwaysWritesCreatedAt(t *testing.T) {
 	// ListFilter.OlderThan reads it. Verify both TTL-on and TTL-off
 	// modes carry the attribute.
 	for _, ttlDays := range []int{0, 30} {
-		ttlDays := ttlDays
 		t.Run(fmt.Sprintf("ttl=%dd", ttlDays), func(t *testing.T) {
 			st, table, client := newStorage(t, ttlDays, fixedClock)
 			ctx := context.Background()

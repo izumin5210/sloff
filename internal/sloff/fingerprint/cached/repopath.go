@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -96,7 +97,7 @@ func parseGitURL(raw string) (host, path string, err error) {
 // to New; exported so the cmd layer can inspect / pre-create the path
 // without importing internal helpers.
 func CacheRoot(repoRoot string) (string, error) {
-	base, err := os.UserCacheDir()
+	base, err := cacheBaseDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache dir: %w", err)
 	}
@@ -105,4 +106,28 @@ func CacheRoot(repoRoot string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "sloff", "fingerprints", repoPath), nil
+}
+
+// cacheBaseDir resolves the user-level cache base directory. macOS is
+// special-cased to honour XDG_CACHE_HOME (and fall back to ~/.cache) so
+// users with a unified dotfile setup across Linux and macOS see the same
+// layout. os.UserCacheDir would otherwise return ~/Library/Caches on
+// macOS regardless of the env var. Linux / Windows keep the stdlib
+// behaviour.
+func cacheBaseDir() (string, error) {
+	return cacheBaseDirFor(runtime.GOOS, os.Getenv, os.UserHomeDir)
+}
+
+func cacheBaseDirFor(goos string, getenv func(string) string, homeDir func() (string, error)) (string, error) {
+	if goos == "darwin" {
+		if xdg := getenv("XDG_CACHE_HOME"); xdg != "" {
+			return xdg, nil
+		}
+		home, err := homeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home dir: %w", err)
+		}
+		return filepath.Join(home, ".cache"), nil
+	}
+	return os.UserCacheDir()
 }

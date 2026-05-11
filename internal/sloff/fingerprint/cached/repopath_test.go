@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -114,15 +115,12 @@ func TestRepoPath_MalformedURLIsError(t *testing.T) {
 func TestCacheRoot_HonoursXDGCacheHome(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", xdg)
-	// On macOS os.UserCacheDir uses ~/Library/Caches and ignores
-	// XDG_CACHE_HOME, so this assertion is conditional on the runtime
-	// honouring the env var (Linux / generic Unix).
-	cacheBase, err := os.UserCacheDir()
-	if err != nil {
-		t.Fatalf("os.UserCacheDir: %v", err)
-	}
-	if cacheBase != xdg {
-		t.Skipf("os.UserCacheDir returned %q, not honouring XDG_CACHE_HOME on this platform", cacheBase)
+	// XDG_CACHE_HOME must be honoured on every supported GOOS — Linux via
+	// os.UserCacheDir's native behaviour, darwin via the explicit override
+	// in cacheBaseDir. Windows still defers to os.UserCacheDir and is
+	// skipped here.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses os.UserCacheDir which ignores XDG_CACHE_HOME")
 	}
 
 	root := t.TempDir()
@@ -135,6 +133,62 @@ func TestCacheRoot_HonoursXDGCacheHome(t *testing.T) {
 	want := filepath.Join(xdg, "sloff", "fingerprints", "github.com", "izumin5210", "sloff")
 	if got != want {
 		t.Errorf("CacheRoot = %q, want %q", got, want)
+	}
+}
+
+func TestCacheBaseDir_Darwin(t *testing.T) {
+	// On darwin XDG_CACHE_HOME wins when set, otherwise ~/.cache. Driven
+	// by an injected GOOS / env / home so the matrix runs on any CI host.
+	home := t.TempDir()
+
+	cases := []struct {
+		name string
+		xdg  string
+		want string
+	}{
+		{name: "XDG set", xdg: "/tmp/custom-cache", want: "/tmp/custom-cache"},
+		{name: "XDG empty falls back to ~/.cache", xdg: "", want: filepath.Join(home, ".cache")},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cacheBaseDirFor(
+				"darwin",
+				func(string) string { return tt.xdg },
+				func() (string, error) { return home, nil },
+			)
+			if err != nil {
+				t.Fatalf("cacheBaseDirFor: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("cacheBaseDirFor(darwin, xdg=%q) = %q, want %q", tt.xdg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCacheBaseDir_NonDarwinDelegates(t *testing.T) {
+	// On non-darwin we expect cacheBaseDirFor to defer to os.UserCacheDir
+	// (proxied via the injected fallback). Verifies darwin special-casing
+	// does not leak into other platforms.
+	if runtime.GOOS == "darwin" {
+		t.Skip("non-darwin assertion")
+	}
+	xdg := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", xdg)
+	got, err := cacheBaseDirFor(
+		runtime.GOOS,
+		os.Getenv,
+		os.UserHomeDir,
+	)
+	if err != nil {
+		t.Fatalf("cacheBaseDirFor: %v", err)
+	}
+	want, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("os.UserCacheDir: %v", err)
+	}
+	if got != want {
+		t.Errorf("cacheBaseDirFor(%q) = %q, want %q", runtime.GOOS, got, want)
 	}
 }
 

@@ -107,7 +107,10 @@ remote backend ( DynamoDB) の **前段に必ず disk cache を被せる**。 lo
 $XDG_CACHE_HOME/sloff/fingerprints/<host>/<owner>/<repo>/<spec_relpath>/<task_id>/<input_hash>.pb
 ```
 
-- `XDG_CACHE_HOME` は `os.UserCacheDir()` で解決 ( クロス OS 対応、 Linux は `~/.cache`、 macOS は `~/Library/Caches`、 Windows は `%LocalAppData%`)
+- `XDG_CACHE_HOME` の解決は OS ごとに分岐:
+    - Linux: `os.UserCacheDir()` ( `$XDG_CACHE_HOME` set ならそれ、 未設定なら `~/.cache`)
+    - macOS: 明示的に `$XDG_CACHE_HOME` を優先し、 未設定時は `~/.cache` にフォールバック ( `os.UserCacheDir()` のデフォルト `~/Library/Caches` は使わない)。 dotfile を Linux / macOS 共通で管理するユーザがレイアウトを揃えられるようにするため
+    - Windows: `os.UserCacheDir()` ( `%LocalAppData%`)
 - `<host>/<owner>/<repo>` は **リポジトリの remote URL から導出** ( ghq の path ルールに準拠)。 同一リポジトリの別 worktree でも同じパスを共有できる
 - ファイルレイアウトは local backend の `.sloff/fingerprints/<spec>/<task>/` と揃える ( 但し timestamp prefix は不要、 last-write-wins)
 

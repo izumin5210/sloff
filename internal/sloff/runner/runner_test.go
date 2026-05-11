@@ -583,6 +583,66 @@ commands:
 	}
 }
 
+// TestRunner_PrefetchToleratesMissingInputFile locks the contract that a
+// declared input that does not exist on disk does NOT make
+// prefetchFingerprints abort the run with hash.Files crashing on a
+// missing path. glob.Expand silently drops patterns that match no files
+// (doublestar.Glob's filesystem-backed semantics), so info.inputPaths
+// is empty for such tasks and hash.Files runs on an empty slice — a
+// successful no-op that produces the SHA-256 of the empty digest. The
+// case matters because real specs sometimes declare inputs whose files
+// only exist after an unrelated task has run; that depgraph blind spot
+// is tracked separately (DEV-23). This test pins the *prefetch*
+// behaviour without depending on inter-task ordering.
+func TestRunner_PrefetchToleratesMissingInputFile(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A single task whose declared input is missing. Single task = no
+	// inter-task races; the only thing that can fail this test is
+	// prefetch (or hash.Files) crashing on a non-existent path.
+	yml := `tools:
+  v:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: solo
+    cmd: ["sh", "-c", "echo ok > out.txt"]
+    inputs: ["does-not-exist.txt"]
+    outputs: ["out.txt"]
+    tools: [v]
+`
+	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := spec.Discover(workdir, "**/sloff.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolverReg := toolresolver.NewRegistry()
+	resolverReg.Register(script.New(workdir))
+	resolverReg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+		Resolvers: resolverReg,
+		Preflight: preflight.NewRegistry(),
+	})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run aborted on missing input declaration: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(specDir, "out.txt")); err != nil {
+		t.Errorf("expected generator to have produced out.txt, got %v", err)
+	}
+}
+
 // TestRunner_FallbackLoadServesTransitiveCacheHitAfterUpstreamRegen
 // guards against the "upstream regen breaks downstream cache" regression
 // Codex flagged: when an upstream task is a miss and regenerates its

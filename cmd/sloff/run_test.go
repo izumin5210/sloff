@@ -67,6 +67,31 @@ func TestRun_FirstRunWritesRecord(t *testing.T) {
 	}
 }
 
+// TestRun_ForceBypassesFingerprintHit drives ADR-0012's `--force` flag through
+// the full CLI entry point: a normal first run populates the record, then a
+// second run with `--force` must re-execute the cmd instead of taking the
+// fingerprint shortcut. The fixture's cmd appends to ../marker.txt on every
+// execution, so the marker file contains the run count.
+func TestRun_ForceBypassesFingerprintHit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := setupRunHarness(t, "force-bypasses-hit")
+	if _, err := runRunCmd(t, workdir); err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	if _, err := runRunCmd(t, workdir, "--force"); err != nil {
+		t.Fatalf("forced run failed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(workdir, "marker.txt"))
+	if err != nil {
+		t.Fatalf("read marker.txt: %v", err)
+	}
+	if string(got) != "xx" {
+		t.Fatalf("marker.txt = %q; want %q (force should have re-executed the cmd)", got, "xx")
+	}
+}
+
 // TestRun_AllowStaleDeps verifies the SLOFF_ALLOW_STALE_DEPS env path. Setting
 // it should keep the run successful and skip cache writes; the smoke is "no
 // crash, output produced" — the underlying ReadOnly/preflight semantics are

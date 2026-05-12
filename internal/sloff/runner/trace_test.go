@@ -28,8 +28,12 @@ import (
 // inspection. Each invocation uses its own provider; sloff never touches the
 // otel-go global TracerProvider, so concurrent / sequential calls don't share
 // state and the test process's host instrumentation is untouched.
-func runOnceForTrace(t *testing.T, h *harness) *tracetest.SpanRecorder {
+func runOnceForTrace(t *testing.T, h *harness, opts ...traceRunOption) *tracetest.SpanRecorder {
 	t.Helper()
+	cfg := traceRunConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
@@ -54,12 +58,25 @@ func runOnceForTrace(t *testing.T, h *harness) *tracetest.SpanRecorder {
 		Storage:        local.New(h.workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers:      resolverReg,
 		Preflight:      preflightReg,
+		Force:          cfg.force,
 		TracerProvider: tp,
 	})
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	return rec
+}
+
+type traceRunConfig struct {
+	force bool
+}
+
+type traceRunOption func(*traceRunConfig)
+
+// withTraceForce flips Options.Force for the runner created by
+// runOnceForTrace so trace-level assertions can exercise ADR-0012's bypass.
+func withTraceForce() traceRunOption {
+	return func(c *traceRunConfig) { c.force = true }
 }
 
 // findSpan returns the first ended span with the given name, or nil if absent.
@@ -240,6 +257,34 @@ func TestTrace_SecondRunCacheHit(t *testing.T) {
 	}
 	if state := attrString(loadSpan, "sloff.fingerprint.state"); state != "hit" {
 		t.Errorf("runner.fingerprint.load sloff.fingerprint.state = %q, want \"hit\"", state)
+	}
+}
+
+// TestTrace_ForceStampsTaskSpanOnCacheMiss is the regression guard for
+// ADR-0012's observability requirement: even on a clean first run, where the
+// fingerprint lookup is a miss and the force shortcut therefore had nothing to
+// bypass, the task span must still expose sloff.force=true so trace consumers
+// can distinguish a forced cache miss from a natural one.
+func TestTrace_ForceStampsTaskSpanOnCacheMiss(t *testing.T) {
+	h := setupHarness(t, "first-run-writes-record")
+	rec := runOnceForTrace(t, h, withTraceForce())
+
+	taskSpan := findSpan(rec.Ended(), "runner.task.run")
+	if taskSpan == nil {
+		t.Fatal("runner.task.run missing")
+	}
+	force, ok := attrBool(taskSpan, "sloff.force")
+	if !ok {
+		t.Fatal("sloff.force attribute missing on runner.task.run")
+	}
+	if !force {
+		t.Errorf("sloff.force = false on forced run, want true")
+	}
+	// Sanity check the lookup actually was a miss: this confirms the regression
+	// scenario (Codex P2) — span gets stamped even though the hit-bypass branch
+	// never fired because there was no record to bypass.
+	if hit, _ := attrBool(taskSpan, "sloff.fingerprint.hit"); hit {
+		t.Errorf("sloff.fingerprint.hit = true on first run, want false to exercise the miss path")
 	}
 }
 

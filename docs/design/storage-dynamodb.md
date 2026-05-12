@@ -166,7 +166,7 @@ func (c *cachedStorage) SaveMany(ctx, items []KeyRecord) error {
 
 #### キャッシュレイヤの ON/OFF
 
-リモート backend を選んだら **常時 ON** がデフォルト。 「 一時的に cache を skip して remote を直接見る」 「 fingerprint そのものを bypass して全 task 強制実行」 の override は別途 [DEV-22](https://linear.app/izumin/issue/DEV-22/...) で扱う。 本 doc では実装しない。
+リモート backend を選んだら **常時 ON** がデフォルト。 「 一時的に cache を skip して remote を直接見る」 の override は本 doc では実装しない。 「 fingerprint そのものを bypass して全 task 強制実行」 は [ADR-0012](../adr/0012-force-rerun-flag.md) の `sloff run --force` で扱う。
 
 ### 設定ファイル `.sloff/config.yml`
 

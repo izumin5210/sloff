@@ -38,5 +38,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newGraphCmd())
 	cmd.AddCommand(newFingerprintCmd())
+	cmd.AddCommand(newVersionCmd())
 	return cmd
 }

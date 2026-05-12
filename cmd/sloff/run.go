@@ -33,20 +33,26 @@ func newRunCmd() *cobra.Command {
 	var (
 		root    string
 		pattern string
+		force   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Discover specs and execute every task with fingerprint-aware orchestration",
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
-			return runE(cobraCmd.Context(), root, pattern)
+			return runE(cobraCmd.Context(), root, pattern, force)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .sloff/fingerprints and lockfiles")
 	cmd.Flags().StringVar(&pattern, "pattern", "**/sloff.yml", "Glob pattern (relative to --root) used to discover specs")
+	// --force is intentionally CLI-only (no env var mirror). ADR-0012 §"CLI 仕様"
+	// argues that env-var ON/OFF makes "always force" trivial to slip into CI or
+	// .env files, which would re-introduce the "--no-fingerprint" habit ADR-0001
+	// is built to prevent.
+	cmd.Flags().BoolVar(&force, "force", false, "Bypass fingerprint hits and re-execute every task; records are still written (see ADR-0012)")
 	return cmd
 }
 
-func runE(ctx context.Context, rawRoot, pattern string) (err error) {
+func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -61,6 +67,7 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 	ctx, span := tracer.Start(ctx, "sloff.run", trace.WithAttributes(
 		attribute.String("sloff.subcommand", "run"),
 		attribute.String("sloff.spec.pattern", pattern),
+		attribute.Bool("sloff.force", force),
 	))
 	defer endSpan(span, &err)
 
@@ -96,6 +103,7 @@ func runE(ctx context.Context, rawRoot, pattern string) (err error) {
 		Resolvers:      resolvers,
 		Preflight:      buildPreflight(root),
 		ReadOnly:       readOnly,
+		Force:          force,
 		TracerProvider: tp,
 	})
 

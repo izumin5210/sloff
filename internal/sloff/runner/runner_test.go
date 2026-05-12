@@ -116,7 +116,11 @@ func gitInitWorkdir(t *testing.T, dir string) {
 
 // runStep runs the runner once against the current workdir state, with the fixed clock so
 // the on-disk record filename's timestamp prefix is deterministic for golden compare.
-func runStep() step {
+func runStep(opts ...runStepOption) step {
+	cfg := runStepConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return func(t *testing.T, h *harness) {
 		t.Helper()
 		specs, err := spec.Discover(h.workdir, "**/sloff.yml")
@@ -139,11 +143,24 @@ func runStep() step {
 			Storage:   local.New(h.workdir, local.WithClock(func() time.Time { return fixedClock })),
 			Resolvers: resolverReg,
 			Preflight: preflightReg,
+			Force:     cfg.force,
 		})
 		if err := r.Run(context.Background()); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 	}
+}
+
+type runStepConfig struct {
+	force bool
+}
+
+type runStepOption func(*runStepConfig)
+
+// withForce flips Options.Force for this runStep so it exercises the ADR-0012
+// fingerprint bypass path.
+func withForce() runStepOption {
+	return func(c *runStepConfig) { c.force = true }
 }
 
 func writeStep(relpath, contents string) step {
@@ -303,6 +320,16 @@ func TestRunner_FirstRunWritesRecord(t *testing.T) {
 
 func TestRunner_SecondRunHits(t *testing.T) {
 	runE2E(t, "second-run-hits", runStep(), runStep())
+}
+
+// TestRunner_ForceBypassesHit covers ADR-0012: the second run is invoked with
+// Force=true so the fingerprint hit decision is bypassed even though inputs and
+// the recorded output_hash match. The cmd appends to ../marker.txt, so the
+// fixture's marker file proves whether cmd actually re-ran. Output bytes are
+// identical across runs, so ADR-0009 §4 write-skip keeps the record file
+// byte-stable (same timestamp prefix, same hash).
+func TestRunner_ForceBypassesHit(t *testing.T) {
+	runE2E(t, "force-bypasses-hit", runStep(), runStep(withForce()))
 }
 
 func TestRunner_InputChangeInvalidates(t *testing.T) {

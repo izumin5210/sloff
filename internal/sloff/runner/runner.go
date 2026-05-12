@@ -86,6 +86,13 @@ type Options struct {
 	// ReadOnly suppresses Storage.Save (used when SLOFF_ALLOW_STALE_DEPS=1).
 	ReadOnly bool
 
+	// Force bypasses the fingerprint hit decision so every task re-executes
+	// regardless of the cached output_hash match. Records are still written
+	// (subject to ReadOnly and ADR-0009 §write-skip), and preflight still
+	// runs — see ADR-0012 for the rationale and the explicit decision not to
+	// mirror this knob into an env var.
+	Force bool
+
 	// Stdout/Stderr are forwarded to spawned processes; nil falls back to os.Stdout / os.Stderr.
 	Stdout io.Writer
 	Stderr io.Writer
@@ -948,6 +955,15 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	hit, existing, paths, err := r.fingerprintLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
+	}
+	// ADR-0012: --force bypasses the hit decision but keeps the lookup so the
+	// loaded record still drives the post-exec write-skip rule (ADR-0009 §4).
+	// We drop hit→false rather than skipping the Storage round-trip so a forced
+	// rerun that produces byte-identical output preserves the record's
+	// first-observed informational fields.
+	if hit && r.opts.Force {
+		hit = false
+		span.SetAttributes(attribute.Bool("sloff.force", true))
 	}
 	span.SetAttributes(attribute.Bool("sloff.fingerprint.hit", hit))
 	if hit {

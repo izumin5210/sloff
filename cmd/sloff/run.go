@@ -48,7 +48,7 @@ func newRunCmd() *cobra.Command {
 	// argues that env-var ON/OFF makes "always force" trivial to slip into CI or
 	// .env files, which would re-introduce the "--no-fingerprint" habit ADR-0001
 	// is built to prevent.
-	cmd.Flags().BoolVar(&force, "force", false, "Bypass fingerprint hits and re-execute every task; records are still written (see ADR-0012)")
+	cmd.Flags().BoolVar(&force, "force", false, "Bypass fingerprint hits and re-execute every task; records are still written")
 	return cmd
 }
 

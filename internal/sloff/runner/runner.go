@@ -186,6 +186,12 @@ func New(opts Options) *Runner {
 // Run executes preflight then every task. Errors during preflight or task execution
 // abort the run.
 func (r *Runner) Run(ctx context.Context) error {
+	if r.opts.Force {
+		// One run-scoped notice; task-level forced reruns are surfaced through
+		// the sloff.force span attribute (ADR-0012 §"観測性") so the per-task
+		// RUN log stays uniform with cache-miss runs.
+		r.logger.Infof("force mode: fingerprint hits will be bypassed and every task re-executed")
+	}
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
 	// references resolve to a defined tool, then resolve each *referenced*
 	// tool exactly once. Storing results by name lets collectTasks fan a
@@ -938,6 +944,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		attribute.String("sloff.spec", t.SpecRelpath),
 		attribute.String("sloff.task.name", t.Name),
 		attribute.Int("sloff.tool.count", len(versions)),
+		// Stamp every task span regardless of whether the lookup is a hit, a
+		// stale record, or a clean miss — without this, a forced rerun of a
+		// task that already had no cached record would be indistinguishable
+		// from an ordinary cache miss in trace analysis (ADR-0012).
+		attribute.Bool("sloff.force", r.opts.Force),
 	))
 	defer endSpan(span, &err)
 
@@ -960,10 +971,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	// loaded record still drives the post-exec write-skip rule (ADR-0009 §4).
 	// We drop hit→false rather than skipping the Storage round-trip so a forced
 	// rerun that produces byte-identical output preserves the record's
-	// first-observed informational fields.
+	// first-observed informational fields. The sloff.force attribute is set
+	// unconditionally at span creation time so cache-miss reruns are also
+	// distinguishable from genuine misses in traces.
 	if hit && r.opts.Force {
 		hit = false
-		span.SetAttributes(attribute.Bool("sloff.force", true))
 	}
 	span.SetAttributes(attribute.Bool("sloff.fingerprint.hit", hit))
 	if hit {

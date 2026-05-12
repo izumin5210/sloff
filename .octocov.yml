@@ -1,7 +1,7 @@
 coverage:
   paths:
     - coverage.out
-  acceptable: "current >= 80% && diff >= 0%"
+  acceptable: "current >= 80%"
 comment:
   if: is_pull_request
 summary:

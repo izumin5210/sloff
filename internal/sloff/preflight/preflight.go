@@ -10,7 +10,11 @@ package preflight
 import "context"
 
 // Checker validates the install/build state of one distribution channel
-// (e.g. pnpm-local). Implementations must be read-only.
+// (e.g. pnpm-local). Implementations must be read-only. A Checker MAY also
+// implement Fixer (see fixer.go) to opt in to runner-driven auto-remediation
+// when drift is detected; that is the only sanctioned escape from the
+// read-only rule, and it is granted only because Fix and Check are separate
+// methods on a separate interface.
 type Checker interface {
 	// Name is the checker identifier (matches the corresponding resolver name).
 	Name() string

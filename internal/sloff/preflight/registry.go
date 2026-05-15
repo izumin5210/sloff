@@ -31,6 +31,14 @@ func (r *Registry) Names() []string {
 	return out
 }
 
+// Lookup returns the Checker registered under name, if any. The runner uses
+// this to recover the concrete Checker after Run has reported drift, so it
+// can type-assert against Fixer for opt-in auto-remediation (ADR-0013).
+func (r *Registry) Lookup(name string) (Checker, bool) {
+	c, ok := r.byName[name]
+	return c, ok
+}
+
 // Run executes the named Checkers (deduplicated) and aggregates their issues. The
 // aggregated Result.OK is true only if every checker reported OK with no issues. A hard
 // error from any Checker aborts the run and is wrapped with the checker's name.

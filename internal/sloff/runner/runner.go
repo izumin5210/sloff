@@ -554,12 +554,15 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 // pnpm-local Checker shouldn't run (and shouldn't fail) when no command
 // uses pnpm-local at all.
 //
-// Drift-style failures arrive as preflight.Issue entries; the runner
-// reports them and either aborts (the default) or, when ReadOnly is set
-// via SLOFF_ALLOW_STALE_DEPS, degrades to read-only so fingerprints
-// are not written for a known-suspect run. Hard errors from a checker
-// (the check itself couldn't execute) bypass the read-only fall-through
-// and fail the run regardless.
+// Drift-style failures arrive as preflight.Issue entries. When ReadOnly
+// is set via SLOFF_ALLOW_STALE_DEPS, the runner degrades to read-only so
+// fingerprints are not written for a known-suspect run (ADR-0013 D1
+// preserves this 1:1). Otherwise, the runner tries to auto-fix the drift
+// via Checkers that also implement preflight.Fixer (ADR-0013); a failed
+// fix, a re-check that still reports drift, or the absence of a Fixer
+// for the affected channel fails the run. Hard errors from a checker
+// (the check itself couldn't execute) bypass these fall-throughs and
+// fail the run regardless.
 func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) (err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.preflight", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referencedToolNames)),
@@ -581,15 +584,80 @@ func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, 
 		return err
 	}
 	span.SetAttributes(attribute.Bool("sloff.preflight.ok", res.OK))
-	if !res.OK {
-		span.SetAttributes(attribute.Int("sloff.preflight.issue_count", len(res.Issues)))
-		r.reportPreflightIssues(res.Issues)
-		if !r.opts.ReadOnly {
-			err = fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
-			return err
-		}
-		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; fingerprints will not be written")
+	if res.OK {
+		return nil
 	}
+	span.SetAttributes(attribute.Int("sloff.preflight.issue_count", len(res.Issues)))
+
+	if r.opts.ReadOnly {
+		// ADR-0013 D1: escape hatch behavior is unchanged. Report the
+		// issues, warn the user about the read-only fall-through, and
+		// proceed without invoking any Fixer.
+		r.reportPreflightIssues(res.Issues)
+		r.logger.Warnf("preflight issues ignored due to ReadOnly mode; fingerprints will not be written")
+		return nil
+	}
+	return r.runAutoFix(ctx, span, checkers, res.Issues)
+}
+
+// runAutoFix is the default-mode follow-up to a preflight that reported
+// drift. It locates Fixer-capable Checkers among the in-scope set, invokes
+// each Fix at r.opts.RepoRoot, and then re-runs the same Checkers to
+// confirm the drift is actually gone. Any step failing — no Fixer for the
+// drift, Fix returning an error, or the re-check still NOT OK — fails the
+// run; the error message distinguishes the three cases so logs are
+// actionable. The re-check (rather than trusting Fix's nil return) defends
+// against silently-broken installers that exit 0 without updating state.
+func (r *Runner) runAutoFix(ctx context.Context, span trace.Span, checkers []string, issues []preflight.Issue) error {
+	type namedFixer struct {
+		name  string
+		fixer preflight.Fixer
+	}
+	var fixers []namedFixer
+	for _, name := range checkers {
+		c, ok := r.opts.Preflight.Lookup(name)
+		if !ok {
+			continue
+		}
+		if f, ok := c.(preflight.Fixer); ok {
+			fixers = append(fixers, namedFixer{name: name, fixer: f})
+		}
+	}
+
+	if len(fixers) == 0 {
+		// No Fixer for any affected channel; preserve the historical
+		// fail message so users can still hit the escape hatch.
+		r.reportPreflightIssues(issues)
+		return fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(issues))
+	}
+
+	span.SetAttributes(attribute.Bool("sloff.preflight.autofix_attempted", true))
+	channels := make([]string, 0, len(fixers))
+	for _, nf := range fixers {
+		channels = append(channels, nf.name)
+	}
+	span.SetAttributes(attribute.StringSlice("sloff.preflight.autofix_channels", channels))
+
+	for _, i := range issues {
+		r.logger.Warnf("preflight [%s] %s -- attempting auto-fix: %s", i.Channel, i.Detail, i.Suggestion)
+	}
+
+	for _, nf := range fixers {
+		if err := nf.fixer.Fix(ctx, r.opts.RepoRoot); err != nil {
+			return fmt.Errorf("auto-install failed: %s: %w", nf.name, err)
+		}
+	}
+
+	res, err := r.opts.Preflight.Run(ctx, ".", checkers)
+	if err != nil {
+		return fmt.Errorf("auto-install re-check: %w", err)
+	}
+	if !res.OK {
+		r.reportPreflightIssues(res.Issues)
+		return fmt.Errorf("auto-install ran but drift persists (%d issues remain)", len(res.Issues))
+	}
+	span.SetAttributes(attribute.Bool("sloff.preflight.autofix_succeeded", true))
+	r.logger.Infof("auto-install resolved drift: %v", channels)
 	return nil
 }
 

@@ -184,7 +184,9 @@ pnpm-local の hash 入力は **lockfile から walk した resolved version** �
 ```
 hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
   → yes: install in sync ( 続行)
-  → no:  preflight.Issue を返し runner が fail-loudly ( "please run `pnpm install`")
+  → no:  preflight.Issue を返す
+         → default: runner が auto-install ( `pnpm install`) を起動し再 Check ( ADR-0013)
+         → SLOFF_ALLOW_STALE_DEPS=1: 旧挙動 ( warn 降格 + read-only モード) を維持
 ```
 
 `node_modules/.pnpm/lock.yaml` は pnpm が `pnpm install` 時に **`pnpm-lock.yaml` を byte-for-byte コピー** して書き出す install state snapshot。 byte 比較で:
@@ -199,6 +201,7 @@ hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
 - **`SLOFF_ALLOW_STALE_DEPS=1` の escape hatch を継承**: 利用者が一時的に通したいケース ( experimental edit を試したい等) で warn 降格 + read-only モードで run できる。 resolver 内で fail させると、 この escape hatch 経路が効かない
 - **概念整理**: 「 preflight = state 検証」 という general subsystem として一貫させ、 「 build 用 preflight は廃止 / install drift 用 preflight は別経路」 のような暗黙の分類を作らない ( ADR-0008 D7 末尾参照)
 - **scope-by-referenced-resolver**: runner は「 spec で実際に referenced されている resolver name」 集合を作って、 一致する Checker だけ起動する。 pnpm-local 未使用の repo では Checker そのものが起動しないので、 catalog-style な repo でも余計な validation が走らない
+- **auto-install の hook point を持てる ( ADR-0013)**: Checker が optional `preflight.Fixer` を実装することで、 runner は drift 検出時に default で `pnpm install` を自動起動し、 失敗時のみ run を fail させる。 escape hatch path ( `SLOFF_ALLOW_STALE_DEPS=1` で warn 降格 + read-only) との両立は維持される ( ReadOnly のときは Fix を呼ばない構造的分岐)
 
 ### 設計上の補足
 

@@ -893,37 +893,92 @@ commands:
 	}
 }
 
-// TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing guards the drift
-// preflight end to end: when a task references a pnpm-local tool but
-// node_modules/.pnpm/lock.yaml is missing (pnpm install was never run
-// against this checkout), the runner aborts before any cmd executes.
-// Without the abort, the resolver would hand the cmd a stale-install fingerprint
-// key and silent stale outputs would propagate.
-func TestRunner_PnpmLocal_FailsWhenInstallSnapshotMissing(t *testing.T) {
+// TestRunner_PnpmLocal_AutoInstallResolvesDrift is the headline ADR-0013
+// path: when pnpm-local detects install drift in default mode, the runner
+// invokes the Fixer (which would normally spawn `pnpm install`) and then
+// re-runs the preflight check. The fake installer below mirrors what real
+// pnpm would do — it writes the install snapshot — so the re-check passes
+// and the run completes normally.
+func TestRunner_PnpmLocal_AutoInstallResolvesDrift(t *testing.T) {
 	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
-	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */)
+	var calls int
+	fake := func(_ context.Context, repoRoot string) error {
+		calls++
+		// Mirror the on-disk effect of `pnpm install`: copy pnpm-lock.yaml
+		// byte-for-byte into node_modules/.pnpm/lock.yaml.
+		src, err := os.ReadFile(filepath.Join(repoRoot, "pnpm-lock.yaml"))
+		if err != nil {
+			return err
+		}
+		snap := filepath.Join(repoRoot, "node_modules", ".pnpm", "lock.yaml")
+		if err := os.MkdirAll(filepath.Dir(snap), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(snap, src, 0o644)
+	}
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */, fake)
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("expected auto-install to resolve drift, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected installer to be called exactly once, got %d", calls)
+	}
+}
+
+// TestRunner_PnpmLocal_AutoInstallFailureFailsRun pins the "install itself
+// failed" branch: if the Fixer returns an error (network outage, broken
+// package.json, etc.), the runner aborts with an "auto-install failed"
+// message instead of silently proceeding into a stale-install run.
+func TestRunner_PnpmLocal_AutoInstallFailureFailsRun(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	sentinel := fmt.Errorf("simulated pnpm install error")
+	fake := func(context.Context, string) error { return sentinel }
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */, fake)
 
 	err := r.Run(context.Background())
 	if err == nil {
-		t.Fatal("expected error when node_modules/.pnpm/lock.yaml is missing")
+		t.Fatal("expected error when auto-install fails")
 	}
-	if !strings.Contains(err.Error(), "preflight failed") {
-		t.Errorf("error should mention preflight failure, got: %v", err)
+	if !strings.Contains(err.Error(), "auto-install failed") {
+		t.Errorf("error should mention auto-install failure, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "SLOFF_ALLOW_STALE_DEPS") {
-		t.Errorf("error should mention the bypass env var, got: %v", err)
+	if !strings.Contains(err.Error(), "pnpm-local") {
+		t.Errorf("error should identify the channel, got: %v", err)
+	}
+}
+
+// TestRunner_PnpmLocal_AutoInstallButDriftPersistsFailsRun covers the
+// "Fixer returned nil but drift is still there" defensive branch: a fake
+// installer that no-ops (does not actually heal the snapshot) must not let
+// the runner proceed into the task phase with stale install state.
+func TestRunner_PnpmLocal_AutoInstallButDriftPersistsFailsRun(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
+	fake := func(context.Context, string) error { return nil } // pretends success, does nothing
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */, fake)
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when auto-install does not heal drift")
+	}
+	if !strings.Contains(err.Error(), "drift persists") {
+		t.Errorf("error should mention persistent drift, got: %v", err)
 	}
 }
 
 // TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch covers the
 // SLOFF_ALLOW_STALE_DEPS=1 path: drift surfaces as a preflight Issue but
 // the runner continues in read-only mode (fingerprints are not written).
-// This is the existing preflight escape hatch; pnpm-local's drift checker
-// inherits it by virtue of going through the preflight subsystem instead of
-// failing inside the resolver.
+// Critically, the Fixer must NOT be invoked under this escape hatch —
+// ADR-0013 D1 keeps the existing escape behavior 1:1 intact. The fake
+// installer below fails the test if it is ever called.
 func TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch(t *testing.T) {
 	workdir, specs := setupPnpmDriftFixture(t, false /* installInSync */)
-	r := newPnpmDriftRunner(t, workdir, specs, true /* readOnly */)
+	guard := func(context.Context, string) error {
+		t.Fatal("installer must not be called under SLOFF_ALLOW_STALE_DEPS=1 (ReadOnly)")
+		return nil
+	}
+	r := newPnpmDriftRunner(t, workdir, specs, true /* readOnly */, guard)
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("expected drift to degrade to read-only under SLOFF_ALLOW_STALE_DEPS, got: %v", err)
@@ -983,8 +1038,11 @@ commands:
 
 // newPnpmDriftRunner wires the pnpm-local resolver and preflight checker
 // the same way the production CLI does, so the drift-detection paths get
-// exercised end to end.
-func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnly bool) *runner.Runner {
+// exercised end to end. installer overrides the Checker's pnpm install
+// hook so the unit suite never spawns the real CLI; pass nil to leave
+// the default (production) installer in place — only safe when the
+// Fixer path is not expected to fire (e.g. ReadOnly=true).
+func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnly bool, installer func(context.Context, string) error) *runner.Runner {
 	t.Helper()
 	resolverReg := toolresolver.NewRegistry()
 	resolverReg.Register(script.New(workdir))
@@ -995,7 +1053,11 @@ func newPnpmDriftRunner(t *testing.T, workdir string, specs []spec.Spec, readOnl
 	}
 	resolverReg.Register(pnpmRes)
 	preflightReg := preflight.NewRegistry()
-	preflightReg.Register(preflightpnpm.New(workdir))
+	var pnpmOpts []preflightpnpm.Option
+	if installer != nil {
+		pnpmOpts = append(pnpmOpts, preflightpnpm.WithInstaller(installer))
+	}
+	preflightReg.Register(preflightpnpm.New(workdir, pnpmOpts...))
 	return runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,

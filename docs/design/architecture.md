@@ -443,9 +443,9 @@ buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight
 
 不整合検出時の挙動 ( preflight が走った channel 共通):
 
-- **デフォルト**: sloff を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
-- **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
-- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 fingerprint は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
+- **デフォルト**: Checker が `Fixer` interface も実装している channel については runner が auto-fix ( 例: pnpm-local なら `pnpm install`) を起動 → 再 Check で OK なら続行、 install 自体が失敗 / 再 Check 後も依然 drift なら sloff を fail させる ( 詳細は [ADR-0013](../adr/0013-preflight-fixer-and-pnpm-auto-install.md))。 `Fixer` を実装しない channel は従来どおり即時 fail し、 必要な install コマンドを stderr に表示する。 いずれの fail 経路でも record は **書き込まない**
+- **CI**: 常に fail / auto-fix のどちらかの挙動をとる (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
+- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 この mode では auto-fix も実行されず ( ReadOnly 経路では Fixer を呼ばない、 ADR-0013 D1)、 fingerprint は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 - **fingerprint hit の bypass**: `sloff run --force` で fingerprint hit を bypass して全 task を強制実行できる。 preflight は通常通り走り、 record は通常通り書き込まれる ( 詳細は [ADR-0012](../adr/0012-force-rerun-flag.md))。 `SLOFF_ALLOW_STALE_DEPS=1` と併用した場合は read-only 化が優先され、 record は書かれない
 
 代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `resolved_versions_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。
@@ -522,10 +522,18 @@ package preflight
 
 import "context"
 
-// Checker は単一の依存プロバイダ ( pnpm-local 等 build/lockfile-based channel) の install 状態を検証する
+// Checker は単一の依存プロバイダ ( pnpm-local 等 build/lockfile-based channel) の install 状態を検証する。
+// Implementations MUST be read-only.
 type Checker interface {
     Name() string                                     // resolver と同じ Name で対応付け
     Check(ctx context.Context, specDir string) (Result, error)
+}
+
+// Fixer は Checker が optional に satisfy する remediation interface ( ADR-0013)。
+// Check が drift を報告した場合、 runner は default で Fix を呼んで自動修復を試みる。
+// 副作用 ( subprocess 起動 / ファイル書き出し) を持つことを文法レベルで Check と分離する目的。
+type Fixer interface {
+    Fix(ctx context.Context, repoRoot string) error
 }
 
 type Result struct {
@@ -536,16 +544,18 @@ type Result struct {
 type Issue struct {
     Channel    string  // どの channel の不整合か
     Detail     string  // 何がズレているか
-    Suggestion string  // 是正コマンド
+    Suggestion string  // 是正コマンド (人間向けメッセージ; auto-fix とは独立)
 }
 ```
 
-組み込み実装: `pnpmLocalChecker` ( install drift = `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認)。 「 channel 別に検証したい invariant があるなら持つ」 という general subsystem で、 「 build 専用」 「 install drift 専用」 のような暗黙の分類は持たない。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( SSoT が runtime バイナリ / source 自体なので drift 概念がそもそも無い)。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージは [ADR-0007](../adr/0007-no-external-dependency-resolver.md) によりそれぞれ専用 Checker を持たない。
+組み込み実装: `pnpmLocalChecker` ( install drift = `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認、 Fixer も実装し drift 検出時に `pnpm install` を起動)。 「 channel 別に検証したい invariant があるなら持つ」 という general subsystem で、 「 build 専用」 「 install drift 専用」 のような暗黙の分類は持たない。 `scriptResolver` / `goLocalResolver` には対応 Checker は存在しない ( SSoT が runtime バイナリ / source 自体なので drift 概念がそもそも無い)。 buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md)、 外部公開パッケージは [ADR-0007](../adr/0007-no-external-dependency-resolver.md) によりそれぞれ専用 Checker を持たない。
 
 Registry の動作:
 
 - sloff の起動時に、 ある spec で使われる resolver の Name 一覧を集約し、 そのうち Checker を持つ channel についてだけ all-or-nothing で実行
-- いずれかが Issue を返したら sloff は fail ( `SLOFF_ALLOW_STALE_DEPS=1` の場合は warn 降格 + read-only モード)
+- いずれかが Issue を返したら、 該当 Checker が **Fixer も実装している** かで挙動が分岐 ( ADR-0013):
+  - **Fixer 実装あり + `ReadOnly=false` ( default)**: runner が Fix を呼んで自動修復 → 同じ Checker 群で再 Check → OK なら続行、 依然 drift / Fix 自体が失敗なら sloff を fail
+  - **Fixer 実装なし、 または `SLOFF_ALLOW_STALE_DEPS=1` ( `ReadOnly=true`)**: 従来どおり sloff を fail / warn 降格
 - runner は registered Checker のうち「 spec で referenced されている resolver name」 と一致するものだけ起動する ( catalog-style の inert tool 定義の Checker は起動しない)
 
 #### 拡張ポイントの責務分離

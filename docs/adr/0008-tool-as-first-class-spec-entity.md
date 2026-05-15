@@ -179,6 +179,8 @@ source 変更は files_hash で invalidate → cmd 再実行 → cmd 内の buil
 
 **preflight の責務との分離**: D7 で削除したのは **「 build 必須かを spec から推測 + dist/src を慣習で扱う」 旧 preflight checker** であって、 preflight subsystem 自体ではない。 preflight は依然として「 cmd 実行前の state 検証」 という general な役割を持ち、 channel 別に必要なら Checker を持つ。 例えば pnpm-local は **install drift 検出** ( `pnpm-lock.yaml` vs `node_modules/.pnpm/lock.yaml` の byte 一致確認) のための Checker を `preflight/pnpmlocal/` に持っている。 これは ADR-0008 D7 の「 build / run は cmd 責務」 とは独立の話で、 「 lockfile を SSoT に取る resolver は install state が lockfile と一致していることを前提にする」 ための前段検証。 「 preflight = build 専用」 でも「 preflight = drift 専用」 でもなく、 channel ごとに validation したい invariant があるなら持つ、 という general subsystem。
 
+なお install drift については [ADR-0013](./0013-preflight-fixer-and-pnpm-auto-install.md) で **preflight Fixer interface** を導入し、 drift 検出時に sloff 自身が `pnpm install` を起動して remediate する。 install は source rebuild と無関係 ( SSoT lockfile と runtime state の同期のみが問題) で、 D7 が orchestration 対象外と決めた **build / run** とは概念的に別 layer に属する。 D7 の境界 ( build/run は cmd 責務) は維持されたまま、 install drift の自動修復だけが preflight subsystem の中で完結する。
+
 ## Rationale
 
 ### 案 A ( resolver-level memo cache のみ) を選ばなかった理由

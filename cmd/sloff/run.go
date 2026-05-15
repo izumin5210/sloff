@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -20,7 +23,13 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/lister"
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/pnpmlocal"
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/script"
+	"github.com/izumin5210/sloff/internal/sloff/tui"
 )
+
+// taskLogDir is the repo-relative directory under which `sloff run` writes
+// each task's cmd stdout/stderr (ADR-0013). Truncate-created per run; listed
+// in .gitignore so the files never reach version control.
+const taskLogDir = ".sloff/logs"
 
 // otelShutdownTimeout caps the BatchSpanProcessor flush at process exit. CLI
 // runs are short, so a hard ceiling on the drain prevents a slow / unreachable
@@ -34,12 +43,13 @@ func newRunCmd() *cobra.Command {
 		root    string
 		pattern string
 		force   bool
+		noTUI   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Discover specs and execute every task with fingerprint-aware orchestration",
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
-			return runE(cobraCmd.Context(), root, pattern, force)
+			return runE(cobraCmd.Context(), root, pattern, force, noTUI)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .sloff/fingerprints and lockfiles")
@@ -49,13 +59,25 @@ func newRunCmd() *cobra.Command {
 	// .env files, which would re-introduce the "--no-fingerprint" habit ADR-0001
 	// is built to prevent.
 	cmd.Flags().BoolVar(&force, "force", false, "Bypass fingerprint hits and re-execute every task; records are still written")
+	// --no-tui exists for piping output and for environments where users
+	// don't want altscreen takeover. The default is "auto" — when stdout
+	// is a tty, a bubbletea progress view runs; otherwise the legacy
+	// stderr logger runs unchanged so CI logs stay parseable.
+	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable the progress TUI even when stdout is a terminal")
 	return cmd
 }
 
-func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) {
+func runE(ctx context.Context, rawRoot, pattern string, force, noTUI bool) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// SIGINT / SIGTERM are routed through ctx so the runner goroutine and
+	// the TUI Program tear down together. bubbletea has its own internal
+	// signal handler we disable in tui.Run; doing it here keeps the
+	// non-TUI path symmetric (Ctrl+C aborts a piped run too).
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
@@ -63,11 +85,14 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 	}
 	defer flushTracing(shutdown)
 
+	useTUI := !noTUI && isatty.IsTerminal(os.Stdout.Fd())
+
 	tracer := tp.Tracer(cmdTracerName)
 	ctx, span := tracer.Start(ctx, "sloff.run", trace.WithAttributes(
 		attribute.String("sloff.subcommand", "run"),
 		attribute.String("sloff.spec.pattern", pattern),
 		attribute.Bool("sloff.force", force),
+		attribute.Bool("sloff.tui", useTUI),
 	))
 	defer endSpan(span, &err)
 
@@ -96,18 +121,36 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 		return fmt.Errorf("load fingerprint storage: %w", err)
 	}
 
-	r := runner.New(runner.Options{
-		RepoRoot:       root,
-		Specs:          specs,
-		Storage:        storage,
-		Resolvers:      resolvers,
-		Preflight:      buildPreflight(root),
-		ReadOnly:       readOnly,
-		Force:          force,
-		TracerProvider: tp,
-	})
+	makeRunner := func(sink runner.EventSink) *runner.Runner {
+		return runner.New(runner.Options{
+			RepoRoot:       root,
+			Specs:          specs,
+			Storage:        storage,
+			Resolvers:      resolvers,
+			Preflight:      buildPreflight(root),
+			ReadOnly:       readOnly,
+			Force:          force,
+			TracerProvider: tp,
+			LogDir:         taskLogDir,
+			EventSink:      sink,
+		})
+	}
 
-	return r.Run(ctx)
+	if !useTUI {
+		return makeRunner(nil).Run(ctx)
+	}
+
+	res, runErr := tui.Run(ctx, func(runCtx context.Context, sink runner.EventSink) error {
+		return makeRunner(sink).Run(runCtx)
+	})
+	// Post-quit failure summary lands on stderr so the developer sees
+	// which task to investigate and where its log file lives. Per
+	// ADR-0013 the TUI always auto-quits, so this is the only place the
+	// failure list is rendered after the altscreen tears down.
+	for _, ft := range res.FailedTasks {
+		fmt.Fprintf(os.Stderr, "FAIL %s:%s  (log: %s)\n", ft.Ref.SpecRelpath, ft.Ref.Name, ft.LogPath)
+	}
+	return runErr
 }
 
 // discoverSpecs wraps spec.Discover with a span. spec.Discover doesn't take a

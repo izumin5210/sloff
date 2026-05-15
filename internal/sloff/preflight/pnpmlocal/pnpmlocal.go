@@ -28,14 +28,39 @@ import (
 // resolvers and checkers by Name).
 const Name = pnpmws.Name
 
-// Checker verifies that node_modules tracks the current pnpm-lock.yaml.
+// installer is the contract for the side-effectful half of the Checker: a
+// function that takes a repoRoot and either reconciles node_modules with
+// pnpm-lock.yaml or returns an error explaining why it could not. In
+// production this is runPnpmInstall; tests inject a fake via WithInstaller
+// so the unit suite never spawns the real pnpm CLI.
+type installer func(ctx context.Context, repoRoot string) error
+
+// Checker verifies that node_modules tracks the current pnpm-lock.yaml. It
+// also implements preflight.Fixer (ADR-0013) so the runner can auto-recover
+// from drift by invoking the configured installer.
 type Checker struct {
 	repoRoot string
+	install  installer
 }
 
-// New returns a Checker rooted at repoRoot.
-func New(repoRoot string) *Checker {
-	return &Checker{repoRoot: repoRoot}
+// Option configures a Checker at construction time.
+type Option func(*Checker)
+
+// WithInstaller overrides the default installer (pnpm install via os/exec)
+// with the given function. Intended for tests; production callers rely on
+// the default. Passing nil is treated as "use the default" so tests can
+// reset back to it without re-constructing the Checker.
+func WithInstaller(fn func(ctx context.Context, repoRoot string) error) Option {
+	return func(c *Checker) { c.install = fn }
+}
+
+// New returns a Checker rooted at repoRoot, applying any Options.
+func New(repoRoot string, opts ...Option) *Checker {
+	c := &Checker{repoRoot: repoRoot}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // Name implements preflight.Checker.
@@ -62,4 +87,21 @@ func (c *Checker) Check(_ context.Context, _ string) (preflight.Result, error) {
 		return preflight.Result{}, fmt.Errorf("pnpm-local preflight: %w", err)
 	}
 	return preflight.Result{OK: true}, nil
+}
+
+// Fix implements preflight.Fixer (ADR-0013). The runner calls this when
+// Check reports drift and the run is not in ReadOnly mode; on success the
+// runner re-runs Check to confirm the drift is gone.
+//
+// The repoRoot parameter comes from the runner (Options.RepoRoot) and may
+// equal c.repoRoot, but we forward whatever the runner gave us so the
+// Fixer contract (drift is healed at the path the runner is operating on)
+// is honoured even if a future caller constructs the Checker with a
+// different root.
+func (c *Checker) Fix(ctx context.Context, repoRoot string) error {
+	install := c.install
+	if install == nil {
+		install = runPnpmInstall
+	}
+	return install(ctx, repoRoot)
 }

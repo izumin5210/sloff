@@ -94,8 +94,21 @@ type Options struct {
 	Force bool
 
 	// Stdout/Stderr are forwarded to spawned processes; nil falls back to os.Stdout / os.Stderr.
+	// Ignored when LogDir is non-empty (per-task log files take precedence).
 	Stdout io.Writer
 	Stderr io.Writer
+
+	// LogDir, when non-empty, redirects each task's cmd stdout / stderr to
+	// `<LogDir>/<spec>/<task>.log` (truncate-create per run). The directory
+	// is interpreted relative to RepoRoot if it isn't absolute. Empty
+	// preserves the legacy behaviour (Stdout / Stderr above).
+	LogDir string
+
+	// EventSink, when non-nil, receives per-task lifecycle callbacks. The
+	// built-in Logger output ("RUN" / "SKIP" lines) is suppressed in that
+	// case so the sink is the single source of truth — see ADR-0013 for
+	// the rationale.
+	EventSink EventSink
 
 	Logger Logger
 
@@ -212,19 +225,23 @@ func (r *Runner) Run(ctx context.Context) error {
 	// current spec set actually references — same scoping discipline as
 	// resolveReferencedTools below. Catalog tools that no command pulls in
 	// stay inert; their checkers aren't invoked either.
+	r.emitPhase(PhasePreflight)
 	if err := r.runPreflight(ctx, registry, referencedToolNames); err != nil {
 		return err
 	}
 
+	r.emitPhase(PhaseResolveInputs)
 	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
 	}
+	r.emitPhase(PhaseResolveVersions)
 	versionsByTool, err := r.resolveVersionContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
 	}
 
+	r.emitPhase(PhasePlanning)
 	tasks, err := r.collectTasksTraced(ctx, inputsByTool, versionsByTool)
 	if err != nil {
 		return err
@@ -234,11 +251,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	r.emitPhase(PhasePrefetchFingerprints)
 	if err := r.prefetchFingerprints(ctx, ordered); err != nil {
 		return err
 	}
 
 	r.producedBy = map[string]string{}
+	if r.opts.EventSink != nil {
+		r.opts.EventSink.PhaseChanged(PhaseRunningTasks)
+		r.opts.EventSink.RunStarted(orderedTaskRefs(ordered))
+	}
 	runErr := r.runTasks(ctx, ordered)
 	// Flush even when runTasks returned an error so records queued by tasks
 	// that completed *before* a later failure are still persisted. Failed
@@ -939,6 +961,23 @@ func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Nam
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	info := r.byKey[depgraphKey(t)]
 	versions := info.versions
+	ref := TaskRef{SpecRelpath: t.SpecRelpath, Name: t.Name}
+
+	var skipped bool
+	if sink := r.opts.EventSink; sink != nil {
+		defer func() {
+			var res TaskResult
+			switch {
+			case err != nil:
+				res = TaskResult{Outcome: TaskFailed, Err: err}
+			case skipped:
+				res = TaskResult{Outcome: TaskSkipped}
+			default:
+				res = TaskResult{Outcome: TaskSucceeded}
+			}
+			sink.TaskFinished(ref, res)
+		}()
+	}
 
 	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
 		attribute.String("sloff.spec", t.SpecRelpath),
@@ -982,12 +1021,30 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		if err := r.recordProducedPaths(taskLabel, paths); err != nil {
 			return err
 		}
-		r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
+		skipped = true
+		if r.opts.EventSink == nil {
+			r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
+		}
 		return nil
 	}
 
-	r.logger.Infof("RUN  %s/%s", t.SpecRelpath, t.Name)
-	if err := r.execCmd(ctx, info); err != nil {
+	logPath := r.taskLogPath(ref)
+	var logFile *os.File
+	if logPath != "" {
+		f, err := openTaskLog(logPath)
+		if err != nil {
+			return fmt.Errorf("%s: open log file: %w", t.Name, err)
+		}
+		logFile = f
+		defer logFile.Close()
+	}
+
+	if sink := r.opts.EventSink; sink != nil {
+		sink.TaskStarted(ref, logPath)
+	} else {
+		r.logger.Infof("RUN  %s/%s", t.SpecRelpath, t.Name)
+	}
+	if err := r.execCmd(ctx, info, logFile); err != nil {
 		return fmt.Errorf("%s: %w", t.Name, err)
 	}
 
@@ -1201,7 +1258,7 @@ func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
 	return outputs, nil
 }
 
-func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
+func (r *Runner) execCmd(ctx context.Context, info taskInfo, logFile *os.File) (err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.task.exec")
 	defer endSpan(span, &err)
 
@@ -1214,8 +1271,17 @@ func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
 	)
 	cmd := exec.CommandContext(ctx, info.command.Cmd[0], info.command.Cmd[1:]...)
 	cmd.Dir = filepath.Join(r.opts.RepoRoot, info.specRelpath)
-	cmd.Stdout = r.stdout
-	cmd.Stderr = r.stderr
+	if logFile != nil {
+		// Per-task log files take precedence over r.stdout / r.stderr. ADR-0013
+		// requires every cmd produced under LogDir to go to its own file, even
+		// when the caller didn't bind an EventSink, so a later `less` invocation
+		// can show what happened.
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	} else {
+		cmd.Stdout = r.stdout
+		cmd.Stderr = r.stderr
+	}
 	cmd.Env = childEnv(os.Environ())
 	err = cmd.Run()
 	var ee *exec.ExitError
@@ -1248,6 +1314,53 @@ func (r *Runner) reportPreflightIssues(issues []preflight.Issue) {
 	for _, i := range issues {
 		r.logger.Errorf("preflight [%s] %s -- run: %s", i.Channel, i.Detail, i.Suggestion)
 	}
+}
+
+// taskLogPath returns the absolute filesystem path where the task's cmd log
+// will be written, or "" when Options.LogDir is unset. The directory is
+// resolved relative to RepoRoot when LogDir is not absolute, so callers can
+// pass repo-relative values like ".sloff/logs".
+func (r *Runner) taskLogPath(ref TaskRef) string {
+	if r.opts.LogDir == "" {
+		return ""
+	}
+	base := r.opts.LogDir
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(r.opts.RepoRoot, base)
+	}
+	specSegment := filepath.FromSlash(ref.SpecRelpath)
+	return filepath.Join(base, specSegment, ref.Name+".log")
+}
+
+// openTaskLog truncate-creates the log file at path, ensuring the parent
+// directory exists. The returned *os.File is owned by the caller and must
+// be closed once exec finishes.
+func openTaskLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+}
+
+// emitPhase forwards a Phase transition to the configured EventSink, or
+// no-ops when one isn't bound. Centralising the nil check keeps the call
+// sites in Run() readable and ensures the legacy non-sink path stays free
+// of any phase-tracking cost.
+func (r *Runner) emitPhase(p Phase) {
+	if r.opts.EventSink != nil {
+		r.opts.EventSink.PhaseChanged(p)
+	}
+}
+
+// orderedTaskRefs projects a depgraph order into TaskRef values used by the
+// EventSink. Kept tiny on purpose so the conversion is auditable at the call
+// site without pulling the depgraph type into the public event surface.
+func orderedTaskRefs(ordered []depgraph.Task) []TaskRef {
+	out := make([]TaskRef, len(ordered))
+	for i, t := range ordered {
+		out[i] = TaskRef{SpecRelpath: t.SpecRelpath, Name: t.Name}
+	}
+	return out
 }
 
 // Helpers ------------------------------------------------------------------

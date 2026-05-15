@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Per-task cmd logs written by `sloff run` (ADR-0013). Truncate-created per run.
+.sloff/logs/
+
 # Editor/IDE
 # .idea/
 # .vscode/

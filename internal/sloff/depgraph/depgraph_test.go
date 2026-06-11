@@ -85,6 +85,25 @@ func TestBuild_OverlapWithoutDependsDoesNotOrder(t *testing.T) {
 	}
 }
 
+// TestBuild_JoinWaitsForAllDeclaredDependencies exercises a node with
+// in-degree 2: the sink must stay blocked until both declared upstreams have
+// been emitted (the cross-edge inDegree decrement path in Kahn's loop).
+func TestBuild_JoinWaitsForAllDeclaredDependencies(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "join", []string{"a.out", "b.out"}, []string{"j.out"}, ref("", "A"), ref("", "B")),
+		taskD("", "B", []string{"b.in"}, []string{"b.out"}),
+		taskD("", "A", []string{"a.in"}, []string{"a.out"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"A", "B", "join"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBuild_DiamondRespectsTopologicalOrder(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("", "C", []string{"a.out"}, []string{"c.out"}, ref("", "A")),

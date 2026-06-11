@@ -534,9 +534,10 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
-// references against it, and collects the deduplicated set of names some
-// command actually pulls in. Both Run and Plan need this same triple, so the
-// helper keeps the two flows from diverging on the validation rules.
+// references against it, validates cross-spec depends references, and
+// collects the deduplicated set of names some command actually pulls in.
+// Both Run and Plan need this same triple, so the helper keeps the two flows
+// from diverging on the validation rules.
 func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 	registry, err := spec.BuildToolRegistry(r.opts.Specs)
 	if err != nil {

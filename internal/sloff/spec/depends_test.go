@@ -114,6 +114,10 @@ commands:
     tools: [versioner]
 `
 
+// consumerYAML builds a commands-only spec with an optional depends block.
+// tools: [versioner] is intentionally left unresolved — tool reference
+// validation (ValidateToolReferences) is a separate pass and not under test
+// here.
 func consumerYAML(dependsBlock string) string {
 	return `commands:
   - name: consume
@@ -134,6 +138,33 @@ func TestValidateDependReferences_OK(t *testing.T) {
 	})
 	if err := spec.ValidateDependReferences(specs); err != nil {
 		t.Errorf("expected ok, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_SameSpecOK(t *testing.T) {
+	// A same-file dependency (no spec: field) where the second task depends on
+	// the first: both commands live in the same sloff.yml, and the omitted
+	// spec resolves to the declaring spec's own dir.
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+commands:
+  - name: first
+    cmd: ["sh", "-c", "true"]
+    inputs: ["in.txt"]
+    outputs: ["mid.txt"]
+    tools: [versioner]
+  - name: second
+    cmd: ["sh", "-c", "true"]
+    inputs: ["mid.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+    depends:
+      - task: first
+`
+	specs := buildSpecs(t, map[string]string{"proto/svc": yml})
+	if err := spec.ValidateDependReferences(specs); err != nil {
+		t.Errorf("expected ok for same-spec depends, got %v", err)
 	}
 }
 

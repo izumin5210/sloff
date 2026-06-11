@@ -305,17 +305,17 @@ func ValidateDependReferences(specs []Spec) error {
 				// declaring file's dir the same way inputs/outputs globs do.
 				target := path.Join(dir, d.Spec)
 				if target == ".." || strings.HasPrefix(target, "../") {
-					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", sp.Dir, c.Name, i, d.Spec)
+					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", registryDefinitionPath(sp.Dir), c.Name, i, d.Spec)
 				}
 				key := taskKey{target, d.Task}
 				if target == dir && d.Task == c.Name {
-					return fmt.Errorf("%s/%s: depends[%d]: task depends on itself", sp.Dir, c.Name, i)
+					return fmt.Errorf("%s/%s: depends[%d]: task depends on itself", registryDefinitionPath(sp.Dir), c.Name, i)
 				}
 				if _, ok := defined[key]; !ok {
-					return fmt.Errorf("%s/%s: depends[%d]: task %q not found in spec dir %q", sp.Dir, c.Name, i, d.Task, target)
+					return fmt.Errorf("%s/%s: depends[%d]: task %q not found in spec dir %q", registryDefinitionPath(sp.Dir), c.Name, i, d.Task, target)
 				}
 				if _, dup := seen[key]; dup {
-					return fmt.Errorf("%s/%s: depends[%d]: duplicate depends entry %s:%s", sp.Dir, c.Name, i, target, d.Task)
+					return fmt.Errorf("%s/%s: depends[%d]: duplicate depends entry %s:%s", registryDefinitionPath(sp.Dir), c.Name, i, target, d.Task)
 				}
 				seen[key] = struct{}{}
 			}

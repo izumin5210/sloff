@@ -12,25 +12,10 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 )
 
-// TaskRef identifies a depgraph task by its (spec_relpath, name) key. The same
-// pair is what depgraph and the runner use to thread tasks through the
-// orchestrator, so callers can compare refs directly against runner state.
-type TaskRef struct {
-	SpecRelpath string
-	Name        string
-}
-
-// Label returns the human-readable task identifier used in graph captions and
-// renderer node labels. SpecRelpath is dropped when empty (depgraph's own
-// unit tests) or "." (a sloff.yml at the discovery root, which the fingerprint
-// layer also collapses to no prefix in `pathFor`); both forms describe the
-// same logical "no qualifier needed" state.
-func (r TaskRef) Label() string {
-	if r.SpecRelpath == "" || r.SpecRelpath == "." {
-		return r.Name
-	}
-	return r.SpecRelpath + ":" + r.Name
-}
+// TaskRef identifies a depgraph task by its (spec_relpath, name) key. It is
+// an alias of depgraph.TaskRef so graph projections and depgraph/runner
+// error messages share one identity type and one Label rendering.
+type TaskRef = depgraph.TaskRef
 
 // Edge is a single declared dependency. Files is the observed O_From ∩ I_To
 // — every repo-relative path that evidences the edge in the current tree —
@@ -70,7 +55,7 @@ func Edges(tasks []depgraph.Task) []Edge {
 	}
 	byRef := make(map[TaskRef]int, len(tasks))
 	for i, t := range tasks {
-		byRef[taskRefOf(t)] = i
+		byRef[t.Ref()] = i
 	}
 	outputSets := make([]map[string]struct{}, len(tasks))
 	for i, t := range tasks {
@@ -83,8 +68,7 @@ func Edges(tasks []depgraph.Task) []Edge {
 	var out []Edge
 	for i, t := range tasks {
 		for _, dep := range t.DependsOn {
-			from := TaskRef{SpecRelpath: dep.SpecRelpath, Name: dep.Name}
-			j, ok := byRef[from]
+			j, ok := byRef[dep]
 			if !ok {
 				// Unresolvable refs are rejected by spec.ValidateDependReferences;
 				// a caller bypassing that check gets the edge skipped, not a panic.
@@ -97,7 +81,7 @@ func Edges(tasks []depgraph.Task) []Edge {
 				}
 			}
 			sort.Strings(files)
-			out = append(out, Edge{From: from, To: taskRefOf(tasks[i]), Files: files})
+			out = append(out, Edge{From: dep, To: tasks[i].Ref(), Files: files})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -107,10 +91,6 @@ func Edges(tasks []depgraph.Task) []Edge {
 		return lessRef(out[i].From, out[j].From)
 	})
 	return out
-}
-
-func taskRefOf(t depgraph.Task) TaskRef {
-	return TaskRef{SpecRelpath: t.SpecRelpath, Name: t.Name}
 }
 
 func lessRef(a, b TaskRef) bool {
@@ -125,7 +105,7 @@ func lessRef(a, b TaskRef) bool {
 func orderedRefs(tasks []depgraph.Task) []TaskRef {
 	refs := make([]TaskRef, len(tasks))
 	for i, t := range tasks {
-		refs[i] = taskRefOf(t)
+		refs[i] = t.Ref()
 	}
 	sort.Slice(refs, func(i, j int) bool { return lessRef(refs[i], refs[j]) })
 	return refs

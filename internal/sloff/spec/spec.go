@@ -26,10 +26,21 @@ type File struct {
 	Commands []Command               `yaml:"commands,omitempty"`
 }
 
+// Depend is one entry of commands[*].depends — a reference to another task
+// that must complete before this command runs (ADR-0013). Spec is the
+// dependency's spec dir relative to the sloff.yml that declares the
+// reference; empty means the same file. Depends affects scheduling only and
+// never feeds the fingerprint input_hash (ADR-0013 D4).
+type Depend struct {
+	Spec string `yaml:"spec,omitempty"`
+	Task string `yaml:"task"`
+}
+
 // Command corresponds to one entry in commands[]. Tools is a list of tool
 // names that must resolve to entries in the repo-wide tool registry.
 type Command struct {
 	Cmd     CmdLine  `yaml:"cmd"`
+	Depends []Depend `yaml:"depends,omitempty"`
 	Inputs  []string `yaml:"inputs"`
 	Name    string   `yaml:"name"`
 	Outputs []string `yaml:"outputs"`
@@ -224,6 +235,14 @@ func validateCommands(cmds []Command) error {
 		for j, name := range c.Tools {
 			if name == "" {
 				return fmt.Errorf("commands[%d] (%s): tools[%d] is empty", i, c.Name, j)
+			}
+		}
+		for j, d := range c.Depends {
+			if d.Task == "" {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: task is required", i, c.Name, j)
+			}
+			if strings.HasPrefix(d.Spec, "/") {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: spec must be a relative path, got %q", i, c.Name, j, d.Spec)
 			}
 		}
 		if _, dup := seen[c.Name]; dup {

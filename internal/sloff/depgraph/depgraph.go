@@ -7,6 +7,7 @@ package depgraph
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -146,13 +147,13 @@ func Build(tasks []Task) ([]Task, error) {
 	return out, nil
 }
 
-func taskKey(t Task) string {
-	return t.SpecRelpath + "\x00" + t.Name
-}
-
 func sortByKey(indices []int, tasks []Task) {
 	sort.SliceStable(indices, func(i, j int) bool {
-		return taskKey(tasks[indices[i]]) < taskKey(tasks[indices[j]])
+		a, b := tasks[indices[i]].Ref(), tasks[indices[j]].Ref()
+		if a.SpecRelpath != b.SpecRelpath {
+			return a.SpecRelpath < b.SpecRelpath
+		}
+		return a.Name < b.Name
 	})
 }
 
@@ -178,13 +179,13 @@ func conflictError(tasks []Task, conflicts map[string][]int) error {
 func taskLabel(t Task) string { return t.Ref().Label() }
 
 func remainingTaskKeys(all, emitted []Task) string {
-	emittedSet := make(map[string]struct{}, len(emitted))
+	emittedSet := make(map[TaskRef]struct{}, len(emitted))
 	for _, t := range emitted {
-		emittedSet[taskKey(t)] = struct{}{}
+		emittedSet[t.Ref()] = struct{}{}
 	}
 	var rest []string
 	for _, t := range all {
-		if _, ok := emittedSet[taskKey(t)]; ok {
+		if _, ok := emittedSet[t.Ref()]; ok {
 			continue
 		}
 		rest = append(rest, t.Ref().Label())
@@ -219,17 +220,15 @@ func FindMissingDependencies(tasks []Task) []MissingDependency {
 	}
 	var out []MissingDependency
 	for i, t := range tasks {
-		declared := make(map[TaskRef]struct{}, len(t.DependsOn))
-		for _, d := range t.DependsOn {
-			declared[d] = struct{}{}
-		}
 		byProducer := map[int][]string{}
 		for _, in := range t.Inputs {
 			j, ok := producer[in]
 			if !ok || j == i {
 				continue
 			}
-			if _, ok := declared[tasks[j].Ref()]; ok {
+			// depends lists are short (a handful of entries); a linear scan
+			// beats building a set per task.
+			if slices.Contains(t.DependsOn, tasks[j].Ref()) {
 				continue
 			}
 			byProducer[j] = append(byProducer[j], in)
@@ -256,16 +255,40 @@ func FindMissingDependencies(tasks []Task) []MissingDependency {
 // relative to the consumer's spec dir (ADR-0013 D1) and omitted entirely for
 // same-dir references.
 func FormatMissing(m MissingDependency) string {
-	evidence := "generated files"
-	if len(m.Files) > 0 {
-		evidence = m.Files[0]
-		if len(m.Files) > 1 {
-			evidence = fmt.Sprintf("%s (+%d more)", m.Files[0], len(m.Files)-1)
-		}
+	evidence := FileSample(m.Files)
+	if evidence == "" {
+		evidence = "generated files"
 	}
 	return fmt.Sprintf("%s reads %s produced by %s but does not declare the dependency; add %s to %q in %s",
 		m.Consumer.Label(), evidence, m.Producer.Label(),
 		suggestedDependEntry(m), m.Consumer.Name, specYAMLPath(m.Consumer))
+}
+
+// MissingDependenciesError aggregates undeclared-dependency findings into one
+// actionable error (ADR-0013 D3: a missing depends declaration is a hard
+// failure for `sloff run`; `sloff graph` renders the same findings as
+// warnings instead).
+func MissingDependenciesError(missing []MissingDependency) error {
+	lines := make([]string, len(missing))
+	for i, m := range missing {
+		lines[i] = FormatMissing(m)
+	}
+	return fmt.Errorf("undeclared task dependencies detected:\n  %s", strings.Join(lines, "\n  "))
+}
+
+// FileSample renders a file-evidence caption: the single file alone, or the
+// first file annotated with how many more share the same edge. Empty input
+// yields "" so each caller picks its own fallback ("generated files" in
+// FormatMissing, "(declared)" in explain's edge captions).
+func FileSample(files []string) string {
+	switch len(files) {
+	case 0:
+		return ""
+	case 1:
+		return files[0]
+	default:
+		return fmt.Sprintf("%s (+%d more)", files[0], len(files)-1)
+	}
 }
 
 func specYAMLPath(r TaskRef) string {
@@ -277,27 +300,21 @@ func specYAMLPath(r TaskRef) string {
 }
 
 func suggestedDependEntry(m MissingDependency) string {
-	consumerDir := normalizeSpecDir(m.Consumer.SpecRelpath)
-	producerDir := normalizeSpecDir(m.Producer.SpecRelpath)
+	consumerDir := specDirForRel(m.Consumer.SpecRelpath)
+	producerDir := specDirForRel(m.Producer.SpecRelpath)
 	if consumerDir == producerDir {
 		return fmt.Sprintf("`depends: [{task: %s}]`", m.Producer.Name)
 	}
-	rel, err := filepath.Rel(orDot(consumerDir), orDot(producerDir))
+	rel, err := filepath.Rel(consumerDir, producerDir)
 	if err != nil {
 		rel = m.Producer.SpecRelpath
 	}
 	return fmt.Sprintf("`depends: [{spec: %s, task: %s}]`", filepath.ToSlash(rel), m.Producer.Name)
 }
 
-// normalizeSpecDir maps the two "repo root" spellings to one form.
-func normalizeSpecDir(s string) string {
-	if s == "." {
-		return ""
-	}
-	return s
-}
-
-func orDot(s string) string {
+// specDirForRel maps both "repo root" spellings ("" and ".") to the "."
+// form filepath.Rel accepts, so root-vs-subdir suggestions resolve cleanly.
+func specDirForRel(s string) string {
 	if s == "" {
 		return "."
 	}

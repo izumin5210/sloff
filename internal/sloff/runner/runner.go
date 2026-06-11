@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -241,7 +242,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// depends edge. The run-time half (validateProducedDependencies) covers
 	// what a clean checkout hides from this check.
 	if missing := r.findMissingDependenciesTraced(ctx, ordered); len(missing) > 0 {
-		return missingDependsError(missing)
+		return depgraph.MissingDependenciesError(missing)
 	}
 
 	if err := r.prefetchFingerprints(ctx, ordered); err != nil {
@@ -1288,27 +1289,19 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 	if len(produced) == 0 {
 		return nil
 	}
-	paths := make([]string, 0, len(produced))
-	for p := range produced {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
 
 	var missing []depgraph.MissingDependency
 	for _, t := range ordered {
 		consumer := t.Ref()
 		info := r.byKey[t.Ref()]
-		declared := make(map[depgraph.TaskRef]struct{}, len(t.DependsOn))
-		for _, d := range t.DependsOn {
-			declared[d] = struct{}{}
-		}
 		byProducer := map[depgraph.TaskRef][]string{}
-		for _, p := range paths {
-			producer := produced[p]
+		for p, producer := range produced {
 			if producer == consumer {
 				continue
 			}
-			if _, ok := declared[producer]; ok {
+			// depends lists are short (a handful of entries); a linear scan
+			// beats building a set per task.
+			if slices.Contains(t.DependsOn, producer) {
 				continue
 			}
 			if !taskReadsPath(info, p) {
@@ -1322,6 +1315,9 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 		}
 		sort.Slice(producers, func(i, j int) bool { return producers[i].Label() < producers[j].Label() })
 		for _, ref := range producers {
+			// map iteration filled the groups in arbitrary order; sorting here
+			// (not via a pre-sorted path slice) enforces the
+			// MissingDependency.Files "sorted ascending" contract.
 			files := byProducer[ref]
 			sort.Strings(files)
 			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: files})
@@ -1331,7 +1327,7 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 	if len(missing) == 0 {
 		return nil
 	}
-	return missingDependsError(missing)
+	return depgraph.MissingDependenciesError(missing)
 }
 
 // taskReadsPath reports whether produced path p belongs to the task's input
@@ -1367,6 +1363,12 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 		attribute.Int("sloff.task.count", len(ordered)),
 	))
 	defer span.End()
+	warned := 0
+	defer func() { span.SetAttributes(attribute.Int("sloff.depends.unobserved_count", warned)) }()
+
+	if !slices.ContainsFunc(ordered, func(t depgraph.Task) bool { return len(t.DependsOn) > 0 }) {
+		return // no declared edges anywhere: nothing to judge
+	}
 
 	r.producedByMu.Lock()
 	producedByRef := map[depgraph.TaskRef][]string{}
@@ -1374,11 +1376,7 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 		producedByRef[ref] = append(producedByRef[ref], p)
 	}
 	r.producedByMu.Unlock()
-	for _, refPaths := range producedByRef {
-		sort.Strings(refPaths)
-	}
 
-	warned := 0
 	for _, t := range ordered {
 		info := r.byKey[t.Ref()]
 		for _, dep := range t.DependsOn {
@@ -1395,25 +1393,14 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 			}
 			if !overlap {
 				warned++
-				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); conditional outputs (ADR-0004 D2) can also cause this",
+				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); a generator that only emits some outputs in this configuration can also legitimately cause this",
 					t.Ref().Label(), dep.Label())
 			}
 		}
 	}
-	span.SetAttributes(attribute.Int("sloff.depends.unobserved_count", warned))
 }
 
 func taskLabel(t depgraph.Task) string { return t.Ref().Label() }
-
-// missingDependsError aggregates undeclared-dependency violations into one
-// actionable error (ADR-0013 D3: depends-missing is a hard failure).
-func missingDependsError(missing []depgraph.MissingDependency) error {
-	lines := make([]string, len(missing))
-	for i, m := range missing {
-		lines[i] = depgraph.FormatMissing(m)
-	}
-	return fmt.Errorf("undeclared task dependencies detected:\n  %s", strings.Join(lines, "\n  "))
-}
 
 // resolveOutputs re-expands every declared output pattern after execution and fails when
 // the union of matches is empty. A successful run that produced no declared outputs would

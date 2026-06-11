@@ -6,7 +6,6 @@
 package explain
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/izumin5210/sloff/internal/sloff/depgraph"
@@ -29,19 +28,15 @@ type Edge struct {
 
 // LabelSample renders the edge caption used by the graph subcommand:
 // "(declared)" when no overlap evidence is observable in the current tree,
-// the first justifying file alone when there is exactly one, otherwise that
-// file annotated with "(+N more)". A wide monorepo can produce dozens of
-// justifying files per edge; truncating to a sample matches the issue's
-// "サンプル" wording (IZU-7) and keeps the rendered graph readable.
+// otherwise the depgraph.FileSample truncation ("first" / "first (+N more)").
+// A wide monorepo can produce dozens of justifying files per edge; truncating
+// to a sample matches the issue's "サンプル" wording (IZU-7) and keeps the
+// rendered graph readable.
 func (e Edge) LabelSample() string {
-	switch len(e.Files) {
-	case 0:
-		return "(declared)"
-	case 1:
-		return e.Files[0]
-	default:
-		return fmt.Sprintf("%s (+%d more)", e.Files[0], len(e.Files)-1)
+	if s := depgraph.FileSample(e.Files); s != "" {
+		return s
 	}
+	return "(declared)"
 }
 
 // Edges projects each task's declared depends entries into renderable edges,

@@ -157,9 +157,7 @@ func runStep(opts ...runStepOption) step {
 			if !strings.Contains(err.Error(), cfg.wantErr) {
 				t.Fatalf("Run: error %q does not contain %q", err, cfg.wantErr)
 			}
-			return
-		}
-		if err != nil {
+		} else if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 		if cfg.wantWarn != "" {
@@ -1584,4 +1582,15 @@ func TestRunner_DependsCleanStateOrdering(t *testing.T) {
 // file's dir, cross-dir ordering, and per-spec record layout.
 func TestRunner_DependsCrossSpec(t *testing.T) {
 	runE2E(t, "depends-cross-spec", runStep())
+}
+
+// TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun locks that the
+// inputs-omission warning is not swallowed by an unrelated failure later in
+// the run: producer and consumer complete (declared chain), failing errors,
+// and the warning for the consumer→producer edge must still be emitted.
+func TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun(t *testing.T) {
+	runE2E(
+		t, "depends-unobserved-warning-on-failure",
+		runStep(expectError("exit status 1"), expectWarn("none of the files it produced match")),
+	)
 }

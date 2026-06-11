@@ -255,9 +255,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if depErr := r.validateProducedDependencies(ordered); depErr != nil {
 		runErr = errors.Join(runErr, depErr)
 	}
-	if runErr == nil {
-		r.warnUnobservedDepends(ordered)
-	}
+	r.warnUnobservedDepends(ordered)
 	// Flush even when runTasks returned an error so records queued by tasks
 	// that completed *before* a later failure are still persisted. Failed
 	// tasks never enqueue a record (runTask only calls fingerprintStore
@@ -1320,6 +1318,8 @@ func taskReadsPath(info taskInfo, inputSet map[string]struct{}, p string) bool {
 // upstream can change without invalidating the consumer's fingerprint.
 // Conditional outputs (ADR-0004 D2) can legitimately produce zero overlap,
 // hence a warning rather than an error.
+// Safe on failed runs: producers that never ran are absent from producedBy
+// and skipped, so partial runs never produce misleading warnings.
 func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
 	r.producedByMu.Lock()
 	producedByRef := map[depgraph.TaskRef][]string{}

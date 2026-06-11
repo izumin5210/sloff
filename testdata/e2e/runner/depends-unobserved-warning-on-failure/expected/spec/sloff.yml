@@ -1,0 +1,25 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: producer
+    cmd: ["sh", "-c", "echo generated > a-out.txt"]
+    inputs: ["seed.txt"]
+    outputs: ["a-out.txt"]
+    tools: [versioner]
+  - name: consumer
+    cmd: ["sh", "-c", "echo fixed > b-out.txt"]
+    inputs: ["seed.txt"]
+    outputs: ["b-out.txt"]
+    tools: [versioner]
+    depends:
+      - task: producer
+  - name: failing
+    cmd: ["sh", "-c", "exit 1"]
+    inputs: ["seed.txt"]
+    outputs: ["never.txt"]
+    tools: [versioner]
+    depends:
+      - task: consumer

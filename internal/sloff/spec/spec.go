@@ -15,6 +15,8 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	yaml "github.com/goccy/go-yaml"
+
+	"github.com/izumin5210/sloff/internal/sloff/glob"
 )
 
 // File represents one parsed sloff.yml file. Each file may carry tool
@@ -304,7 +306,7 @@ func ValidateDependReferences(specs []Spec) error {
 				// path.Join cleans, so "../options" resolves against the
 				// declaring file's dir the same way inputs/outputs globs do.
 				target := path.Join(dir, d.Spec)
-				if target == ".." || strings.HasPrefix(target, "../") {
+				if glob.EscapesRoot(target) {
 					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", registryDefinitionPath(sp.Dir), c.Name, i, d.Spec)
 				}
 				key := taskKey{target, d.Task}

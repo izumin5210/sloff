@@ -1320,7 +1320,7 @@ func taskReadsPath(info taskInfo, inputSet map[string]struct{}, p string) bool {
 	specDir := filepath.ToSlash(info.specRelpath)
 	for _, pattern := range info.command.Inputs {
 		joined := path.Join(specDir, pattern)
-		if joined == ".." || strings.HasPrefix(joined, "../") {
+		if glob.EscapesRoot(joined) {
 			continue // already rejected by glob.Expand at collect time
 		}
 		if ok, err := doublestar.Match(joined, slashPath); err == nil && ok {

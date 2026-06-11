@@ -1,0 +1,9 @@
+commands:
+  - name: consumer
+    cmd: ["sh", "-c", "cp ../specA/a.txt b.txt"]
+    inputs: ["../specA/a.txt"]
+    outputs: ["b.txt"]
+    tools: [versioner]
+    depends:
+      - spec: ../specA
+        task: producer

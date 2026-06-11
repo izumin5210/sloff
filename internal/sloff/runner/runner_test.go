@@ -1562,3 +1562,23 @@ commands:
 		t.Errorf("expected earliest-prefix retained (%q), got %q", earlier, postEntries[0].Name())
 	}
 }
+
+// TestRunner_DependsCleanStateOrdering is the ADR-0013 motivating scenario:
+// no generated file exists, yet the declared edge orders producer before
+// consumer (the old overlap derivation found no edge here and the consumer's
+// `cp` would race and fail). The second run must be a full fingerprint hit
+// and still pass run-time validation.
+func TestRunner_DependsCleanStateOrdering(t *testing.T) {
+	runE2E(
+		t, "depends-clean-state-ordering",
+		runStep(),
+		runStep(),
+	)
+}
+
+// TestRunner_DependsCrossSpec covers the {spec: ../dir, task: name} reference
+// form end to end on a clean checkout: resolution against the declaring
+// file's dir, cross-dir ordering, and per-spec record layout.
+func TestRunner_DependsCrossSpec(t *testing.T) {
+	runE2E(t, "depends-cross-spec", runStep())
+}

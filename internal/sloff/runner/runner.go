@@ -545,6 +545,9 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
 		return nil, nil, err
 	}
+	if err := spec.ValidateDependReferences(r.opts.Specs); err != nil {
+		return nil, nil, err
+	}
 	return registry, referencedTools(r.opts.Specs), nil
 }
 
@@ -807,6 +810,7 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 				Name:        c.Name,
 				Inputs:      mergedInputs,
 				Outputs:     outputs,
+				DependsOn:   resolveDepends(sp.Dir, c.Depends),
 			}
 			tasks = append(tasks, t)
 			r.byKey[depgraphKey(t)] = taskInfo{
@@ -903,6 +907,27 @@ func combineResolvedVersions(names []string, versionsByTool map[string][]toolres
 		combined = append(combined, v...)
 	}
 	return combined
+}
+
+// resolveDepends maps declared depends entries to depgraph TaskRefs. The
+// reference rules (existence, self-reference, duplicates, repo-root escape)
+// are enforced by spec.ValidateDependReferences before collectTasks runs, so
+// this is pure path arithmetic: clean-join the consumer's spec dir with each
+// entry's relative spec path (empty = same dir), mirroring how inputs/outputs
+// globs resolve (ADR-0013 D1).
+func resolveDepends(specDir string, depends []spec.Depend) []depgraph.TaskRef {
+	if len(depends) == 0 {
+		return nil
+	}
+	dirSlash := filepath.ToSlash(specDir)
+	out := make([]depgraph.TaskRef, 0, len(depends))
+	for _, d := range depends {
+		out = append(out, depgraph.TaskRef{
+			SpecRelpath: filepath.FromSlash(path.Join(dirSlash, d.Spec)),
+			Name:        d.Task,
+		})
+	}
+	return out
 }
 
 // mergeInputs returns the deduplicated, sorted union of declared and extra

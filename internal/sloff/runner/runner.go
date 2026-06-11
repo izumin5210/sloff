@@ -240,7 +240,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// observable producer→consumer overlap must be covered by a declared
 	// depends edge. The run-time half (validateProducedDependencies) covers
 	// what a clean checkout hides from this check.
-	if missing := depgraph.FindMissingDependencies(ordered); len(missing) > 0 {
+	if missing := r.findMissingDependenciesTraced(ctx, ordered); len(missing) > 0 {
 		return missingDependsError(missing)
 	}
 
@@ -252,10 +252,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	runErr := r.runTasks(ctx, ordered)
 	// Run-time half of ADR-0013 D3: validate against what was actually
 	// produced (clean checkouts hide everything from the plan-time check).
-	if depErr := r.validateProducedDependencies(ordered); depErr != nil {
+	if depErr := r.validateProducedDependencies(ctx, ordered); depErr != nil {
 		runErr = errors.Join(runErr, depErr)
 	}
-	r.warnUnobservedDepends(ordered)
+	r.warnUnobservedDepends(ctx, ordered)
 	// Flush even when runTasks returned an error so records queued by tasks
 	// that completed *before* a later failure are still persisted. Failed
 	// tasks never enqueue a record (runTask only calls fingerprintStore
@@ -403,6 +403,19 @@ func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task)
 	return depgraph.Build(tasks)
 }
 
+// findMissingDependenciesTraced wraps depgraph.FindMissingDependencies with a
+// span so the plan-time half of ADR-0013 D3 shows up in the trace tree
+// alongside the other phases.
+func (r *Runner) findMissingDependenciesTraced(ctx context.Context, ordered []depgraph.Task) []depgraph.MissingDependency {
+	_, span := r.tracer.Start(ctx, "runner.depends.validate", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer span.End()
+	missing := depgraph.FindMissingDependencies(ordered)
+	span.SetAttributes(attribute.Int("sloff.depends.missing_count", len(missing)))
+	return missing
+}
+
 // runTasks executes the topologically-ordered task list with bounded
 // concurrency. A task starts as soon as every declared dependency has
 // finished — depgraph already sorted them, so we only need to look up each
@@ -547,7 +560,7 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingD
 	if err != nil {
 		return nil, nil, err
 	}
-	return ordered, depgraph.FindMissingDependencies(ordered), nil
+	return ordered, r.findMissingDependenciesTraced(ctx, ordered), nil
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
@@ -1232,7 +1245,12 @@ func (r *Runner) recordProducedPaths(producer depgraph.TaskRef, paths []string) 
 // declared edges are filtered out, so anything it flags is a real spec
 // defect worth surfacing alongside the task failure. It executes after
 // runTasks has joined every goroutine; the snapshot lock is defensive.
-func (r *Runner) validateProducedDependencies(ordered []depgraph.Task) error {
+func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []depgraph.Task) (err error) {
+	_, span := r.tracer.Start(ctx, "runner.depends.validate_produced", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer endSpan(span, &err)
+
 	r.producedByMu.Lock()
 	produced := make(map[string]depgraph.TaskRef, len(r.producedBy))
 	maps.Copy(produced, r.producedBy)
@@ -1281,6 +1299,7 @@ func (r *Runner) validateProducedDependencies(ordered []depgraph.Task) error {
 			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: byProducer[ref]})
 		}
 	}
+	span.SetAttributes(attribute.Int("sloff.depends.missing_count", len(missing)))
 	if len(missing) == 0 {
 		return nil
 	}
@@ -1320,7 +1339,12 @@ func taskReadsPath(info taskInfo, inputSet map[string]struct{}, p string) bool {
 // hence a warning rather than an error.
 // Safe on failed runs: producers that never ran are absent from producedBy
 // and skipped, so partial runs never produce misleading warnings.
-func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
+func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.Task) {
+	_, span := r.tracer.Start(ctx, "runner.depends.warn_unobserved", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer span.End()
+
 	r.producedByMu.Lock()
 	producedByRef := map[depgraph.TaskRef][]string{}
 	for p, ref := range r.producedBy {
@@ -1331,6 +1355,7 @@ func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
 		sort.Strings(refPaths)
 	}
 
+	warned := 0
 	for _, t := range ordered {
 		info := r.byKey[depgraphKey(t)]
 		inputSet := make(map[string]struct{}, len(info.inputPaths))
@@ -1350,11 +1375,13 @@ func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
 				}
 			}
 			if !overlap {
+				warned++
 				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); conditional outputs (ADR-0004 D2) can also cause this",
 					t.Ref().Label(), dep.Label())
 			}
 		}
 	}
+	span.SetAttributes(attribute.Int("sloff.depends.unobserved_count", warned))
 }
 
 func taskLabel(t depgraph.Task) string { return t.Ref().Label() }

@@ -5,9 +5,27 @@ package depgraph
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// TaskRef identifies a task by its (SpecRelpath, Name) key — the same pair
+// that uniquely keys Task nodes throughout the orchestrator.
+type TaskRef struct {
+	SpecRelpath string
+	Name        string
+}
+
+// Label renders the canonical human-readable identifier used in errors and
+// graph output. SpecRelpath "" (unit tests) and "." (a sloff.yml at the repo
+// root) both mean "no qualifier needed".
+func (r TaskRef) Label() string {
+	if r.SpecRelpath == "" || r.SpecRelpath == "." {
+		return r.Name
+	}
+	return r.SpecRelpath + ":" + r.Name
+}
 
 // Task is one DAG node. SpecRelpath/Name together form the unique key.
 type Task struct {
@@ -15,7 +33,14 @@ type Task struct {
 	Name        string
 	Inputs      []string // expanded paths, repo-root relative
 	Outputs     []string
+	// DependsOn carries the spec-declared dependencies (ADR-0013). Build uses
+	// only these for ordering edges; Inputs/Outputs remain for duplicate-
+	// producer detection and overlap validation.
+	DependsOn []TaskRef
 }
+
+// Ref returns the task's identity key.
+func (t Task) Ref() TaskRef { return TaskRef{SpecRelpath: t.SpecRelpath, Name: t.Name} }
 
 // Build returns the tasks in execution order: A precedes B whenever some output of A
 // also appears in B's inputs. Ties are broken deterministically by (SpecRelpath, Name).
@@ -168,4 +193,98 @@ func remainingTaskKeys(all, emitted []Task) string {
 	}
 	sort.Strings(rest)
 	return strings.Join(rest, ", ")
+}
+
+// MissingDependency is one undeclared edge surfaced by overlap validation
+// (ADR-0013 D3): the consumer's expanded inputs intersect the producer's
+// expanded outputs, but the consumer does not declare the producer in
+// depends. Files carries the intersection as evidence, sorted ascending.
+type MissingDependency struct {
+	Producer TaskRef
+	Consumer TaskRef
+	Files    []string
+}
+
+// FindMissingDependencies computes O_A ∩ I_B for every task pair and returns
+// the pairs whose overlap is not covered by a declared depends edge. The
+// result is deterministic: ordered by (Consumer, Producer) labels, files
+// sorted ascending. An empty result means every observable data flow is
+// declared; clean checkouts (no generated files on disk) trivially return
+// empty, which is why the runner re-validates against actually-produced
+// paths at run time.
+func FindMissingDependencies(tasks []Task) []MissingDependency {
+	producer := map[string]int{}
+	for i, t := range tasks {
+		for _, out := range t.Outputs {
+			producer[out] = i
+		}
+	}
+	var out []MissingDependency
+	for i, t := range tasks {
+		declared := make(map[TaskRef]struct{}, len(t.DependsOn))
+		for _, d := range t.DependsOn {
+			declared[d] = struct{}{}
+		}
+		byProducer := map[int][]string{}
+		for _, in := range t.Inputs {
+			j, ok := producer[in]
+			if !ok || j == i {
+				continue
+			}
+			if _, ok := declared[tasks[j].Ref()]; ok {
+				continue
+			}
+			byProducer[j] = append(byProducer[j], in)
+		}
+		for j, files := range byProducer {
+			sort.Strings(files)
+			out = append(out, MissingDependency{Producer: tasks[j].Ref(), Consumer: t.Ref(), Files: files})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Consumer != out[j].Consumer {
+			return out[i].Consumer.Label() < out[j].Consumer.Label()
+		}
+		return out[i].Producer.Label() < out[j].Producer.Label()
+	})
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// FormatMissing renders one missing dependency as an actionable message,
+// including the exact depends entry to add. The suggested spec path is
+// relative to the consumer's spec dir (ADR-0013 D1) and omitted entirely for
+// same-dir references.
+func FormatMissing(m MissingDependency) string {
+	evidence := "generated files"
+	if len(m.Files) > 0 {
+		evidence = m.Files[0]
+		if len(m.Files) > 1 {
+			evidence = fmt.Sprintf("%s (+%d more)", m.Files[0], len(m.Files)-1)
+		}
+	}
+	return fmt.Sprintf("%s reads %s produced by %s but does not declare the dependency; add %s to %q in %s",
+		m.Consumer.Label(), evidence, m.Producer.Label(),
+		suggestedDependEntry(m), m.Consumer.Name, specYAMLPath(m.Consumer))
+}
+
+func specYAMLPath(r TaskRef) string {
+	dir := filepath.ToSlash(r.SpecRelpath)
+	if dir == "" || dir == "." {
+		return "sloff.yml"
+	}
+	return dir + "/sloff.yml"
+}
+
+func suggestedDependEntry(m MissingDependency) string {
+	if m.Consumer.SpecRelpath == m.Producer.SpecRelpath {
+		return fmt.Sprintf("`depends: [{task: %s}]`", m.Producer.Name)
+	}
+	rel, err := filepath.Rel(m.Consumer.SpecRelpath, m.Producer.SpecRelpath)
+	if err != nil {
+		rel = m.Producer.SpecRelpath
+	}
+	return fmt.Sprintf("`depends: [{spec: %s, task: %s}]`", filepath.ToSlash(rel), m.Producer.Name)
 }

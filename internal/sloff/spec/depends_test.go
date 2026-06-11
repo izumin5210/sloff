@@ -87,3 +87,120 @@ func TestParse_DependsSpecMustBeRelative(t *testing.T) {
 		t.Errorf("expected relative-path error, got %v", err)
 	}
 }
+
+// buildSpecs assembles a discovered-spec set without touching the
+// filesystem: dirs are OS-native (as spec.Discover produces them).
+func buildSpecs(t *testing.T, byDir map[string]string) []spec.Spec {
+	t.Helper()
+	out := make([]spec.Spec, 0, len(byDir))
+	for dir, yml := range byDir {
+		f, err := spec.Parse([]byte(yml))
+		if err != nil {
+			t.Fatalf("Parse %s: %v", dir, err)
+		}
+		out = append(out, spec.Spec{Dir: dir, Path: dir + "/sloff.yml", File: f})
+	}
+	return out
+}
+
+const producerYAML = `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "true"]
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+`
+
+func consumerYAML(dependsBlock string) string {
+	return `commands:
+  - name: consume
+    cmd: ["sh", "-c", "true"]
+    inputs: ["x.txt"]
+    outputs: ["y.txt"]
+    tools: [versioner]
+` + dependsBlock
+}
+
+func TestValidateDependReferences_OK(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/options": producerYAML,
+		"proto/svc": consumerYAML(`    depends:
+      - spec: ../options
+        task: gen
+`),
+	})
+	if err := spec.ValidateDependReferences(specs); err != nil {
+		t.Errorf("expected ok, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_UnknownSpecDirErrors(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/svc": consumerYAML(`    depends:
+      - spec: ../nowhere
+        task: gen
+`),
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not-found error, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_UnknownTaskErrors(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/options": producerYAML,
+		"proto/svc": consumerYAML(`    depends:
+      - spec: ../options
+        task: missing-task
+`),
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not-found error, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_SelfReferenceErrors(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/svc": consumerYAML(`    depends:
+      - task: consume
+`),
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "itself") {
+		t.Errorf("expected self-reference error, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_DuplicateEdgeErrors(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/options": producerYAML,
+		"proto/svc": consumerYAML(`    depends:
+      - spec: ../options
+        task: gen
+      - spec: ../../proto/options
+        task: gen
+`),
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("expected duplicate error, got %v", err)
+	}
+}
+
+func TestValidateDependReferences_RepoRootEscapeErrors(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/svc": consumerYAML(`    depends:
+      - spec: ../../../outside
+        task: gen
+`),
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "escapes repo root") {
+		t.Errorf("expected escape error, got %v", err)
+	}
+}

@@ -281,6 +281,49 @@ var discoverSkipDirs = map[string]struct{}{
 	".git":         {},
 }
 
+// ValidateDependReferences checks every commands[*].depends entry across the
+// discovered spec set (ADR-0013 D1): the referenced spec dir must stay inside
+// the repo, the referenced (spec dir, task) must exist, self-references are
+// rejected, and the same edge declared twice in one command is rejected.
+// Like ValidateToolReferences, this is a cross-file pass run on the full set
+// after Discover; per-file structural checks live in validate.
+func ValidateDependReferences(specs []Spec) error {
+	type taskKey struct{ dir, name string }
+	defined := map[taskKey]struct{}{}
+	for _, sp := range specs {
+		dir := filepath.ToSlash(sp.Dir)
+		for _, c := range sp.File.Commands {
+			defined[taskKey{dir, c.Name}] = struct{}{}
+		}
+	}
+	for _, sp := range specs {
+		dir := filepath.ToSlash(sp.Dir)
+		for _, c := range sp.File.Commands {
+			seen := map[taskKey]struct{}{}
+			for i, d := range c.Depends {
+				// path.Join cleans, so "../options" resolves against the
+				// declaring file's dir the same way inputs/outputs globs do.
+				target := path.Join(dir, d.Spec)
+				if target == ".." || strings.HasPrefix(target, "../") {
+					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", sp.Dir, c.Name, i, d.Spec)
+				}
+				key := taskKey{target, d.Task}
+				if target == dir && d.Task == c.Name {
+					return fmt.Errorf("%s/%s: depends[%d]: task depends on itself", sp.Dir, c.Name, i)
+				}
+				if _, ok := defined[key]; !ok {
+					return fmt.Errorf("%s/%s: depends[%d]: task %q not found in spec dir %q", sp.Dir, c.Name, i, d.Task, target)
+				}
+				if _, dup := seen[key]; dup {
+					return fmt.Errorf("%s/%s: depends[%d]: duplicate depends entry %s:%s", sp.Dir, c.Name, i, target, d.Task)
+				}
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return nil
+}
+
 // Discover walks root and returns each file matching pattern (a doublestar
 // expression like "**/sloff.yml") parsed and validated. Heavy build / VCS
 // directories listed in discoverSkipDirs are pruned without descent.

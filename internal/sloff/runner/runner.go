@@ -234,6 +234,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Plan-time half of ADR-0013 D3: with the current tree's files, every
+	// observable producer→consumer overlap must be covered by a declared
+	// depends edge. The run-time half (validateProducedDependencies) covers
+	// what a clean checkout hides from this check.
+	if missing := depgraph.FindMissingDependencies(ordered); len(missing) > 0 {
+		return missingDependsError(missing)
+	}
+
 	if err := r.prefetchFingerprints(ctx, ordered); err != nil {
 		return err
 	}
@@ -499,35 +507,39 @@ func taskConcurrency(n int) int {
 }
 
 // Plan resolves all discovered specs into a topologically-ordered task list
-// without running preflight or executing any cmd. It is the planning core
-// shared with `sloff graph` (and the future `sloff run --explain` once that
-// path is wired up): same registry / Inputs path as Run, so callers observe
-// the exact set of inputs / outputs the runner would orchestrate.
+// without running preflight or executing any cmd, plus the overlap-validation
+// findings for the current tree. Callers decide severity: Run fails on a
+// non-empty missing list, `sloff graph` prints warnings and still renders
+// (the graph is a debugging surface for exactly this kind of spec problem).
 //
 // Plan deliberately calls `Registry.Inputs` only (not `Versions`) because
-// the depgraph never reads ResolvedVersions — they only feed `resolved_versions_hash`
-// (architecture.md, ADR-0008 D6 addendum). Skipping Versions means
-// `script` resolvers don't spawn `<bin> --version` here, which keeps
-// graph-style consumers usable when prebuilt binaries aren't installed.
+// the depgraph never reads ResolvedVersions — they only feed
+// `resolved_versions_hash` (architecture.md, ADR-0008 D6 addendum). Skipping
+// Versions means `script` resolvers don't spawn `<bin> --version` here, which
+// keeps graph-style consumers usable when prebuilt binaries aren't installed.
 //
 // Preflight is intentionally skipped for the same reason: debugging tools
 // that read the depgraph must remain useful when the install state is
 // drifted, since drift is one of the conditions users reach for the graph
 // to investigate.
-func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
+func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingDependency, error) {
 	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tasks, err := r.collectTasksTraced(ctx, inputsByTool, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return r.depgraphBuildTraced(ctx, tasks)
+	ordered, err := r.depgraphBuildTraced(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ordered, depgraph.FindMissingDependencies(ordered), nil
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
@@ -1205,6 +1217,16 @@ func taskLabel(t depgraph.Task) string {
 		return t.Name
 	}
 	return t.SpecRelpath + ":" + t.Name
+}
+
+// missingDependsError aggregates undeclared-dependency violations into one
+// actionable error (ADR-0013 D3: depends-missing is a hard failure).
+func missingDependsError(missing []depgraph.MissingDependency) error {
+	lines := make([]string, len(missing))
+	for i, m := range missing {
+		lines[i] = depgraph.FormatMissing(m)
+	}
+	return fmt.Errorf("undeclared task dependencies detected:\n  %s", strings.Join(lines, "\n  "))
 }
 
 // resolveOutputs re-expands every declared output pattern after execution and fails when

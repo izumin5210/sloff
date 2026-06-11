@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 	"github.com/izumin5210/sloff/internal/sloff/explain"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
@@ -44,7 +45,7 @@ user is trying to debug. Resolver Inputs are still resolved — failures
 there mean the graph would be missing overlap evidence, so they fail
 loud.`,
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
-			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), root, pattern, format)
+			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), cobraCmd.ErrOrStderr(), root, pattern, format)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing sloff.yml specs")
@@ -54,7 +55,7 @@ loud.`,
 	return cmd
 }
 
-func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string) (err error) {
+func graphE(ctx context.Context, out, errOut io.Writer, rawRoot, pattern, format string) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -105,9 +106,14 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		TracerProvider: tp,
 	})
 
-	tasks, err := r.Plan(ctx)
+	tasks, missing, err := r.Plan(ctx)
 	if err != nil {
 		return err
+	}
+	// ADR-0013 D3: graph downgrades the depends-missing check to a warning so
+	// the DAG stays inspectable while the user fixes the spec.
+	for _, m := range missing {
+		fmt.Fprintf(errOut, "warning: %s\n", depgraph.FormatMissing(m))
 	}
 	edges := explain.Edges(tasks)
 

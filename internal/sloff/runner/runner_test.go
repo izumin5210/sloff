@@ -145,14 +145,25 @@ func runStep(opts ...runStepOption) step {
 			Preflight: preflightReg,
 			Force:     cfg.force,
 		})
-		if err := r.Run(context.Background()); err != nil {
+		err = r.Run(context.Background())
+		if cfg.wantErr != "" {
+			if err == nil {
+				t.Fatalf("Run: expected error containing %q, got nil", cfg.wantErr)
+			}
+			if !strings.Contains(err.Error(), cfg.wantErr) {
+				t.Fatalf("Run: error %q does not contain %q", err, cfg.wantErr)
+			}
+			return
+		}
+		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 	}
 }
 
 type runStepConfig struct {
-	force bool
+	force   bool
+	wantErr string
 }
 
 type runStepOption func(*runStepConfig)
@@ -161,6 +172,12 @@ type runStepOption func(*runStepConfig)
 // fingerprint bypass path.
 func withForce() runStepOption {
 	return func(c *runStepConfig) { c.force = true }
+}
+
+// expectError makes the step assert that Run fails with an error containing
+// substr, instead of failing the test on error.
+func expectError(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantErr = substr }
 }
 
 func writeStep(relpath, contents string) step {
@@ -1351,6 +1368,17 @@ commands:
 // generator (out of sloff scope), so the test forces the situation by
 // hand-crafting a pre-existing record whose output.hash deliberately
 // disagrees with what the generator currently produces.
+// TestRunner_DependsMissingAtPlanTimeErrors locks ADR-0013 D3's plan-time
+// check: produced.txt exists on disk, so the consumer/producer overlap is
+// observable before execution and Run must fail — with the exact depends
+// entry to add — without executing any task.
+func TestRunner_DependsMissingAtPlanTimeErrors(t *testing.T) {
+	runE2E(
+		t, "depends-missing-plan-error",
+		runStep(expectError("undeclared task dependencies")),
+	)
+}
+
 func TestRunner_ConcurrentFirstWriteCollapsesOnRewrite(t *testing.T) {
 	workdir := t.TempDir()
 	specDir := filepath.Join(workdir, "spec")

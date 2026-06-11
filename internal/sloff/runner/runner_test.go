@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -137,6 +138,7 @@ func runStep(opts ...runStepOption) step {
 		resolverReg.Register(pnpmRes)
 		preflightReg := preflight.NewRegistry()
 		preflightReg.Register(preflightpnpm.New(h.workdir))
+		logs := &captureLogger{}
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
@@ -144,6 +146,8 @@ func runStep(opts ...runStepOption) step {
 			Resolvers: resolverReg,
 			Preflight: preflightReg,
 			Force:     cfg.force,
+			ReadOnly:  cfg.readOnly,
+			Logger:    logs,
 		})
 		err = r.Run(context.Background())
 		if cfg.wantErr != "" {
@@ -158,12 +162,29 @@ func runStep(opts ...runStepOption) step {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
+		if cfg.wantWarn != "" {
+			logs.mu.Lock()
+			warns := append([]string(nil), logs.warns...)
+			logs.mu.Unlock()
+			found := false
+			for _, w := range warns {
+				if strings.Contains(w, cfg.wantWarn) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("Run: no warning containing %q; warnings: %v", cfg.wantWarn, warns)
+			}
+		}
 	}
 }
 
 type runStepConfig struct {
-	force   bool
-	wantErr string
+	force    bool
+	readOnly bool
+	wantErr  string
+	wantWarn string
 }
 
 type runStepOption func(*runStepConfig)
@@ -174,10 +195,38 @@ func withForce() runStepOption {
 	return func(c *runStepConfig) { c.force = true }
 }
 
+// withReadOnly sets Options.ReadOnly so no fingerprint record is written.
+// Used by fixtures whose record bytes would otherwise depend on scheduling
+// order (e.g. whether an upstream output existed when a racing task hashed
+// its inputs).
+func withReadOnly() runStepOption {
+	return func(c *runStepConfig) { c.readOnly = true }
+}
+
 // expectError makes the step assert that Run fails with an error containing
 // substr, instead of failing the test on error.
 func expectError(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantErr = substr }
+}
+
+// expectWarn asserts that Run logs at least one warning containing substr.
+func expectWarn(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantWarn = substr }
+}
+
+// captureLogger records warnings for expectWarn assertions while discarding
+// info/error chatter.
+type captureLogger struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (c *captureLogger) Infof(format string, args ...any)  {}
+func (c *captureLogger) Errorf(format string, args ...any) {}
+func (c *captureLogger) Warnf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warns = append(c.warns, fmt.Sprintf(format, args...))
 }
 
 func writeStep(relpath, contents string) step {
@@ -1357,6 +1406,31 @@ commands:
 			t.Errorf("expected %q preserved on fingerprint hit, dir contents=%v", want, got)
 		}
 	}
+}
+
+// TestRunner_DependsMissingAtRunTimeErrors covers the clean-checkout hole the
+// plan-time check cannot see: a-out.txt does not exist at plan time, so the
+// overlap is only discoverable after the producer actually writes it. The
+// run must end in the undeclared-dependency error. ReadOnly keeps the golden
+// deterministic: the consumer's record bytes would otherwise depend on
+// whether a-out.txt existed when its inputs were hashed (scheduling race).
+func TestRunner_DependsMissingAtRunTimeErrors(t *testing.T) {
+	runE2E(
+		t, "depends-missing-runtime-error",
+		runStep(withReadOnly(), expectError("undeclared task dependencies")),
+	)
+}
+
+// TestRunner_DependsWithoutObservedOverlapWarns locks ADR-0013 D3's inputs-
+// omission warning: the declared edge is honored for ordering, but no
+// produced file lands in the consumer's input surface, so the consumer's
+// fingerprint cannot invalidate when the producer changes — warn, don't fail
+// (conditional outputs can legitimately look like this).
+func TestRunner_DependsWithoutObservedOverlapWarns(t *testing.T) {
+	runE2E(
+		t, "depends-unobserved-warning",
+		runStep(expectWarn("none of the files it produced match")),
+	)
 }
 
 // TestRunner_ConcurrentFirstWriteCollapsesOnRewrite covers the rare branch of

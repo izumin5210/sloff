@@ -38,3 +38,36 @@ func TestResolveDepends_EmptyReturnsNil(t *testing.T) {
 		t.Errorf("expected nil, got %v", got)
 	}
 }
+
+func TestTaskReadsPath_LiteralPatternMatchesCleanStatePath(t *testing.T) {
+	info := taskInfo{
+		specRelpath: "spec",
+		command:     spec.Command{Inputs: []string{"a-out.txt"}},
+	}
+	// Clean state: the produced file was NOT in the expanded input set, only
+	// the pattern can see it.
+	if !taskReadsPath(info, map[string]struct{}{}, "spec/a-out.txt") {
+		t.Error("expected literal pattern to match the produced path")
+	}
+}
+
+func TestTaskReadsPath_GlobPatternMatches(t *testing.T) {
+	info := taskInfo{
+		specRelpath: "proto/svc",
+		command:     spec.Command{Inputs: []string{"../../gen/**/*.pb.go"}},
+	}
+	if !taskReadsPath(info, map[string]struct{}{}, "gen/foo/bar.pb.go") {
+		t.Error("expected glob pattern to match")
+	}
+	if taskReadsPath(info, map[string]struct{}{}, "gen/foo/bar.txt") {
+		t.Error("non-matching path must not match")
+	}
+}
+
+func TestTaskReadsPath_ExpandedInputSetMatches(t *testing.T) {
+	info := taskInfo{specRelpath: "spec", command: spec.Command{Inputs: []string{"unrelated.txt"}}}
+	set := map[string]struct{}{"spec/extra-input.go": {}} // e.g. resolver ExtraInputs
+	if !taskReadsPath(info, set, "spec/extra-input.go") {
+		t.Error("expected expanded input set to match")
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -149,7 +150,7 @@ type Runner struct {
 	// by producedByMu so independent tasks running in parallel via runTasks don't race on
 	// the shared map.
 	producedByMu sync.Mutex
-	producedBy   map[string]string
+	producedBy   map[string]depgraph.TaskRef
 }
 
 // New constructs a Runner.
@@ -246,8 +247,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	r.producedBy = map[string]string{}
+	r.producedBy = map[string]depgraph.TaskRef{}
 	runErr := r.runTasks(ctx, ordered)
+	// Run-time half of ADR-0013 D3: validate against what was actually
+	// produced (clean checkouts hide everything from the plan-time check).
+	if depErr := r.validateProducedDependencies(ordered); depErr != nil {
+		runErr = errors.Join(runErr, depErr)
+	}
+	if runErr == nil {
+		r.warnUnobservedDepends(ordered)
+	}
 	// Flush even when runTasks returned an error so records queued by tasks
 	// that completed *before* a later failure are still persisted. Failed
 	// tasks never enqueue a record (runTask only calls fingerprintStore
@@ -996,7 +1005,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	span.SetAttributes(attribute.String("sloff.input.hash", inputHashAttr(inputHash)))
 
 	key := fingerprint.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
-	taskLabel := taskLabel(t)
+	ref := t.Ref()
 	hit, existing, paths, err := r.fingerprintLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
@@ -1013,7 +1022,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	}
 	span.SetAttributes(attribute.Bool("sloff.fingerprint.hit", hit))
 	if hit {
-		if err := r.recordProducedPaths(taskLabel, paths); err != nil {
+		if err := r.recordProducedPaths(ref, paths); err != nil {
 			return err
 		}
 		r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
@@ -1029,7 +1038,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	if err != nil {
 		return fmt.Errorf("%s: %w", t.Name, err)
 	}
-	if err := r.recordProducedPaths(taskLabel, outputPaths); err != nil {
+	if err := r.recordProducedPaths(ref, outputPaths); err != nil {
 		return err
 	}
 	outputHash, err := hash.Files(r.opts.RepoRoot, outputPaths)
@@ -1200,16 +1209,148 @@ func outputsEquivalent(a, b *fingerprintv1.Output) bool {
 // conflicts that depgraph cannot see at planning time on a clean checkout, where the
 // pre-run glob expansion of generated files comes back empty. Protected by producedByMu
 // so concurrent runTask goroutines don't race on the shared map.
-func (r *Runner) recordProducedPaths(taskLabel string, paths []string) error {
+func (r *Runner) recordProducedPaths(producer depgraph.TaskRef, paths []string) error {
 	r.producedByMu.Lock()
 	defer r.producedByMu.Unlock()
 	for _, p := range paths {
-		if existing, exists := r.producedBy[p]; exists && existing != taskLabel {
-			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing, taskLabel)
+		if existing, exists := r.producedBy[p]; exists && existing != producer {
+			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing.Label(), producer.Label())
 		}
-		r.producedBy[p] = taskLabel
+		r.producedBy[p] = producer
 	}
 	return nil
+}
+
+// validateProducedDependencies is the run-time half of ADR-0013 D3's
+// depends-missing check. Plan-time validation only sees files that already
+// exist; here every path actually produced during this run (fingerprint-hit
+// tasks included — their recorded outputs also pass through
+// recordProducedPaths) is matched against every other task's input surface.
+// A match without a declared depends edge means this run may have executed
+// in the wrong order — fail loudly with the exact entry to add.
+func (r *Runner) validateProducedDependencies(ordered []depgraph.Task) error {
+	r.producedByMu.Lock()
+	produced := make(map[string]depgraph.TaskRef, len(r.producedBy))
+	for p, ref := range r.producedBy {
+		produced[p] = ref
+	}
+	r.producedByMu.Unlock()
+	if len(produced) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(produced))
+	for p := range produced {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	var missing []depgraph.MissingDependency
+	for _, t := range ordered {
+		consumer := t.Ref()
+		info := r.byKey[depgraphKey(t)]
+		declared := make(map[depgraph.TaskRef]struct{}, len(t.DependsOn))
+		for _, d := range t.DependsOn {
+			declared[d] = struct{}{}
+		}
+		inputSet := make(map[string]struct{}, len(info.inputPaths))
+		for _, p := range info.inputPaths {
+			inputSet[p] = struct{}{}
+		}
+		byProducer := map[depgraph.TaskRef][]string{}
+		for _, p := range paths {
+			producer := produced[p]
+			if producer == consumer {
+				continue
+			}
+			if _, ok := declared[producer]; ok {
+				continue
+			}
+			if !taskReadsPath(info, inputSet, p) {
+				continue
+			}
+			byProducer[producer] = append(byProducer[producer], p)
+		}
+		producers := make([]depgraph.TaskRef, 0, len(byProducer))
+		for ref := range byProducer {
+			producers = append(producers, ref)
+		}
+		sort.Slice(producers, func(i, j int) bool { return producers[i].Label() < producers[j].Label() })
+		for _, ref := range producers {
+			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: byProducer[ref]})
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return missingDependsError(missing)
+}
+
+// taskReadsPath reports whether produced path p belongs to the task's input
+// surface: either it was already in the expanded input set at collect time,
+// or it matches one of the declared input patterns — the clean-state case,
+// where the file did not exist when globs were expanded and only the pattern
+// can see it. Pattern-vs-path matching is exact and cheap (unlike the
+// glob-vs-glob intersection ADR-0004 D3 rejected).
+func taskReadsPath(info taskInfo, inputSet map[string]struct{}, p string) bool {
+	if _, ok := inputSet[p]; ok {
+		return true
+	}
+	slashPath := filepath.ToSlash(p)
+	specDir := filepath.ToSlash(info.specRelpath)
+	for _, pattern := range info.command.Inputs {
+		joined := path.Join(specDir, pattern)
+		if joined == ".." || strings.HasPrefix(joined, "../") {
+			continue // already rejected by glob.Expand at collect time
+		}
+		if ok, err := doublestar.Match(joined, slashPath); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// warnUnobservedDepends emits ADR-0013 D3's "inputs omission" warning: a
+// declared depends edge whose producer ran in this run, yet none of its
+// produced paths landed in the consumer's input surface. That usually means
+// the consumer's inputs are missing the upstream's generated files, so the
+// upstream can change without invalidating the consumer's fingerprint.
+// Conditional outputs (ADR-0004 D2) can legitimately produce zero overlap,
+// hence a warning rather than an error.
+func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
+	r.producedByMu.Lock()
+	producedByRef := map[depgraph.TaskRef][]string{}
+	for p, ref := range r.producedBy {
+		producedByRef[ref] = append(producedByRef[ref], p)
+	}
+	r.producedByMu.Unlock()
+	for _, refPaths := range producedByRef {
+		sort.Strings(refPaths)
+	}
+
+	for _, t := range ordered {
+		info := r.byKey[depgraphKey(t)]
+		inputSet := make(map[string]struct{}, len(info.inputPaths))
+		for _, p := range info.inputPaths {
+			inputSet[p] = struct{}{}
+		}
+		for _, dep := range t.DependsOn {
+			outs, ran := producedByRef[dep]
+			if !ran {
+				continue
+			}
+			overlap := false
+			for _, p := range outs {
+				if taskReadsPath(info, inputSet, p) {
+					overlap = true
+					break
+				}
+			}
+			if !overlap {
+				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); conditional outputs (ADR-0004 D2) can also cause this",
+					t.Ref().Label(), dep.Label())
+			}
+		}
+	}
 }
 
 func taskLabel(t depgraph.Task) string {

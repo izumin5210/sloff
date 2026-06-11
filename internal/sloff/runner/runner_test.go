@@ -934,6 +934,35 @@ func TestRunner_PnpmLocal_DriftDegradesToReadOnlyUnderEscapeHatch(t *testing.T) 
 	}
 }
 
+// TestRunner_PnpmLocal_FailsFastOnUnsupportedLockfileVersion guards the
+// lockfile schema-version check end to end. Pre-v9 lockfiles have no
+// `snapshots` key, so parsing them with the v9 view silently yields zero
+// external deps — npm dep bumps would stop invalidating fingerprints. The
+// drift preflight cannot catch this (it byte-compares the lockfile against
+// the install snapshot, which match here), so the resolver must refuse the
+// lockfile before any cmd executes.
+func TestRunner_PnpmLocal_FailsFastOnUnsupportedLockfileVersion(t *testing.T) {
+	workdir, specs := setupPnpmDriftFixture(t, true /* installInSync */)
+	const v6Lockfile = `lockfileVersion: '6.0'
+importers:
+  packages/codegen: {}
+`
+	for _, rel := range []string{"pnpm-lock.yaml", filepath.Join("node_modules", ".pnpm", "lock.yaml")} {
+		if err := os.WriteFile(filepath.Join(workdir, rel), []byte(v6Lockfile), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := newPnpmDriftRunner(t, workdir, specs, false /* readOnly */)
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unsupported lockfileVersion")
+	}
+	if !strings.Contains(err.Error(), "lockfileVersion") || !strings.Contains(err.Error(), "6.0") {
+		t.Errorf("error should mention the unsupported lockfileVersion, got: %v", err)
+	}
+}
+
 // setupPnpmDriftFixture materialises a minimal repo that uses a pnpm-local
 // tool, with or without a matching install snapshot. installInSync=false
 // leaves node_modules/.pnpm/lock.yaml absent so AssertInstallInSync fails;

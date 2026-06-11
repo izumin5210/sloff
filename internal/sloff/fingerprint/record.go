@@ -9,6 +9,7 @@ package fingerprint
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -28,6 +29,13 @@ const SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V3
 // FileExt is the on-disk extension of a fingerprint file. Storage backends
 // use this to assemble paths and to filter directory listings.
 const FileExt = ".pb"
+
+// ErrUnsupportedSchemaVersion marks records whose schema_version is a known
+// enum value that the current schema has superseded (V2, ADR-0010). Storage
+// backends convert it into a fingerprint miss so leftover records regenerate
+// through the normal miss path instead of failing the run; corruption and
+// unknown (newer-binary) versions stay hard errors.
+var ErrUnsupportedSchemaVersion = errors.New("fingerprint: unsupported schema version")
 
 // Marshal returns the deterministic proto wire format of rec.
 //

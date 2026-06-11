@@ -1,6 +1,7 @@
 package fingerprint_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -137,8 +138,15 @@ func TestMarshalRejectsUnknownSchemaVersion(t *testing.T) {
 // the runner would then evaluate it as an existing record and either claim a
 // false hit or silently overwrite valid bytes. Surface the corruption instead.
 func TestUnmarshalRejectsZeroBytes(t *testing.T) {
-	if _, err := fingerprint.Unmarshal(nil); err == nil {
+	_, err := fingerprint.Unmarshal(nil)
+	if err == nil {
 		t.Error("Unmarshal: expected error for empty bytes (decodes to SCHEMA_VERSION_UNSPECIFIED)")
+	}
+	// Corruption must stay a hard error: storage backends convert
+	// ErrUnsupportedSchemaVersion into a miss, and a zero-byte file reading
+	// as a miss would silently regenerate over evidence of corruption.
+	if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+		t.Errorf("Unmarshal: zero bytes must not read as ErrUnsupportedSchemaVersion, got: %v", err)
 	}
 }
 
@@ -154,8 +162,51 @@ func TestUnmarshalRejectsUnknownSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proto.Marshal: %v", err)
 	}
-	if _, err := fingerprint.Unmarshal(b); err == nil {
+	_, err = fingerprint.Unmarshal(b)
+	if err == nil {
 		t.Error("Unmarshal: expected error for unknown schema version")
+	}
+	// Unknown (newer-binary) versions must stay hard errors — converting
+	// them to misses would let an old binary clobber records written by a
+	// newer one. Only superseded-but-known versions get the sentinel.
+	if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+		t.Errorf("Unmarshal: unknown version must not read as ErrUnsupportedSchemaVersion, got: %v", err)
+	}
+}
+
+// TestMarshalRejectsSupersededSchemaVersionV2 guards the writer side of the
+// ADR-0010 migration contract: no code path may produce new V2 records once
+// the schema moved to V3.
+func TestMarshalRejectsSupersededSchemaVersionV2(t *testing.T) {
+	rec := sampleRecord()
+	rec.SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V2
+	_, err := fingerprint.Marshal(rec)
+	if err == nil {
+		t.Fatal("Marshal: expected error for superseded V2 schema version")
+	}
+	if !errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+		t.Errorf("Marshal: error should wrap ErrUnsupportedSchemaVersion, got: %v", err)
+	}
+}
+
+// TestUnmarshalRejectsSupersededSchemaVersionV2 guards the read side: ADR-0010
+// invalidated V2 records wholesale (generated_at was dropped in a
+// wire-incompatible way) and expects them to be regenerated through the
+// normal fingerprint-miss path. The sentinel lets storage backends tell
+// "superseded record" (a miss) apart from corruption (a hard error).
+func TestUnmarshalRejectsSupersededSchemaVersionV2(t *testing.T) {
+	rec := sampleRecord()
+	rec.SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V2
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	_, err = fingerprint.Unmarshal(b)
+	if err == nil {
+		t.Fatal("Unmarshal: expected error for superseded V2 schema version")
+	}
+	if !errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+		t.Errorf("Unmarshal: error should wrap ErrUnsupportedSchemaVersion, got: %v", err)
 	}
 }
 

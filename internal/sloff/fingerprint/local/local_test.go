@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
@@ -130,6 +132,131 @@ func TestSave_PreservesPrefixOnInPlaceOverwrite(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("expected exactly 1 file after re-save, got %d: %v", len(entries), names)
+	}
+}
+
+// rawV2Bytes materialises record bytes carrying the superseded
+// SCHEMA_VERSION_V2 via raw proto marshal, bypassing fingerprint.Marshal's
+// writer-side validation, so tests can plant legacy on-disk records.
+func rawV2Bytes(t *testing.T, taskID string) []byte {
+	t.Helper()
+	rec := newRecord(taskID)
+	rec.SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V2
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	return b
+}
+
+// TestLoad_TreatsSupersededSchemaVersionAsMiss guards the ADR-0010 migration
+// contract: a leftover V2 record reads as a miss (so the runner regenerates
+// it through the normal miss path) rather than as a hard error that would
+// abort the whole run via the prefetch LoadMany.
+func TestLoad_TreatsSupersededSchemaVersionAsMiss(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20260505120000000-h.pb"), rawV2Bytes(t, "gen"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, ok, err := st.Load(ctx, fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"})
+	if err != nil {
+		t.Fatalf("Load: expected superseded V2 record to read as a miss, got error: %v", err)
+	}
+	if ok || rec != nil {
+		t.Errorf("Load: expected miss for superseded V2 record, got ok=%v rec=%v", ok, rec)
+	}
+}
+
+// TestSave_OverwritesSupersededRecordInPlace follows the miss through to the
+// rewrite: Save for the same Key must collapse onto the existing V2 file
+// (preserving the ADR-0010 creation-timestamp prefix) and leave a single V3
+// record behind — no residue, no second filename.
+func TestSave_OverwritesSupersededRecordInPlace(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock.Add(time.Hour))
+	ctx := context.Background()
+
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(dir, "20260505120000000-h.pb")
+	if err := os.WriteFile(legacy, rawV2Bytes(t, "gen"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "20260505120000000-h.pb" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected the V2 file overwritten in place, got: %v", names)
+	}
+	b, err := os.ReadFile(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := fingerprint.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("Unmarshal rewritten record: %v", err)
+	}
+	if rec.GetSchemaVersion() != fingerprint.SchemaVersion {
+		t.Errorf("expected rewritten record at schema %v, got %v", fingerprint.SchemaVersion, rec.GetSchemaVersion())
+	}
+}
+
+// TestSave_LeavesNoTempArtifacts guards the atomic-write implementation:
+// both the fresh-write and in-place-overwrite paths must finish with exactly
+// the record file on disk — a leftover temp file would accumulate in the
+// git-tracked fingerprint tree.
+func TestSave_LeavesNoTempArtifacts(t *testing.T) {
+	root := t.TempDir()
+	st := newStorage(root, fixedClock)
+	ctx := context.Background()
+
+	key := fingerprint.Key{SpecRelpath: "spec", TaskID: "gen", InputHash: "h"}
+	if err := st.Save(ctx, key, newRecord("gen")); err != nil {
+		t.Fatalf("Save (fresh): %v", err)
+	}
+	updated := newRecord("gen")
+	updated.Output.Hash = "newhash"
+	if err := st.Save(ctx, key, updated); err != nil {
+		t.Fatalf("Save (overwrite): %v", err)
+	}
+
+	dir := filepath.Join(root, ".sloff", "fingerprints", "spec", "gen")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), fingerprint.FileExt) {
+			t.Errorf("unexpected non-record artifact left behind: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected exactly 1 record file, got %d: %v", len(entries), names)
 	}
 }
 

@@ -100,8 +100,8 @@ func (r *Resolver) Name() string { return Name }
 // Inputs returns the union of git-tracked / non-ignored files inside the
 // declared workspace package and every transitively-linked workspace dir,
 // repo-relative slash form. The runner folds these into the consuming
-// task's input set so source edits flip files_hash and depgraph wires up
-// upstream codegen via output overlap.
+// task's input set so source edits flip files_hash and the ADR-0013 overlap
+// validation can see upstream codegen producers.
 //
 // Inputs and Versions share a per-package cache (pkgComputation) so the
 // lockfile walk and FileEnumerator invocation happen at most once per

@@ -13,10 +13,11 @@ import "context"
 // `sloff run` consumes both) don't pay for the other:
 //
 //   - Inputs returns repo-relative file paths the runner folds into the
-//     consuming task's input set before depgraph computes ordering. The
-//     pnpm-local and go-local resolvers use this so workspace / repo-local
-//     tool sources land in consumer task inputs and depgraph wires up
-//     upstream codegen by output overlap. Resolvers whose channel inherently
+//     consuming task's input set. The pnpm-local and go-local resolvers use
+//     this so workspace / repo-local tool sources land in consumer task
+//     inputs, feeding files_hash and the ADR-0013 overlap validation (any
+//     task generating those sources must be declared in depends). Resolvers
+//     whose channel inherently
 //     has no source contribution (script — the version is captured by
 //     spawning `<bin> --version`) return nil.
 //   - Versions returns OS-neutral logical version entries that feed

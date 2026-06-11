@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -92,10 +93,11 @@ func TestRun_ForceBypassesFingerprintHit(t *testing.T) {
 	}
 }
 
-// TestRun_AllowStaleDeps verifies the SLOFF_ALLOW_STALE_DEPS env path. Setting
-// it should keep the run successful and skip cache writes; the smoke is "no
-// crash, output produced" — the underlying ReadOnly/preflight semantics are
-// covered by runner_test.
+// TestRun_AllowStaleDeps verifies the SLOFF_ALLOW_STALE_DEPS env path: the
+// run stays successful, outputs are produced, and the read-only mode keeps
+// every fingerprint record off disk (the structural guard against polluted
+// records). The underlying ReadOnly/preflight semantics are covered by
+// runner_test.
 func TestRun_AllowStaleDeps(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -107,6 +109,51 @@ func TestRun_AllowStaleDeps(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "spec", "output.txt")); err != nil {
 		t.Fatalf("expected spec/output.txt to exist after run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, ".sloff", "fingerprints")); !os.IsNotExist(err) {
+		t.Errorf("read-only mode must not write fingerprints, stat err=%v", err)
+	}
+}
+
+// TestRun_AllowStaleDepsFalseValueWritesRecords pins the boolean
+// interpretation of SLOFF_ALLOW_STALE_DEPS: explicitly disabling the escape
+// hatch must behave exactly like leaving it unset, i.e. records are written.
+// The previous any-non-empty check switched the run to read-only even for
+// "0"/"false", so "disabling" the variable silently stopped fingerprinting.
+func TestRun_AllowStaleDepsFalseValueWritesRecords(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	for _, v := range []string{"0", "false"} {
+		t.Run(v, func(t *testing.T) {
+			workdir := setupRunHarness(t, "first-run-writes-record")
+			t.Setenv(allowStaleDepsEnv, v)
+			if _, err := runRunCmd(t, workdir); err != nil {
+				t.Fatalf("run cmd failed: %v", err)
+			}
+			entries, err := os.ReadDir(filepath.Join(workdir, ".sloff", "fingerprints"))
+			if err != nil || len(entries) == 0 {
+				t.Errorf("%s=%s must keep fingerprint writes enabled, got err=%v entries=%d", allowStaleDepsEnv, v, err, len(entries))
+			}
+		})
+	}
+}
+
+// TestRun_AllowStaleDepsInvalidValueFails guards the fail-loudly contract: a
+// value that doesn't parse as a boolean aborts the run with an actionable
+// error instead of silently toggling the escape hatch in either direction.
+func TestRun_AllowStaleDepsInvalidValueFails(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := setupRunHarness(t, "first-run-writes-record")
+	t.Setenv(allowStaleDepsEnv, "yes")
+	_, err := runRunCmd(t, workdir)
+	if err == nil {
+		t.Fatal("expected error for unparseable SLOFF_ALLOW_STALE_DEPS value")
+	}
+	if !strings.Contains(err.Error(), allowStaleDepsEnv) || !strings.Contains(err.Error(), "yes") {
+		t.Errorf("error should name the env var and the offending value, got: %v", err)
 	}
 }
 

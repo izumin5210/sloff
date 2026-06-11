@@ -444,8 +444,8 @@ buf については [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight
 不整合検出時の挙動 ( preflight が走った channel 共通):
 
 - **デフォルト**: sloff を即時 fail させ、 必要な install コマンドを stderr に表示する。 record は **書き込まない**
-- **CI**: 常に fail (override 不可)。 CI pipeline の前段で必ず install が走る前提と整合
-- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 ただしこの mode で sloff を走らせた場合、 fingerprint は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
+- **CI**: sloff 自身は CI 環境の検出や CI 専用の挙動分岐を実装しない ( `CI` env var はヒューリスティックで、 unset すれば回避できてしまうため不変条件にはなり得ない)。 代わりに **`SLOFF_ALLOW_STALE_DEPS` を CI の job 設定 ( workflow env / `.env`) に置かないことを運用ルール** とし、 CI では preflight 失敗 = job 失敗とする。 CI pipeline の前段で必ず install が走る前提と整合
+- **ローカル escape hatch**: `SLOFF_ALLOW_STALE_DEPS=1` で警告に降格できる。 値は boolean として解釈する ( `1`/`true` で有効、 `0`/`false`/未設定で無効、 boolean として解釈できない値は即エラー)。 この mode で sloff を走らせた場合、 fingerprint は書き込まず **read-only** で動かす ( 汚染 record の発生を構造的に防ぐ)
 - **fingerprint hit の bypass**: `sloff run --force` で fingerprint hit を bypass して全 task を強制実行できる。 preflight は通常通り走り、 record は通常通り書き込まれる ( 詳細は [ADR-0012](../adr/0012-force-rerun-flag.md))。 `SLOFF_ALLOW_STALE_DEPS=1` と併用した場合は read-only 化が優先され、 record は書かれない
 
 代替案として「install 結果ファイル本体 (`node_modules/.modules.yaml` 等) を `resolved_versions_hash` の構成要素にする」ことも検討したが、 (a) global install path が CI / 開発者で異なる、 (b) Go tool は `$GOMODCACHE` の存在チェックしか取れない、 といった理由で SSoT にはせず、 preflight 経路で「 lockfile vs install snapshot の一致」 を検証するのみに留める ( pnpm-local の install drift checker、 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md))。

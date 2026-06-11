@@ -115,6 +115,58 @@ func TestRun_AllowStaleDeps(t *testing.T) {
 	}
 }
 
+// TestAllowStaleDepsEnabled covers the value-interpretation table directly:
+// strconv.ParseBool semantics for set values, unset/empty as disabled, and
+// hard errors (naming the env var and the offending value) for anything else.
+func TestAllowStaleDepsEnabled(t *testing.T) {
+	set := func(v string) *string { return &v }
+	cases := []struct {
+		name    string
+		value   *string // nil = unset
+		want    bool
+		wantErr bool
+	}{
+		{name: "unset", value: nil, want: false},
+		{name: "empty", value: set(""), want: false},
+		{name: "1", value: set("1"), want: true},
+		{name: "true", value: set("true"), want: true},
+		{name: "TRUE", value: set("TRUE"), want: true},
+		{name: "t", value: set("t"), want: true},
+		{name: "0", value: set("0"), want: false},
+		{name: "false", value: set("false"), want: false},
+		{name: "yes", value: set("yes"), wantErr: true},
+		{name: "oops", value: set("oops"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value == nil {
+				// t.Setenv registers the restore; Unsetenv right after
+				// leaves the variable absent for the test body.
+				t.Setenv(allowStaleDepsEnv, "")
+				os.Unsetenv(allowStaleDepsEnv)
+			} else {
+				t.Setenv(allowStaleDepsEnv, *tc.value)
+			}
+			got, err := allowStaleDepsEnabled()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", *tc.value)
+				}
+				if !strings.Contains(err.Error(), allowStaleDepsEnv) || !strings.Contains(err.Error(), *tc.value) {
+					t.Errorf("error should name the env var and value, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("allowStaleDepsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRun_AllowStaleDepsFalseValueWritesRecords pins the boolean
 // interpretation of SLOFF_ALLOW_STALE_DEPS: explicitly disabling the escape
 // hatch must behave exactly like leaving it unset, i.e. records are written.

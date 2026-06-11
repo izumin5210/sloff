@@ -56,7 +56,15 @@ func TestParse_DependsOmittedIsNil(t *testing.T) {
 }
 
 func TestParse_DependsTaskRequired(t *testing.T) {
-	yml := strings.Replace(dependsSpecYAML, "      - task: producer", "      - spec: ../other", 1)
+	yml := `commands:
+  - name: consumer
+    cmd: ["sh", "-c", "true"]
+    inputs: ["mid.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+    depends:
+      - spec: ../other
+`
 	_, err := spec.Parse([]byte(yml))
 	if err == nil || !strings.Contains(err.Error(), "task is required") {
 		t.Errorf("expected 'task is required' error, got %v", err)
@@ -64,7 +72,16 @@ func TestParse_DependsTaskRequired(t *testing.T) {
 }
 
 func TestParse_DependsSpecMustBeRelative(t *testing.T) {
-	yml := strings.Replace(dependsSpecYAML, "spec: ../other", "spec: /abs/path", 1)
+	yml := `commands:
+  - name: consumer
+    cmd: ["sh", "-c", "true"]
+    inputs: ["mid.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+    depends:
+      - spec: /abs/path
+        task: gen
+`
 	_, err := spec.Parse([]byte(yml))
 	if err == nil || !strings.Contains(err.Error(), "must be a relative path") {
 		t.Errorf("expected relative-path error, got %v", err)

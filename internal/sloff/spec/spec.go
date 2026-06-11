@@ -241,7 +241,7 @@ func validateCommands(cmds []Command) error {
 			if d.Task == "" {
 				return fmt.Errorf("commands[%d] (%s): depends[%d]: task is required", i, c.Name, j)
 			}
-			if strings.HasPrefix(d.Spec, "/") {
+			if filepath.IsAbs(d.Spec) {
 				return fmt.Errorf("commands[%d] (%s): depends[%d]: spec must be a relative path, got %q", i, c.Name, j, d.Spec)
 			}
 		}

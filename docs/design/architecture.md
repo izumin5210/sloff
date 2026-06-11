@@ -622,7 +622,7 @@ sloff の fingerprint が信頼できる前提は、 **「generator は spec で
 flowchart LR
     A["task A: proto/options の options-codegen<br/>outputs: ../../gen/**/*.options.pb.go"]
     B["task B: proto/svc の protoc-gen-go<br/>inputs: **/*.proto, ../../gen/**/*.options.pb.go<br/>depends: [{spec: ../options, task: options-codegen}]"]
-    B -- "depends ( 実行順序)" --> A
+    A -- "実行順序: A が先に実行される<br/>( B 側が depends を宣言。 sloff graph も<br/>この producer → consumer の向きで描画)" --> B
     A -. "検証: O_A ∩ I_B ≠ ∅ なら depends 必須<br/>検証: depends があるのに交差ゼロなら warning" .-> B
 ```
 

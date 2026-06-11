@@ -14,3 +14,5 @@ commands:
     inputs: ["produced.txt"]
     outputs: ["final.txt"]
     tools: [versioner]
+    depends:
+      - task: producer

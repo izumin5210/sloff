@@ -28,20 +28,21 @@ func newGraphCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "graph",
-		Short: "Render the auto-detected task DAG (Mermaid or DOT)",
-		Long: `graph emits the inputs/outputs-derived dependency DAG for every
-discovered sloff.yml. Each edge is annotated with a sample of the
-files in the producer's outputs ∩ consumer's inputs intersection,
-so "why does B depend on A?" can be answered without reading every
-spec.
+		Short: "Render the declared task DAG (Mermaid or DOT)",
+		Long: `graph emits the dependency DAG declared via each task's depends
+entries for every discovered sloff.yml. Each edge is annotated with a
+sample of the files in the producer's outputs ∩ consumer's inputs
+intersection when those files exist, so "why does B depend on A?" can
+be answered without reading every spec; edges whose evidence is not
+observable in the current tree are captioned "(declared)".
 
 The subcommand is meant to remain useful in broken environments:
 preflight (install drift) and resolver Versions (e.g. <bin> --version
 for the script channel) are both skipped, since their failures don't
 affect the graph and drift / missing binaries are exactly what the
 user is trying to debug. Resolver Inputs are still resolved — failures
-there mean the depgraph would be incomplete (missing edges from
-resolver-contributed sources), so they fail loud.`,
+there mean the graph would be missing overlap evidence, so they fail
+loud.`,
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
 			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), root, pattern, format)
 		},

@@ -14,3 +14,5 @@ commands:
     inputs: ["a.gen.txt", "b.gen.txt", "c.gen.txt"]
     outputs: ["final.txt"]
     tools: [versioner]
+    depends:
+      - task: producer

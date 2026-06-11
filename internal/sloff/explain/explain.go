@@ -1,8 +1,8 @@
-// Package explain projects depgraph tasks into the auto-detected edges and
-// the file-overlap evidence that justified each edge. The renderers in this
-// package consume that projection to emit Mermaid / DOT for `sloff graph`;
-// the same projection is the seed for the future `sloff run --explain`
-// (architecture.md:598, 605, 645).
+// Package explain projects depgraph tasks into their declared dependency
+// edges (ADR-0013) plus the file-overlap evidence observable for each edge.
+// The renderers in this package consume that projection to emit Mermaid /
+// DOT for `sloff graph`; the same projection is the seed for the future
+// `sloff run --explain`.
 package explain
 
 import (
@@ -32,25 +32,26 @@ func (r TaskRef) Label() string {
 	return r.SpecRelpath + ":" + r.Name
 }
 
-// Edge is a single auto-detected dependency. Files is O_From ∩ I_To — every
-// repo-relative path that justified the edge — sorted ascending. Carrying the
-// full set (rather than just a sample) keeps the explain projection lossless;
-// renderers decide how much of it to display.
+// Edge is a single declared dependency. Files is the observed O_From ∩ I_To
+// — every repo-relative path that evidences the edge in the current tree —
+// sorted ascending. Files may be empty on a clean checkout (the generated
+// files don't exist yet); the edge still renders, captioned "(declared)".
 type Edge struct {
 	From  TaskRef
 	To    TaskRef
 	Files []string
 }
 
-// LabelSample renders the edge caption used by the graph subcommand: the
-// first justifying file alone when there is exactly one, otherwise that file
-// annotated with "(+N more)". A wide monorepo can produce dozens of
+// LabelSample renders the edge caption used by the graph subcommand:
+// "(declared)" when no overlap evidence is observable in the current tree,
+// the first justifying file alone when there is exactly one, otherwise that
+// file annotated with "(+N more)". A wide monorepo can produce dozens of
 // justifying files per edge; truncating to a sample matches the issue's
 // "サンプル" wording (IZU-7) and keeps the rendered graph readable.
 func (e Edge) LabelSample() string {
 	switch len(e.Files) {
 	case 0:
-		return ""
+		return "(declared)"
 	case 1:
 		return e.Files[0]
 	default:
@@ -58,59 +59,46 @@ func (e Edge) LabelSample() string {
 	}
 }
 
-// Edges derives every (producer → consumer) dependency from the file overlap
-// between tasks' outputs and inputs. Edge ordering is deterministic — by To,
-// then by From — and files within each edge are sorted ascending, so the
-// output is suitable for byte-stable goldens.
-//
-// Tasks themselves are not mutated; this is the read-only "explain"
-// projection of the same depgraph the runner builds.
+// Edges projects each task's declared depends entries into renderable edges,
+// attaching the observed file-overlap evidence when the current tree allows
+// computing it. Edge ordering is deterministic — by To, then by From — and
+// files within each edge are sorted ascending, so the output is suitable for
+// byte-stable goldens.
 func Edges(tasks []depgraph.Task) []Edge {
 	if len(tasks) == 0 {
 		return nil
 	}
-
-	// outputProducer is built without conflict detection on purpose: the
-	// runner's depgraph.Build already rejects duplicate producers, so any
-	// duplicate that reaches Edges signals a caller bypassing that check
-	// and is recoverable in the renderer (the later entry wins).
-	outputProducer := make(map[string]int, len(tasks))
+	byRef := make(map[TaskRef]int, len(tasks))
 	for i, t := range tasks {
-		for _, out := range t.Outputs {
-			outputProducer[out] = i
-		}
+		byRef[taskRefOf(t)] = i
 	}
-
-	type edgeKey struct{ from, to int }
-	fileSets := make(map[edgeKey]map[string]struct{})
+	outputSets := make([]map[string]struct{}, len(tasks))
 	for i, t := range tasks {
-		for _, in := range t.Inputs {
-			j, ok := outputProducer[in]
-			if !ok || j == i {
+		set := make(map[string]struct{}, len(t.Outputs))
+		for _, o := range t.Outputs {
+			set[o] = struct{}{}
+		}
+		outputSets[i] = set
+	}
+	var out []Edge
+	for i, t := range tasks {
+		for _, dep := range t.DependsOn {
+			from := TaskRef{SpecRelpath: dep.SpecRelpath, Name: dep.Name}
+			j, ok := byRef[from]
+			if !ok {
+				// Unresolvable refs are rejected by spec.ValidateDependReferences;
+				// a caller bypassing that check gets the edge skipped, not a panic.
 				continue
 			}
-			key := edgeKey{from: j, to: i}
-			set := fileSets[key]
-			if set == nil {
-				set = map[string]struct{}{}
-				fileSets[key] = set
+			var files []string
+			for _, in := range t.Inputs {
+				if _, hit := outputSets[j][in]; hit {
+					files = append(files, in)
+				}
 			}
-			set[in] = struct{}{}
+			sort.Strings(files)
+			out = append(out, Edge{From: from, To: taskRefOf(tasks[i]), Files: files})
 		}
-	}
-
-	out := make([]Edge, 0, len(fileSets))
-	for key, set := range fileSets {
-		files := make([]string, 0, len(set))
-		for f := range set {
-			files = append(files, f)
-		}
-		sort.Strings(files)
-		out = append(out, Edge{
-			From:  taskRefOf(tasks[key.from]),
-			To:    taskRefOf(tasks[key.to]),
-			Files: files,
-		})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].To != out[j].To {

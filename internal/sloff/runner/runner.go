@@ -1,4 +1,4 @@
-// Package runner orchestrates spec discovery, preflight, dependency-graph derivation
+// Package runner orchestrates spec discovery, preflight, declared-dependency DAG construction
 // and per-task fingerprint lookup/execute/write. It is the integration point for the
 // foundation packages (spec / glob / hash / fingerprint / depgraph / toolresolver / preflight).
 package runner
@@ -388,10 +388,9 @@ func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task)
 }
 
 // runTasks executes the topologically-ordered task list with bounded
-// concurrency. A task starts as soon as every task that produces one of its
-// inputs has finished — depgraph already sorted them, so we only need to
-// re-derive each task's predecessor set from the same output→producer mapping
-// it used. Independent tasks (the common case for fingerprint-hit runs across
+// concurrency. A task starts as soon as every declared dependency has
+// finished — depgraph already sorted them, so we only need to look up each
+// task's DependsOn indices. Independent tasks (the common case for fingerprint-hit runs across
 // service-local gen-db, where each spec's outputs sit in its own service dir)
 // fan out across NumCPU workers; tasks with real producer→consumer chains
 // (buf-default → buf-custom, build-protoc-plugins → buf-custom, …) still
@@ -454,22 +453,20 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err err
 	return err
 }
 
-// taskPredecessorIndices returns, for each task index in ordered, the set of
-// indices whose Outputs produce one of this task's Inputs. Same intersection
-// rule depgraph.Build uses internally; we recompute it here so the runner
-// stays decoupled from depgraph's internal edge representation.
+// taskPredecessorIndices returns, for each task index in ordered, the indices
+// of its declared dependencies (ADR-0013). Same edge source depgraph.Build
+// uses; we recompute it here so the runner stays decoupled from depgraph's
+// internal edge representation.
 func taskPredecessorIndices(ordered []depgraph.Task) [][]int {
-	producer := map[string]int{}
+	byRef := make(map[depgraph.TaskRef]int, len(ordered))
 	for i, t := range ordered {
-		for _, out := range t.Outputs {
-			producer[out] = i
-		}
+		byRef[t.Ref()] = i
 	}
 	preds := make([][]int, len(ordered))
 	for i, t := range ordered {
 		seen := map[int]struct{}{}
-		for _, in := range t.Inputs {
-			p, ok := producer[in]
+		for _, dep := range t.DependsOn {
+			p, ok := byRef[dep]
 			if !ok || p == i {
 				continue
 			}
@@ -777,9 +774,8 @@ type taskInfo struct {
 
 // collectTasks expands inputs/outputs for every spec command and folds each
 // task's referenced tools' contributions into the task's input set. Folding
-// extras in here is what lets depgraph wire up workspace-tool build tasks to
-// their consumers via the usual output-overlap rule, instead of needing a
-// parallel dependency channel.
+// extras in here keeps resolver-contributed sources inside files_hash and
+// makes them visible to overlap validation (ADR-0013 D3).
 //
 // versionsByTool may be nil for callers that don't need resolved_versions_hash (graph-
 // style consumers); inputsByTool must always be present so depgraph sees the

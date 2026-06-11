@@ -129,13 +129,12 @@ func TestGraph_MultiDeps_Mermaid(t *testing.T) {
 }
 
 // TestGraph_PnpmLocal_BuildChain_Mermaid validates that resolver-contributed
-// ExtraInputs (architecture.md:449) are visible to the graph subcommand:
-// the gen task pulls @org/codegen via pnpm-local, the build-codegen task
-// produces the workspace tool's dist files, and the auto-detected edge
-// connecting them must surface even though gen's spec doesn't name the dist
-// files directly. The fixture deliberately omits node_modules/.pnpm/lock.yaml
-// to cover the "graph remains usable when install state is drifted" claim
-// from runner.Plan's docstring.
+// ExtraInputs are visible to the graph subcommand: the gen task pulls
+// @org/codegen via pnpm-local and declares depends on build-codegen; the
+// rendered edge carries the dist files as overlap evidence because the
+// resolver folded them into gen's inputs. The fixture deliberately omits
+// node_modules/.pnpm/lock.yaml to cover the "graph remains usable when
+// install state is drifted" claim from runner.Plan's docstring.
 func TestGraph_PnpmLocal_BuildChain_Mermaid(t *testing.T) {
 	h := setupGraphHarness(t, "pnpmlocal-build-chain-mermaid")
 	got := runGraphCmd(t, h, "--format", "mermaid")

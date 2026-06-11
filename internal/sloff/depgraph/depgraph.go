@@ -43,18 +43,21 @@ type Task struct {
 // Ref returns the task's identity key.
 func (t Task) Ref() TaskRef { return TaskRef{SpecRelpath: t.SpecRelpath, Name: t.Name} }
 
-// Build returns the tasks in execution order: A precedes B whenever some output of A
-// also appears in B's inputs. Ties are broken deterministically by (SpecRelpath, Name).
-// A cycle yields an error.
+// Build returns the tasks in execution order. Edges come exclusively from
+// spec-declared DependsOn entries (ADR-0013 D2); inputs/outputs file overlap
+// no longer creates edges. Ties between independent tasks are broken
+// deterministically by (SpecRelpath, Name). Duplicate-producer detection
+// (conflicting output paths) is retained. A cycle or an unknown dependency
+// reference yields an error.
 func Build(tasks []Task) ([]Task, error) {
 	if len(tasks) == 0 {
 		return nil, nil
 	}
 
 	type idx = int
-	keyToIdx := make(map[string]idx, len(tasks))
+	keyToIdx := make(map[TaskRef]idx, len(tasks))
 	for i, t := range tasks {
-		keyToIdx[taskKey(t)] = i
+		keyToIdx[t.Ref()] = i
 	}
 
 	// outputProducer: file path → idx of the task that produces it. Two tasks producing
@@ -87,15 +90,18 @@ func Build(tasks []Task) ([]Task, error) {
 	inDegree := make([]int, len(tasks))
 
 	for i, t := range tasks {
-		for _, in := range t.Inputs {
-			producer, ok := outputProducer[in]
-			if !ok || producer == i {
+		for _, dep := range t.DependsOn {
+			j, ok := keyToIdx[dep]
+			if !ok {
+				return nil, fmt.Errorf("%s: depends on unknown task %s", taskLabel(t), dep.Label())
+			}
+			if j == i {
+				return nil, fmt.Errorf("%s: depends on itself", taskLabel(t))
+			}
+			if _, dup := edges[i][j]; dup {
 				continue
 			}
-			if _, dup := edges[i][producer]; dup {
-				continue
-			}
-			edges[i][producer] = struct{}{}
+			edges[i][j] = struct{}{}
 			inDegree[i]++
 		}
 	}

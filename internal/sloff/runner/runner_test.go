@@ -718,6 +718,8 @@ commands:
     inputs: ["a-output.txt"]
     outputs: ["b-output.txt"]
     tools: [versioner]
+    depends:
+      - task: upstream
 `
 	write("sloff.yml", yml)
 
@@ -819,19 +821,10 @@ func TestRunner_FlushPersistsRecordsAfterPartialFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-place a `good.txt` placeholder so depgraph sees the file at
-	// planning time and wires fail-task → ok-task. ok-task overwrites
-	// it at run time. Without the placeholder, the runner would expand
-	// fail-task.inputs against an empty disk and lose the dependency,
-	// letting fail-task race ok-task and potentially cancel its exec
-	// mid-flight via errgroup context cancellation — that race would
-	// mask the regression we want to detect.
-	if err := os.WriteFile(filepath.Join(specDir, "good.txt"), []byte(""), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// fail-task depends on ok-task via good.txt so the depgraph guarantees
+	// fail-task declares depends on ok-task so the scheduler guarantees
 	// ok-task completes (and enqueues its record) before fail-task starts
-	// failing.
+	// failing (ADR-0013: ordering comes from the declaration, not from
+	// file overlap, so no placeholder file is needed on a clean dir).
 	yml := `tools:
   versioner:
     exec: ["sh", "-c", "echo v1.0.0"]
@@ -848,6 +841,8 @@ commands:
     inputs: ["good.txt"]
     outputs: ["never-written.txt"]
     tools: [versioner]
+    depends:
+      - task: ok-task
 `
 	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)

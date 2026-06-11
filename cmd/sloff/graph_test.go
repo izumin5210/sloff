@@ -71,16 +71,8 @@ func gitInitGraphWorkdir(t *testing.T, dir string) {
 
 func runGraphCmd(t *testing.T, h *graphHarness, extra ...string) string {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	root := newRootCmd()
-	args := append([]string{"graph", "--root", h.workdir}, extra...)
-	root.SetArgs(args)
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	if err := root.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("graph cmd: %v\nstderr: %s", err, stderr.String())
-	}
-	return stdout.String()
+	stdout, _ := runGraphCmdCaptureStderr(t, h, extra...)
+	return stdout
 }
 
 func assertGraphGolden(t *testing.T, h *graphHarness, got string) {

@@ -1566,8 +1566,11 @@ commands:
 // TestRunner_DependsCleanStateOrdering is the ADR-0013 motivating scenario:
 // no generated file exists, yet the declared edge orders producer before
 // consumer (the old overlap derivation found no edge here and the consumer's
-// `cp` would race and fail). The second run must be a full fingerprint hit
-// and still pass run-time validation.
+// `cp` would race and fail). On the second run the producer is a fingerprint
+// hit; the consumer re-executes because its inputs were expanded while
+// produced.txt was still absent on run 1, so its files_hash changes once the
+// file exists — hence the two consumer records in the golden. Both runs must
+// pass run-time validation.
 func TestRunner_DependsCleanStateOrdering(t *testing.T) {
 	runE2E(
 		t, "depends-clean-state-ordering",

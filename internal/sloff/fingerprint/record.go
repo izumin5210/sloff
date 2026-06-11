@@ -9,6 +9,7 @@ package fingerprint
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -28,6 +29,13 @@ const SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V3
 // FileExt is the on-disk extension of a fingerprint file. Storage backends
 // use this to assemble paths and to filter directory listings.
 const FileExt = ".pb"
+
+// ErrUnsupportedSchemaVersion marks records whose schema_version is a known
+// enum value that the current schema has superseded (V2, ADR-0010). Storage
+// backends convert it into a fingerprint miss so leftover records regenerate
+// through the normal miss path instead of failing the run; corruption and
+// unknown (newer-binary) versions stay hard errors.
+var ErrUnsupportedSchemaVersion = errors.New("fingerprint: unsupported schema version")
 
 // Marshal returns the deterministic proto wire format of rec.
 //
@@ -68,6 +76,13 @@ func validateSchemaVersion(v fingerprintv1.SchemaVersion) error {
 	}
 	if _, ok := fingerprintv1.SchemaVersion_name[int32(v)]; !ok {
 		return fmt.Errorf("fingerprint: unknown schema version %d", v)
+	}
+	// Known but superseded versions (V2) get the sentinel so storage
+	// backends can turn them into misses (ADR-0010 §schema_version 移行);
+	// unknown versions above stay hard errors so an older binary never
+	// clobbers records written by a newer one.
+	if v != SchemaVersion {
+		return fmt.Errorf("%w: %s is superseded by %s; the record is regenerated on the next run (ADR-0010)", ErrUnsupportedSchemaVersion, v, SchemaVersion)
 	}
 	return nil
 }

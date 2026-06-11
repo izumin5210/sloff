@@ -148,6 +148,12 @@ func (s *Storage) Load(ctx context.Context, key fingerprint.Key) (*fingerprintv1
 	}
 	rec, err := recordFromAttrs(out.Item)
 	if err != nil {
+		// Superseded schema versions read as misses so the runner
+		// regenerates them (ADR-0010), mirroring the local backend.
+		// Corruption stays a hard error.
+		if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("fingerprint/dynamodb: decode %+v: %w", key, err)
 	}
 	return rec, true, nil
@@ -330,6 +336,13 @@ func (s *Storage) LoadMany(ctx context.Context, keys []fingerprint.Key) (map[fin
 					}
 					rec, err := fingerprint.Unmarshal(it.Record)
 					if err != nil {
+						// A superseded record is a per-item miss, not
+						// a batch failure — failing here would abort
+						// the run for every task via the prefetch
+						// (ADR-0010).
+						if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+							continue
+						}
 						return fmt.Errorf("fingerprint/dynamodb: decode %+v: %w", k, err)
 					}
 					mu.Lock()

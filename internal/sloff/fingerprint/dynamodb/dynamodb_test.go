@@ -12,6 +12,7 @@ import (
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
@@ -371,6 +372,75 @@ func TestLoadMany_ExceedsBatchSize(t *testing.T) {
 	}
 	if len(got) != N {
 		t.Errorf("expected %d records, got %d", N, len(got))
+	}
+}
+
+// putRawV2Item plants a legacy SCHEMA_VERSION_V2 record directly through the
+// DynamoDB client, bypassing Save (whose Marshal rejects superseded versions
+// by design). Mirrors what a table written before ADR-0010 would contain.
+func putRawV2Item(t *testing.T, client *awsddb.Client, table string, key fingerprint.Key) {
+	t.Helper()
+	rec := newRecord(key.TaskID)
+	rec.SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V2
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	_, err = client.PutItem(context.Background(), &awsddb.PutItemInput{
+		TableName: aws.String(table),
+		Item: map[string]ddbtypes.AttributeValue{
+			"pk":         &ddbtypes.AttributeValueMemberS{Value: key.SpecRelpath},
+			"sk":         &ddbtypes.AttributeValueMemberS{Value: key.TaskID + "#" + key.InputHash},
+			"record":     &ddbtypes.AttributeValueMemberB{Value: b},
+			"created_at": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(fixedClock.Unix(), 10)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutItem: %v", err)
+	}
+}
+
+// TestLoad_TreatsSupersededSchemaVersionAsMiss mirrors the local backend's
+// contract (ADR-0010): a superseded V2 item reads as a miss so the runner
+// regenerates it, instead of failing the run.
+func TestLoad_TreatsSupersededSchemaVersionAsMiss(t *testing.T) {
+	st, table, client := newStorage(t, 0, fixedClock)
+	ctx := context.Background()
+	key := fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"}
+	putRawV2Item(t, client, table, key)
+
+	rec, ok, err := st.Load(ctx, key)
+	if err != nil {
+		t.Fatalf("Load: expected superseded V2 item to read as a miss, got error: %v", err)
+	}
+	if ok || rec != nil {
+		t.Errorf("Load: expected miss for superseded V2 item, got ok=%v rec=%v", ok, rec)
+	}
+}
+
+// TestLoadMany_SkipsSupersededSchemaVersionRecords guards the bulk path the
+// runner prefetch actually uses: one legacy V2 item must not fail the whole
+// batch (which would abort the run for every task), and healthy records in
+// the same batch must still come back.
+func TestLoadMany_SkipsSupersededSchemaVersionRecords(t *testing.T) {
+	st, table, client := newStorage(t, 0, fixedClock)
+	ctx := context.Background()
+	good := fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h1"}
+	legacy := fingerprint.Key{SpecRelpath: "spec/a", TaskID: "gen", InputHash: "h2"}
+	if err := st.Save(ctx, good, newRecord("gen")); err != nil {
+		t.Fatal(err)
+	}
+	putRawV2Item(t, client, table, legacy)
+
+	got, err := st.LoadMany(ctx, []fingerprint.Key{good, legacy})
+	if err != nil {
+		t.Fatalf("LoadMany: superseded V2 item must be skipped, not fail the batch: %v", err)
+	}
+	if _, ok := got[good]; !ok {
+		t.Errorf("healthy record missing from LoadMany result")
+	}
+	if _, ok := got[legacy]; ok {
+		t.Errorf("superseded V2 record should be skipped, not returned")
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 
+	fingerprintv1 "github.com/izumin5210/sloff/internal/proto/sloff/fingerprint/v1"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
@@ -795,6 +797,107 @@ commands:
 	if !afterStat.ModTime().Equal(beforeStat.ModTime()) {
 		t.Errorf("downstream ran its generator instead of falling back to a cache hit: b-output.txt mtime %v -> %v",
 			beforeStat.ModTime(), afterStat.ModTime())
+	}
+}
+
+// TestRunner_SupersededV2RecordRegeneratesViaMissPath guards the ADR-0010
+// migration contract end to end: a leftover V2 record (written before
+// generated_at was dropped) must neither fail the run — prefetch LoadMany
+// aborts everything on a hard Load error — nor satisfy a fingerprint hit
+// with pre-migration data. It reads as a miss, the generator re-runs, and
+// the same file is rewritten in place as V3.
+func TestRunner_SupersededV2RecordRegeneratesViaMissPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := t.TempDir()
+	specDir := filepath.Join(workdir, "spec")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, contents string) {
+		if err := os.WriteFile(filepath.Join(specDir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("input.txt", "hello\n")
+	write("sloff.yml", `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+`)
+	specs, err := spec.Discover(workdir, "**/sloff.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	newRunner := func() *runner.Runner {
+		reg := toolresolver.NewRegistry()
+		reg.Register(script.New(workdir))
+		reg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
+		return runner.New(runner.Options{
+			RepoRoot:  workdir,
+			Specs:     specs,
+			Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+			Resolvers: reg,
+			Preflight: preflight.NewRegistry(),
+		})
+	}
+
+	// Run #1 writes a V3 record; downgrade it to V2 in place via raw proto
+	// marshal (fingerprint.Marshal rejects superseded versions by design).
+	if err := newRunner().Run(context.Background()); err != nil {
+		t.Fatalf("run #1: %v", err)
+	}
+	recordDir := filepath.Join(workdir, ".sloff", "fingerprints", "spec", "gen")
+	matches, err := filepath.Glob(filepath.Join(recordDir, "*.pb"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected exactly 1 record after run #1, got %v (err=%v)", matches, err)
+	}
+	recordPath := matches[0]
+	b, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := fingerprint.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("decode run #1 record: %v", err)
+	}
+	rec.SchemaVersion = fingerprintv1.SchemaVersion_SCHEMA_VERSION_V2
+	v2bytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, v2bytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run #2 is the run under test: no error, and the record is back at V3
+	// under the same filename. Without the miss conversion the V2 record
+	// either aborts the run (hard error) or claims a false hit and stays V2.
+	if err := newRunner().Run(context.Background()); err != nil {
+		t.Fatalf("run #2 should regenerate through the miss path, got: %v", err)
+	}
+	matches, err = filepath.Glob(filepath.Join(recordDir, "*.pb"))
+	if err != nil || len(matches) != 1 || matches[0] != recordPath {
+		t.Fatalf("expected the V2 record rewritten in place, got %v (err=%v)", matches, err)
+	}
+	b, err = os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err = fingerprint.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("decode run #2 record: %v", err)
+	}
+	if rec.GetSchemaVersion() != fingerprint.SchemaVersion {
+		t.Errorf("expected record regenerated at schema %v, got %v", fingerprint.SchemaVersion, rec.GetSchemaVersion())
 	}
 }
 

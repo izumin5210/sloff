@@ -96,6 +96,13 @@ func (s *Storage) Load(_ context.Context, key fingerprint.Key) (*fingerprintv1.R
 	}
 	rec, err := fingerprint.Unmarshal(b)
 	if err != nil {
+		// Superseded schema versions read as misses so the runner
+		// regenerates them through the normal miss path (ADR-0010) —
+		// a hard error here would abort the whole run via the prefetch
+		// LoadMany. Corruption stays a hard error.
+		if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
 	return rec, true, nil
@@ -131,7 +138,43 @@ func (s *Storage) Save(_ context.Context, key fingerprint.Key, record *fingerpri
 			}
 		}
 	}
-	return os.WriteFile(target, b, 0o644)
+	return writeFileAtomic(dir, target, b)
+}
+
+// writeFileAtomic writes b to target via a temp file in the same dir + rename,
+// so a crash mid-write never leaves a truncated record in the git-tracked
+// fingerprint tree (a corrupt .pb fails every subsequent Load until removed
+// by hand). The temp name doesn't end in .pb, keeping it invisible to
+// matchingFiles / List; same-key concurrent writers produce wire-byte
+// identical content (deterministic Marshal) so the rename winner is moot.
+func writeFileAtomic(dir, target string, b []byte) (retErr error) {
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// Cleanup the temp file on any failure path; once the rename
+		// succeeds the file no longer exists under tmpName so Remove is
+		// a no-op there.
+		if retErr != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// CreateTemp defaults to 0600; widen to the 0644 the records always
+	// carried so a git-tracked fingerprint tree stays group/other readable.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 // LoadMany implements fingerprint.Storage by fanning out per-key Load calls in

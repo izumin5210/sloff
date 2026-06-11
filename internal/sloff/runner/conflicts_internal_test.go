@@ -28,11 +28,11 @@ func makeTaskInfo(specRelpath, name string, outputs []string) (depgraph.Task, ta
 // error and prevented the run from starting at all.
 func TestDetectOutputPatternConflicts_DistinctSpecDirsSameRelpath(t *testing.T) {
 	tasks := make([]depgraph.Task, 0, 2)
-	byKey := map[string]taskInfo{}
+	byKey := map[depgraph.TaskRef]taskInfo{}
 	for _, dir := range []string{"services/a", "services/b"} {
 		task, info := makeTaskInfo(dir, "gen-db", []string{"internal/db/db.gen.go"})
 		tasks = append(tasks, task)
-		byKey[depgraphKey(task)] = info
+		byKey[task.Ref()] = info
 	}
 
 	if err := detectOutputPatternConflicts(tasks, byKey); err != nil {
@@ -48,9 +48,9 @@ func TestDetectOutputPatternConflicts_SameSpecDirSamePattern(t *testing.T) {
 	t1, i1 := makeTaskInfo("spec", "first", []string{"shared.txt"})
 	t2, i2 := makeTaskInfo("spec", "second", []string{"shared.txt"})
 	tasks := []depgraph.Task{t1, t2}
-	byKey := map[string]taskInfo{
-		depgraphKey(t1): i1,
-		depgraphKey(t2): i2,
+	byKey := map[depgraph.TaskRef]taskInfo{
+		t1.Ref(): i1,
+		t2.Ref(): i2,
 	}
 
 	err := detectOutputPatternConflicts(tasks, byKey)
@@ -74,9 +74,9 @@ func TestDetectOutputPatternConflicts_DotDotResolvesAcrossSpecs(t *testing.T) {
 		t1, i1 := makeTaskInfo("services/a/spec", "gen", []string{"../../shared/out.go"})
 		t2, i2 := makeTaskInfo("services/b/spec", "gen", []string{"../../shared/out.go"})
 		tasks := []depgraph.Task{t1, t2}
-		byKey := map[string]taskInfo{
-			depgraphKey(t1): i1,
-			depgraphKey(t2): i2,
+		byKey := map[depgraph.TaskRef]taskInfo{
+			t1.Ref(): i1,
+			t2.Ref(): i2,
 		}
 
 		err := detectOutputPatternConflicts(tasks, byKey)
@@ -92,9 +92,9 @@ func TestDetectOutputPatternConflicts_DotDotResolvesAcrossSpecs(t *testing.T) {
 		t1, i1 := makeTaskInfo("services/a/spec", "gen", []string{"../out/a.go"})
 		t2, i2 := makeTaskInfo("services/b/spec", "gen", []string{"../out/b.go"})
 		tasks := []depgraph.Task{t1, t2}
-		byKey := map[string]taskInfo{
-			depgraphKey(t1): i1,
-			depgraphKey(t2): i2,
+		byKey := map[depgraph.TaskRef]taskInfo{
+			t1.Ref(): i1,
+			t2.Ref(): i2,
 		}
 
 		if err := detectOutputPatternConflicts(tasks, byKey); err != nil {

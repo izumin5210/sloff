@@ -117,8 +117,8 @@ type Runner struct {
 	logger Logger
 	stdout io.Writer
 	stderr io.Writer
-	tracer trace.Tracer        // derived once in New from opts.TracerProvider
-	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
+	tracer trace.Tracer                  // derived once in New from opts.TracerProvider
+	byKey  map[depgraph.TaskRef]taskInfo // task ref → taskInfo, filled by collectTasks
 
 	// prefetched caches the records loaded by Storage.LoadMany at the top of
 	// Run; runTask consults this map first to avoid a per-task round-trip
@@ -346,7 +346,7 @@ func (r *Runner) optimisticKey(ctx context.Context, t depgraph.Task) (fingerprin
 	if err := ctx.Err(); err != nil {
 		return fingerprint.Key{}, err
 	}
-	info := r.byKey[depgraphKey(t)]
+	info := r.byKey[t.Ref()]
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
 		return fingerprint.Key{}, err
@@ -814,7 +814,7 @@ type taskInfo struct {
 // style consumers); inputsByTool must always be present so depgraph sees the
 // same inputs the runner would.
 func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) ([]depgraph.Task, error) {
-	r.byKey = map[string]taskInfo{}
+	r.byKey = map[depgraph.TaskRef]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
 		for _, c := range sp.File.Commands {
@@ -843,7 +843,7 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 				DependsOn:   resolveDepends(sp.Dir, c.Depends),
 			}
 			tasks = append(tasks, t)
-			r.byKey[depgraphKey(t)] = taskInfo{
+			r.byKey[t.Ref()] = taskInfo{
 				specRelpath:    sp.Dir,
 				command:        c,
 				inputPaths:     mergedInputs,
@@ -879,10 +879,10 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 // Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`) are not
 // detected here; they still surface via the runtime recordProducedPaths check after
 // both cmds finish writing.
-func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[string]taskInfo) error {
+func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[depgraph.TaskRef]taskInfo) error {
 	patternProducers := map[string][]string{}
 	for _, t := range tasks {
-		info := byKey[depgraphKey(t)]
+		info := byKey[t.Ref()]
 		label := taskLabel(t)
 		specDir := filepath.ToSlash(t.SpecRelpath)
 		seen := map[string]struct{}{}
@@ -989,10 +989,8 @@ func mergeInputs(declared, extra []string) []string {
 	return out
 }
 
-func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Name }
-
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
-	info := r.byKey[depgraphKey(t)]
+	info := r.byKey[t.Ref()]
 	versions := info.versions
 
 	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
@@ -1267,7 +1265,7 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 	var missing []depgraph.MissingDependency
 	for _, t := range ordered {
 		consumer := t.Ref()
-		info := r.byKey[depgraphKey(t)]
+		info := r.byKey[t.Ref()]
 		declared := make(map[depgraph.TaskRef]struct{}, len(t.DependsOn))
 		for _, d := range t.DependsOn {
 			declared[d] = struct{}{}
@@ -1359,7 +1357,7 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 
 	warned := 0
 	for _, t := range ordered {
-		info := r.byKey[depgraphKey(t)]
+		info := r.byKey[t.Ref()]
 		inputSet := make(map[string]struct{}, len(info.inputPaths))
 		for _, p := range info.inputPaths {
 			inputSet[p] = struct{}{}

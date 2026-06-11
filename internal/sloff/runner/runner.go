@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -1228,12 +1229,15 @@ func (r *Runner) recordProducedPaths(producer depgraph.TaskRef, paths []string) 
 // recordProducedPaths) is matched against every other task's input surface.
 // A match without a declared depends edge means this run may have executed
 // in the wrong order — fail loudly with the exact entry to add.
+//
+// The check intentionally runs on partial output after a failed run too:
+// declared edges are filtered out, so anything it flags is a real spec
+// defect worth surfacing alongside the task failure. It executes after
+// runTasks has joined every goroutine; the snapshot lock is defensive.
 func (r *Runner) validateProducedDependencies(ordered []depgraph.Task) error {
 	r.producedByMu.Lock()
 	produced := make(map[string]depgraph.TaskRef, len(r.producedBy))
-	for p, ref := range r.producedBy {
-		produced[p] = ref
-	}
+	maps.Copy(produced, r.producedBy)
 	r.producedByMu.Unlock()
 	if len(produced) == 0 {
 		return nil

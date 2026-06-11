@@ -219,6 +219,6 @@ hash(<root>/pnpm-lock.yaml) == hash(<root>/node_modules/.pnpm/lock.yaml) ?
 
 ## Open Questions
 
-- pnpm-lock.yaml schema が v6 / v9 等で変動した場合の互換性 ( 現状 v9 専用、 v6 で動かすと importers / snapshots の shape が違って fail する。 schema version で fail-fast するか、 マルチ schema 対応するかは将来検討)
+- pnpm-lock.yaml schema が v6 / v9 等で変動した場合の互換性 ( **解決済み: `lockfileVersion` が `'9.0'` 以外なら parse 時に fail-fast する**。 v6 以前は importers / snapshots の shape が違い、 v9 view で decode すると error にならず空の deps が返って silent stale になるため、 明示チェックが唯一の検知点。 マルチ schema 対応は必要が生じた段階で将来検討)
 - non-git repository 環境 ( CI で git history なしで checkout 等) では `git ls-files` が fail する。 現状は明示 error にしているが、 fall-back path ( filepath.Walk + 簡易 ignore) を提供する必要があるかは将来判断
 - workspace transitive dep walk で `link:` 以外の workspace 表現 ( pnpm の `workspace:^` `workspace:~` `workspace:*` で resolved 形式が変わる ) のカバレッジ確認 ( 現状は `link:` のみ判定)

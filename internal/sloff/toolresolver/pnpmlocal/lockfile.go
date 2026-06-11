@@ -12,6 +12,15 @@ import (
 // LockfileName is the canonical name pnpm uses for its lockfile.
 const LockfileName = "pnpm-lock.yaml"
 
+// supportedLockfileVersion is the only pnpm-lock.yaml schema sloff
+// understands. Older formats (v5/v6) lay out dependency data under different
+// keys, so decoding them with the v9 view succeeds but silently yields empty
+// importers/snapshots — external dep bumps would then stop invalidating
+// fingerprints (R4). Note that goccy/go-yaml converts v5's unquoted float
+// version (`lockfileVersion: 5.4`) to a string instead of erroring, so this
+// explicit check is the only place such lockfiles get caught.
+const supportedLockfileVersion = "9.0"
+
 // Lockfile is a partial view over pnpm-lock.yaml v9. We parse:
 //   - Importers: workspace path → its declared deps (used to resolve the
 //     entry set of external dep walks per workspace package)
@@ -67,6 +76,13 @@ func parseLockfile(b []byte, sourcePath string) (*Lockfile, error) {
 	var lf Lockfile
 	if err := yaml.Unmarshal(b, &lf); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
+	}
+	if lf.LockfileVersion != supportedLockfileVersion {
+		got := fmt.Sprintf("%q", lf.LockfileVersion)
+		if lf.LockfileVersion == "" {
+			got = "missing"
+		}
+		return nil, fmt.Errorf("parse %s: unsupported lockfileVersion %s: sloff supports pnpm lockfileVersion %q only (pnpm v9+); regenerate the lockfile with a supported pnpm version", sourcePath, got, supportedLockfileVersion)
 	}
 	return &lf, nil
 }

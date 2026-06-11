@@ -1357,12 +1357,7 @@ func (r *Runner) warnUnobservedDepends(ordered []depgraph.Task) {
 	}
 }
 
-func taskLabel(t depgraph.Task) string {
-	if t.SpecRelpath == "" {
-		return t.Name
-	}
-	return t.SpecRelpath + ":" + t.Name
-}
+func taskLabel(t depgraph.Task) string { return t.Ref().Label() }
 
 // missingDependsError aggregates undeclared-dependency violations into one
 // actionable error (ADR-0013 D3: depends-missing is a hard failure).

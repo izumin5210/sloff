@@ -1,6 +1,7 @@
-// Package depgraph derives a task DAG from each task's inputs/outputs and emits a
-// stable topological order. sloff never accepts a manual `depends:` declaration; the
-// graph is recovered entirely from the file-set intersections.
+// Package depgraph builds the task DAG and emits a stable topological order.
+// Execution-order edges come from the spec-declared depends entries carried
+// on Task.DependsOn (ADR-0013 D2); inputs/outputs file overlap is used only
+// for validation (duplicate-producer detection and FindMissingDependencies).
 package depgraph
 
 import (
@@ -168,12 +169,7 @@ func conflictError(tasks []Task, conflicts map[string][]int) error {
 	return fmt.Errorf("duplicate output producers: %s", strings.Join(parts, "; "))
 }
 
-func taskLabel(t Task) string {
-	if t.SpecRelpath == "" {
-		return t.Name
-	}
-	return t.SpecRelpath + ":" + t.Name
-}
+func taskLabel(t Task) string { return t.Ref().Label() }
 
 func remainingTaskKeys(all, emitted []Task) string {
 	emittedSet := make(map[string]struct{}, len(emitted))
@@ -185,11 +181,7 @@ func remainingTaskKeys(all, emitted []Task) string {
 		if _, ok := emittedSet[taskKey(t)]; ok {
 			continue
 		}
-		if t.SpecRelpath == "" {
-			rest = append(rest, t.Name)
-		} else {
-			rest = append(rest, t.SpecRelpath+":"+t.Name)
-		}
+		rest = append(rest, t.Ref().Label())
 	}
 	sort.Strings(rest)
 	return strings.Join(rest, ", ")
@@ -279,12 +271,29 @@ func specYAMLPath(r TaskRef) string {
 }
 
 func suggestedDependEntry(m MissingDependency) string {
-	if m.Consumer.SpecRelpath == m.Producer.SpecRelpath {
+	consumerDir := normalizeSpecDir(m.Consumer.SpecRelpath)
+	producerDir := normalizeSpecDir(m.Producer.SpecRelpath)
+	if consumerDir == producerDir {
 		return fmt.Sprintf("`depends: [{task: %s}]`", m.Producer.Name)
 	}
-	rel, err := filepath.Rel(m.Consumer.SpecRelpath, m.Producer.SpecRelpath)
+	rel, err := filepath.Rel(orDot(consumerDir), orDot(producerDir))
 	if err != nil {
 		rel = m.Producer.SpecRelpath
 	}
 	return fmt.Sprintf("`depends: [{spec: %s, task: %s}]`", filepath.ToSlash(rel), m.Producer.Name)
+}
+
+// normalizeSpecDir maps the two "repo root" spellings to one form.
+func normalizeSpecDir(s string) string {
+	if s == "." {
+		return ""
+	}
+	return s
+}
+
+func orDot(s string) string {
+	if s == "" {
+		return "."
+	}
+	return s
 }

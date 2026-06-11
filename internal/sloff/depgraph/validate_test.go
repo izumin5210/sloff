@@ -113,3 +113,23 @@ func TestTaskRefLabel_CollapsesRootQualifiers(t *testing.T) {
 		t.Errorf("unexpected label %q", got)
 	}
 }
+
+func TestFormatMissing_EmptyFilesUsesFallback(t *testing.T) {
+	m := depgraph.MissingDependency{Producer: ref("a", "p"), Consumer: ref("b", "c")}
+	if !strings.Contains(depgraph.FormatMissing(m), "generated files") {
+		t.Error("expected 'generated files' fallback")
+	}
+}
+
+func TestFormatMissing_RootToSubdirSuggestsRelativeSpec(t *testing.T) {
+	m := depgraph.MissingDependency{
+		Producer: ref("proto/options", "gen"),
+		Consumer: ref(".", "build"),
+		Files:    []string{"gen/a.pb.go"},
+	}
+	got := depgraph.FormatMissing(m)
+	want := "`depends: [{spec: proto/options, task: gen}]`"
+	if !strings.Contains(got, want) {
+		t.Errorf("FormatMissing missing %q in: %s", want, got)
+	}
+}

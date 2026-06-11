@@ -69,9 +69,15 @@ func gitInitGraphWorkdir(t *testing.T, dir string) {
 	}
 }
 
+// runGraphCmd runs the graph command and asserts nothing was written to
+// stderr — an unexpected depends-missing warning must fail the golden test,
+// not vanish. Warning-asserting tests use runGraphCmdCaptureStderr directly.
 func runGraphCmd(t *testing.T, h *graphHarness, extra ...string) string {
 	t.Helper()
-	stdout, _ := runGraphCmdCaptureStderr(t, h, extra...)
+	stdout, stderr := runGraphCmdCaptureStderr(t, h, extra...)
+	if stderr != "" {
+		t.Fatalf("graph cmd: unexpected stderr output:\n%s", stderr)
+	}
 	return stdout
 }
 

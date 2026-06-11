@@ -138,7 +138,7 @@ func runStep(opts ...runStepOption) step {
 		resolverReg.Register(pnpmRes)
 		preflightReg := preflight.NewRegistry()
 		preflightReg.Register(preflightpnpm.New(h.workdir))
-		logs := &captureLogger{}
+		logs := &captureLogger{t: t}
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
@@ -203,6 +203,12 @@ func withReadOnly() runStepOption {
 
 // expectError makes the step assert that Run fails with an error containing
 // substr, instead of failing the test on error.
+//
+// Note that runE2E still compares the workdir against expected/ afterwards:
+// an expectError case pins the failed run's on-disk side effects in its
+// golden too. Fixtures whose failed runs could leave nondeterministic
+// partial state must be made deterministic (fixed-content outputs,
+// withReadOnly to suppress order-dependent records) before snapshotting.
 func expectError(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantErr = substr }
 }
@@ -212,16 +218,20 @@ func expectWarn(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantWarn = substr }
 }
 
-// captureLogger records warnings for expectWarn assertions while discarding
-// info/error chatter.
+// captureLogger records warnings for expectWarn assertions while echoing all
+// runner output through t.Logf so failing tests keep their diagnostic logs.
 type captureLogger struct {
+	t     *testing.T
 	mu    sync.Mutex
 	warns []string
 }
 
-func (c *captureLogger) Infof(format string, args ...any)  {}
-func (c *captureLogger) Errorf(format string, args ...any) {}
+func (c *captureLogger) Infof(format string, args ...any) { c.t.Logf("sloff INFO  "+format, args...) }
+
+func (c *captureLogger) Errorf(format string, args ...any) { c.t.Logf("sloff ERROR "+format, args...) }
+
 func (c *captureLogger) Warnf(format string, args ...any) {
+	c.t.Logf("sloff WARN  "+format, args...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.warns = append(c.warns, fmt.Sprintf(format, args...))

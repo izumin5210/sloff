@@ -96,6 +96,13 @@ func (s *Storage) Load(_ context.Context, key fingerprint.Key) (*fingerprintv1.R
 	}
 	rec, err := fingerprint.Unmarshal(b)
 	if err != nil {
+		// Superseded schema versions read as misses so the runner
+		// regenerates them through the normal miss path (ADR-0010) —
+		// a hard error here would abort the whole run via the prefetch
+		// LoadMany. Corruption stays a hard error.
+		if errors.Is(err, fingerprint.ErrUnsupportedSchemaVersion) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
 	return rec, true, nil

@@ -77,6 +77,13 @@ func validateSchemaVersion(v fingerprintv1.SchemaVersion) error {
 	if _, ok := fingerprintv1.SchemaVersion_name[int32(v)]; !ok {
 		return fmt.Errorf("fingerprint: unknown schema version %d", v)
 	}
+	// Known but superseded versions (V2) get the sentinel so storage
+	// backends can turn them into misses (ADR-0010 §schema_version 移行);
+	// unknown versions above stay hard errors so an older binary never
+	// clobbers records written by a newer one.
+	if v != SchemaVersion {
+		return fmt.Errorf("%w: %s is superseded by %s; the record is regenerated on the next run (ADR-0010)", ErrUnsupportedSchemaVersion, v, SchemaVersion)
+	}
 	return nil
 }
 

@@ -14,7 +14,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 「内製ソース ( = `local`)」 という意味では [pnpm-local](./resolver-pnpm-local.md) と対応物の関係。 両 resolver は同じ shape の Result を返す:
 
-- **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 これにより depgraph が「 main module 内の Go ファイルを生成する upstream codegen task」 を output overlap で自動検知し、 go-local task との依存 edge を貼る ( pnpm-local が build task を自動連鎖する仕組みと同じ)
+- **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 「 main module 内の Go ファイルを生成する upstream codegen task」 がある場合、 実行順序は consumer task の `depends` で明示する ( [ADR-0013](../adr/0013-explicit-task-dependencies.md))。 宣言漏れは ExtraInputs を含む union 後の inputs に対する overlap 検証が error で検出する
 - **外部 Go module** は `go-deps:<path>@<version>+sum:<go.sum-hash>` 形式の **ResolvedVersion** として resolved_versions_hash に流れる。 module bump / go.sum drift で必ず invalidate される
 
 外部配布 ( aqua / `go tool` 経由) の OSS ツールは [script resolver](./resolver-script.md) で `<bin> --version` を取るアプローチに統一されている ( ADR-0007)。

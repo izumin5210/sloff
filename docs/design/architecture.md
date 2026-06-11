@@ -11,6 +11,7 @@
 - [ADR-0008: tool を first-class spec entity とする](../adr/0008-tool-as-first-class-spec-entity.md) (= named tool + repo-wide flat namespace)
 - [ADR-0010: fingerprint filename への timestamp prefix](../adr/0010-fingerprint-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
 - [ADR-0011: 大規模 monorepo 向け remote backend は DynamoDB](../adr/0011-dynamodb-remote-fingerprint-storage.md) (= 1000+ task 規模では per-item KV モデルが構造的に最適)
+- [ADR-0013: タスク間依存を spec に明示宣言する](../adr/0013-explicit-task-dependencies.md) (= 実行順序は `depends`、 overlap は検証として存続)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
@@ -119,7 +120,10 @@ commands:
     inputs: ["**/*.proto", "buf.gen.yaml", "buf.yaml", "buf.lock"]
     outputs: ["**/*.pb.go", "**/*.connect.go"]
     tools: [buf, protoc-gen-go]    # tool 名のリストで参照
-    # 注: depends フィールドは持たない。 依存は inputs / outputs から完全自動導出される
+    # 他 task の生成物を入力に取る場合は depends で実行順序を明示する ( ADR-0013、 後述「タスク間依存」):
+    # depends:
+    #   - spec: ../options          # 依存先 spec dir ( この sloff.yml の dir 相対)。 省略時は同一ファイル内
+    #     task: options-codegen     # 依存先 task 名
     # buf を使う場合は buf.gen.yaml / buf.yaml / buf.lock を inputs に含める ( ADR-0006)。
     # buf 専用の resolver / preflight は持たず、 設定変更は files_hash 経路で invalidate される。
 ```
@@ -131,7 +135,7 @@ commands:
 - `commands[*].tools` は **tool 名の文字列リスト** ( inline 宣言は不可)。 prebuilt binary は script resolver、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
 - tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `sloff.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
 - `inputs` / `outputs` の glob pattern は **spec dir 相対**。 `..` を含む pattern も許容され、 monorepo 典型の cross-dir codegen ( e.g. `proto/<svc>/sloff.yml` から `../../gen/go/**/*.pb.go` を出力) を spec の置き場所と関心事のスコープを揃えたまま表現できる。 ただし正規化後に repoRoot を抜ける pattern ( e.g. `../../../etc/passwd`) は load 時 error として弾く ( spec が repo 外を hash しないことを構造的に担保)
-- `depends` フィールドは **持たない**。 依存は inputs / outputs から完全自動導出 ( 後述)
+- 他 task の生成物を入力に取る場合、 `depends` で **実行順序を明示宣言する** ( ADR-0013)。 要素は `{spec, task}` の構造体で、 `spec` は spec dir 相対 ( 省略時は同一 sloff.yml 内)。 inputs / outputs overlap の計算は順序導出ではなく **宣言の検証** に使う ( 後述「タスク間依存」)
 
 ### fingerprint schema
 
@@ -489,7 +493,7 @@ type ResolvedVersion struct {
 }
 ```
 
-`Inputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた Inputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する `dist/cli.js` 等) が consumer task の inputs に乗り、 それを output に持つ build task との依存が **既存の output-overlap depgraph 規則だけで自動成立** する ( Turborepo の `dependsOn` を file overlap でやる版)。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
+`Inputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた Inputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する git-tracked ファイル群) が consumer task の inputs に乗り、 ツールのソース変更が files_hash 経路で fingerprint を invalidate する。 union 後の inputs は overlap 検証 ( ADR-0013、 後述「タスク間依存」) の対象にもなる。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
 
 `Inputs` / `Versions` を別メソッドにしているのは、 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心が異なるため ( IZU-16)。 内部で発見コスト ( lockfile walk / `packages.Load`) を共有する resolver は ADR-0008 のメモ化方針に従って「同じ declared tool への Inputs / Versions 連続呼び出しが 1 回分の発見作業で済む」ことを実装側で保証する。
 
@@ -579,77 +583,66 @@ prebuilt binary 系 ( `nix` / `mise` / `aqua` 等で配布される CLI 等) は
 
 これらは現時点では実装しないが、 必要が生じた段階で対応する **Resolver / Preflight Checker** を 1 対追加するだけで対応可能 ( sloff 本体に変更不要)。 Resolver 内部の `SourceLister` は Resolver 実装側で必要なら新規追加する ( トップレベルの拡張ポイントは増やさない)。
 
-### タスク間依存 (inputs / outputs からの自動導出)
+### タスク間依存 ( spec での明示宣言 + overlap 検証)
 
-依存関係は **`inputs` と `outputs` から完全に自動導出する**。 sloff には `depends` のような手動依存宣言フィールドは **存在しない**。
+タスク間の実行順序は **`depends` フィールドで明示宣言する** ( [ADR-0013](../adr/0013-explicit-task-dependencies.md))。 inputs / outputs overlap の計算は順序導出には使わず、 **宣言の検証** として存続させる。
 
-これは単に DRY のためではなく、 **fingerprint 機構の健全性を担保するための必然** である。 詳細は本節末尾の [なぜ手動 `depends` を持たないか](#なぜ手動-depends-を持たないか-fingerprint の健全性の前提) を参照。
+> 旧設計では依存を inputs / outputs の実ファイル overlap から完全自動導出していた ( 手動 `depends` は「 fingerprint が嘘をつく状況を覆い隠す」 として意図的に排除)。 しかしエッジの導出が「 output ファイルが現在のツリーに存在すること」 に依存するため、 生成物を削除した clean state / gitignore 運用 / 完全初回で実行順序が **黙って** 壊れる欠陥があった。 「 順序の導出」 と「 宣言の健全性強制」 の責務を分離し、 前者を明示宣言、 後者を検証に倒した経緯は [ADR-0013](../adr/0013-explicit-task-dependencies.md) 参照。
 
-#### 自動導出アルゴリズム
+#### 宣言と DAG 構築
 
-1. 全 spec を読み込み、 各 task の `inputs` / `outputs` glob を expand して実ファイル集合を得る ( I_t, O_t)
-2. 任意の 2 task A, B について、 `O_A ∩ I_B ≠ ∅` ( = A の出力ファイルのいずれかが B の入力に含まれる) なら、 B → A の依存を自動で貼る
-3. 構築された DAG で実行順を決定
+```yaml
+# proto/svc/sloff.yml
+commands:
+  - name: protoc-gen-go
+    cmd: buf generate --template buf.gen.yaml
+    inputs: ["**/*.proto", "../../gen/**/*.options.pb.go"]
+    outputs: ["../../gen/**/*.pb.go"]
+    tools: [buf, protoc-gen-go]
+    depends:
+      - spec: ../options          # 依存先 spec dir ( この sloff.yml の dir 相対)
+        task: options-codegen     # 省略時 ( task のみ) は同一 sloff.yml 内の task を指す
+```
+
+- `depends` 要素は `{spec, task}` の構造体。 `spec` は spec dir 相対 ( inputs / outputs glob や tool の path 系フィールドと同じ基準、 ADR-0008 D3)、 省略時は同一 sloff.yml 内の task を指す。 文字列 shorthand は提供しない
+- load 時 validation: 参照先の spec / task が存在しない / 自己参照 / 同一エッジの重複宣言 / `spec` の正規化結果が repoRoot を抜ける、 はすべて error
+- `depgraph.Build` は **declared エッジのみ** で DAG を構築し、 topological order で実行順を決定する。 循環依存は構築時 error
+- 実行順序は spec のみから決まり、 ファイルツリーの状態 ( clean / 生成済み) に依存しない
+
+#### overlap 検証 ( fingerprint 健全性の防御線)
+
+sloff の fingerprint が信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと ( ADR-0002)。 `depends` はあくまで scheduling metadata であり、 この前提を担保するのは引き続き inputs / outputs 宣言である。 両者の整合は overlap 計算で機械的に検証する:
+
+| 検証 | 条件 | タイミング | 挙動 |
+|---|---|---|---|
+| **depends 漏れ** | `O_A ∩ I_B ≠ ∅` ( A の出力ファイルが B の inputs にマッチ) なのに B が A への depends 未宣言 | (1) plan 時: 現ツリーで I_t / O_t を expand して交差判定 (2) run 時: 各 task の実出力 ( ADR-0004 D3 の producedBy 集計を流用) と各 task の expanded inputs を突合 | **error**。 不足している `depends` 記述を提示。 run 時検出は遅くとも run 終了時までに非ゼロ exit |
+| **inputs 漏れ** | depends 宣言があるのに A の実出力が B の inputs に 1 つもマッチしない | run 後 | **warning**。 「 順序は正しいが上流変更で invalidate されない」 spec 不全 ( inputs の書き忘れ) の疑いを知らせる。 conditional outputs ( ADR-0004 D2 union semantics) による正当な交差ゼロがあり得るため error にはしない |
 
 ```mermaid
 flowchart LR
-    A["task A: options-codegen<br/>inputs: options.proto<br/>outputs: **/*.options.pb.go"]
-    B["task B: protoc-gen-go<br/>inputs: **/*.proto, **/*.options.pb.go<br/>outputs: **/*.pb.go"]
-    A -- "O_A ∩ I_B = {*.options.pb.go} ≠ ∅<br/>→ B depends on A" --> B
+    A["task A: proto/options の options-codegen<br/>outputs: ../../gen/**/*.options.pb.go"]
+    B["task B: proto/svc の protoc-gen-go<br/>inputs: **/*.proto, ../../gen/**/*.options.pb.go<br/>depends: [{spec: ../options, task: options-codegen}]"]
+    B -- "depends ( 実行順序)" --> A
+    A -. "検証: O_A ∩ I_B ≠ ∅ なら depends 必須<br/>検証: depends があるのに交差ゼロなら warning" .-> B
 ```
 
-example:
+run 時検証がポイントで、 plan 時に検出できない clean state での depends 漏れも「 上流が実際にファイルを生成した時点」 で必ず捕まる ( 旧設計では検出不能だった経路。 検出力は純増)。 ADR-0004 D3 の重複 output producer 検出は従来どおり変更なし。
 
-- task `proto/options/options-codegen`
-  - `inputs: ["options.proto"]`
-  - `outputs: ["**/*.options.pb.go"]`
-- task `path/to/spec/protoc-gen-go`
-  - `inputs: ["**/*.proto", "**/*.options.pb.go", "buf.gen.yaml"]`
-  - `outputs: ["**/*.pb.go", "**/*.connect.go"]`
-
-→ `protoc-gen-go` の `inputs` glob に `*.options.pb.go` が含まれており、 これは `options-codegen` の `outputs` の実ファイルにマッチする。 sloff は自動的に **`protoc-gen-go → options-codegen` の依存** を構築する。
-
-#### なぜ手動 `depends` を持たないか (fingerprint の健全性の前提)
-
-sloff の fingerprint が信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと。 この前提が成立するなら、 上流 task の output が変わったときに下流 task の `input_hash` が必ず変わる ( 上流 output が下流 inputs に含まれるため)。
-
-仮に「inputs にも outputs にも現れない論理依存」があるとすると:
-
-1. 上流 task の output が変わっても、 下流 task の `input_hash` には反映されない
-2. 下流は `input_hash` 一致 → fingerprint hit → skip
-3. **古い結果のまま動く** ( fingerprint が嘘をつく)
-
-つまり「手動 `depends` で表現したくなる依存」が存在する状況 = **「inputs / outputs の宣言が現実の generator 挙動を反映していない」状況** = **fingerprint 機構自体が信頼できない状況**。 手動 `depends` を導入してその場の DAG を救済しても、 hash ベースの fingerprint 判定が嘘をついている根本問題は解消されない ( むしろ「依存は明示してあるから fingerprint も信頼できる」という偽の安心感を生む)。
-
-したがって sloff では:
-
-- **手動 `depends` フィールドは設けない**
-- 依存表現はすべて inputs / outputs からの自動導出で行う
-- もし「自動導出で見つからない依存」が必要に見えたら、 それは spec の `inputs` / `outputs` 宣言が不完全である合図。 spec を修正するのが正しい対応
-- 上記の前提を満たせない generator (`inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) は **そもそも sloff のスコープ外**。 利用者の Makefile / shell スクリプト側に残すか、 generator 自体を修正する
-
-この立場は不便なように見えるが、 「fingerprint は健全な generator にのみ意味がある」という根本原則を spec / 実装レベルで強制する設計判断。
+「 inputs にも outputs にも現れない論理依存」 を持つ generator ( `inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) が **sloff のスコープ外** であることも従来どおり。 depends はそうした generator を救済するための機構ではなく、 宣言済み inputs / outputs の上に成立するデータフローの実行順序を spec 上で確定させるための機構である。
 
 #### invalidate チェーン
 
-invalidate チェーンの実装は、 **「上流 task の最新 output hash を、 下流 task の `resolved_versions_hash` 隣に sorted concat で混ぜる」** ことで自然に成立する。 上流のいずれかの output が変われば下流の `input.hash` も変わり、 別の record ファイルを引くため、 明示的な force フラグなどは不要 ( record の不一致で自動的に miss する)。
+invalidate は depends とは独立に、 **「上流 task の出力ファイルが下流 task の inputs に含まれる → 上流の output が変われば下流の files_hash ( ひいては `input.hash`) が変わる」** 経路だけで成立する。 別の record ファイルを引くため、 明示的な force フラグなどは不要 ( record の不一致で自動的に miss する)。
+
+`depends` は input_hash に **一切含めない** ( ADR-0013 D4)。 順序 ( depends) と invalidate ( inputs / outputs) は別宣言の二重管理になるが、 両者の整合は上記の overlap 検証が機械的に担保する。 record schema にも変更はない。
 
 #### 実装上の留意点
 
-- 全 task の glob expand は **sloff 1 run 内で 1 回だけ** 行い、 task 間で結果を共有する ( I_t / O_t の集合をメモ化)
+- overlap 検証のための glob expand は **sloff 1 run 内で 1 回だけ** 行い、 task 間で結果を共有する ( I_t / O_t の集合をメモ化)
 - 交差判定は task 数 N に対して O(N²) だが、 実用上の monorepo 規模 ( 200 task 程度) では現実的なオーダー
-- chicken-and-egg ( 完全初回で output ファイルが存在しない) は generator 出力が git 管理されている前提のため通常起きない。 fresh clone 直後でも前回の generator output は git tree に存在する。 完全な初期化は fingerprint miss で全 task 実行
-- `sloff graph` サブコマンドで導出された DAG を Mermaid / DOT で可視化し、 「なぜ A → B の依存があるのか」をデバッグできるようにする (auto-detect の根拠ファイルも併記)
+- `sloff graph` サブコマンドで declared DAG を Mermaid / DOT で可視化する。 エッジは現ツリーで overlap が観測できればファイルサンプルを併記し、 観測できなければ declared であることを示す。 graph では depends 漏れ検証を **warning に降格** して graph 自体は出力する ( graph は誤順序のデバッグに使う表示ツールであり、 検証 error で出力を止めると自己矛盾するため)
 - `sloff run --explain <task>` で個別 task の fingerprint hit / miss 理由 ( 上流のどの output が変わって invalidate されたか) を表示
-
-#### 暗黙性の懸念と緩和策
-
-自動導出は spec から「なぜこの順序か」が読み取りにくくなる暗黙性のトレードオフがある。 緩和策:
-
-- `sloff graph` で可視化
-- `sloff run --explain` で個別判定の根拠表示
-- `inputs` / `outputs` の宣言粒度を細かく保つ文化 (`outputs: ["**/*"]` のような雑な宣言を spec lint で警告)
-- PR レビュー時、 spec の `inputs` / `outputs` 変更が依存関係を変える可能性があることを意識する運用ルール
+- `inputs` / `outputs` の宣言粒度を細かく保つ文化 (`outputs: ["**/*"]` のような雑な宣言を spec lint で警告) は、 overlap 検証の精度を保つうえで引き続き有効
 
 ### ゴミ (古い record) の扱い
 
@@ -668,7 +661,7 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 
 - **Q1**: 同 input hash で複数 OS が独立に走った時、 output hash が真に一致するか。 一致しない generator (例: 行末コード差、 絶対パス埋込、 time.Now embed) が出た場合の対処方針。 cross-OS double-run 検証 CI を入れて早期発見するか
 - **Q2**: 開発者が手元で `.sloff/fingerprints/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
-- **Q3**: ファイル粒度の import 解析を **inputs / outputs 自動導出にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度では glob ベースで自動導出するが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して精度を上げる余地はある。 ただし「import 解析が間違うと fingerprint が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
+- **Q3**: ファイル粒度の import 解析を **overlap 検証にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度の glob ベースで overlap 検証 ( ADR-0013) を行うが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して検証精度を上げる余地はある。 ただし「import 解析が間違うと検証が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
 - **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
 
 各 Resolver 固有の Open Questions は対応する Resolver doc を参照。
@@ -685,7 +678,7 @@ internal/sloff/
   spec.go                                   # sloff.yml パース、 CmdSpec
   runner.go                                 # 並列 runner、 fingerprint lookup / write
   hash.go                                   # input/output hash 計算
-  depgraph.go                               # inputs / outputs からの依存自動導出 + DAG 構築
+  depgraph.go                               # declared depends からの DAG 構築 + overlap 検証 ( ADR-0013)
   explain.go                                # `sloff run --explain` / `sloff graph` の判定根拠出力
   fingerprint/                                    # ★ Storage interface + factory
     record.go                               # Record 型 ( deterministic marshal/unmarshal)

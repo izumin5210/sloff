@@ -803,6 +803,13 @@ type taskInfo struct {
 	// the resolver registry. nil when collectTasks ran without versions
 	// (depgraph-only callers).
 	versions []toolresolver.ResolvedVersion
+
+	// inputSet is inputPaths as a set, and joinedInputPatterns are the
+	// declared input patterns pre-joined with the spec dir in slash form —
+	// both precomputed at collect time for the post-run ADR-0013 D3
+	// validation, which probes them once per produced path.
+	inputSet            map[string]struct{}
+	joinedInputPatterns []string
 }
 
 // collectTasks expands inputs/outputs for every spec command and folds each
@@ -835,6 +842,8 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 				versions = combineResolvedVersions(c.Tools, versionsByTool)
 			}
 
+			inputSet, joinedPatterns := inputSurface(sp.Dir, c.Inputs, mergedInputs)
+
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
 				Name:        c.Name,
@@ -844,11 +853,13 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			}
 			tasks = append(tasks, t)
 			r.byKey[t.Ref()] = taskInfo{
-				specRelpath:    sp.Dir,
-				command:        c,
-				inputPaths:     mergedInputs,
-				outputPatterns: c.Outputs,
-				versions:       versions,
+				specRelpath:         sp.Dir,
+				command:             c,
+				inputPaths:          mergedInputs,
+				outputPatterns:      c.Outputs,
+				versions:            versions,
+				inputSet:            inputSet,
+				joinedInputPatterns: joinedPatterns,
 			}
 		}
 	}
@@ -958,6 +969,27 @@ func resolveDepends(specDir string, depends []spec.Depend) []depgraph.TaskRef {
 		})
 	}
 	return out
+}
+
+// inputSurface precomputes the two lookup structures taskReadsPath probes:
+// the expanded input set and the spec-dir-joined slash-form patterns.
+// Patterns whose join escapes the repo root are dropped here — glob.Expand
+// already failed the run for them at collect time, so this is defensive.
+func inputSurface(specDir string, patterns, inputPaths []string) (map[string]struct{}, []string) {
+	set := make(map[string]struct{}, len(inputPaths))
+	for _, p := range inputPaths {
+		set[p] = struct{}{}
+	}
+	dirSlash := filepath.ToSlash(specDir)
+	joined := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		j := path.Join(dirSlash, pattern)
+		if glob.EscapesRoot(j) {
+			continue
+		}
+		joined = append(joined, j)
+	}
+	return set, joined
 }
 
 // mergeInputs returns the deduplicated, sorted union of declared and extra
@@ -1270,10 +1302,6 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 		for _, d := range t.DependsOn {
 			declared[d] = struct{}{}
 		}
-		inputSet := make(map[string]struct{}, len(info.inputPaths))
-		for _, p := range info.inputPaths {
-			inputSet[p] = struct{}{}
-		}
 		byProducer := map[depgraph.TaskRef][]string{}
 		for _, p := range paths {
 			producer := produced[p]
@@ -1283,7 +1311,7 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 			if _, ok := declared[producer]; ok {
 				continue
 			}
-			if !taskReadsPath(info, inputSet, p) {
+			if !taskReadsPath(info, p) {
 				continue
 			}
 			byProducer[producer] = append(byProducer[producer], p)
@@ -1307,23 +1335,18 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 }
 
 // taskReadsPath reports whether produced path p belongs to the task's input
-// surface: either it was already in the expanded input set at collect time,
-// or it matches one of the declared input patterns — the clean-state case,
-// where the file did not exist when globs were expanded and only the pattern
-// can see it. Pattern-vs-path matching is exact and cheap (unlike the
+// surface: either it was in the expanded input set at collect time, or it
+// matches one of the declared input patterns — the clean-state case, where
+// the file did not exist when globs were expanded and only the pattern can
+// see it. Pattern-vs-path matching is exact and cheap (unlike the
 // glob-vs-glob intersection ADR-0004 D3 rejected).
-func taskReadsPath(info taskInfo, inputSet map[string]struct{}, p string) bool {
-	if _, ok := inputSet[p]; ok {
+func taskReadsPath(info taskInfo, p string) bool {
+	if _, ok := info.inputSet[p]; ok {
 		return true
 	}
 	slashPath := filepath.ToSlash(p)
-	specDir := filepath.ToSlash(info.specRelpath)
-	for _, pattern := range info.command.Inputs {
-		joined := path.Join(specDir, pattern)
-		if glob.EscapesRoot(joined) {
-			continue // already rejected by glob.Expand at collect time
-		}
-		if ok, err := doublestar.Match(joined, slashPath); err == nil && ok {
+	for _, pattern := range info.joinedInputPatterns {
+		if ok, err := doublestar.Match(pattern, slashPath); err == nil && ok {
 			return true
 		}
 	}
@@ -1358,10 +1381,6 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 	warned := 0
 	for _, t := range ordered {
 		info := r.byKey[t.Ref()]
-		inputSet := make(map[string]struct{}, len(info.inputPaths))
-		for _, p := range info.inputPaths {
-			inputSet[p] = struct{}{}
-		}
 		for _, dep := range t.DependsOn {
 			outs, ran := producedByRef[dep]
 			if !ran {
@@ -1369,7 +1388,7 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 			}
 			overlap := false
 			for _, p := range outs {
-				if taskReadsPath(info, inputSet, p) {
+				if taskReadsPath(info, p) {
 					overlap = true
 					break
 				}

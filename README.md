@@ -7,7 +7,7 @@
 ## Features
 
 - **Output-comparison fingerprint hits.** A hit requires the recorded `input_hash` *and* the on-disk output files to match. Drifted outputs (manual edits, formatter runs, partial checkouts) are re-generated, never silently skipped.
-- **OS-portable fingerprints.** Fingerprints are deterministic YAML committed to git. A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
+- **OS-portable fingerprints.** Fingerprints are deterministic protobuf binary records committed to git (inspect them with `sloff fingerprint show`). A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
 - **Reads your existing toolchain.** No replacement for aqua / mise / nix / pnpm / `go.mod`. Tool versions come from the runtime binary's `--version`, lockfiles, or repo source — whichever is the actual source of truth.
 - **Auto-derived dependencies.** Task ordering is computed from `inputs` / `outputs` glob intersections. There is no manual `depends:` field to keep in sync.
 - **Single Go binary.** No runtime dependencies, no daemon, no language ecosystem to install.

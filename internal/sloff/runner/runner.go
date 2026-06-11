@@ -1296,7 +1296,9 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 		}
 		sort.Slice(producers, func(i, j int) bool { return producers[i].Label() < producers[j].Label() })
 		for _, ref := range producers {
-			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: byProducer[ref]})
+			files := byProducer[ref]
+			sort.Strings(files)
+			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: files})
 		}
 	}
 	span.SetAttributes(attribute.Int("sloff.depends.missing_count", len(missing)))

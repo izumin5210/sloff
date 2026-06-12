@@ -1444,7 +1444,7 @@ func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
 	return err
 }
 
-// childEnv returns env entries with SLOFF_OTEL_* keys removed. ADR-0009 D2'
+// childEnv returns env entries with SLOFF_OTEL_* keys removed. ADR-0013 D2'
 // scopes the SLOFF_-prefixed tracing config to the **current** sloff run; if a
 // task cmd happens to invoke another `sloff` (or any tool that honors the same
 // prefix), the child should not silently inherit the parent's silence /

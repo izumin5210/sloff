@@ -47,7 +47,7 @@ func endSpan(span trace.Span, errp *error) {
 }
 
 // otelEnvKeys is the set of OTEL_* env vars sloff lets users override via the
-// SLOFF_OTEL_* prefix (ADR-0009 D2'). It is consulted purely as data — sloff
+// SLOFF_OTEL_* prefix (ADR-0013 D2'). It is consulted purely as data — sloff
 // never writes any of these keys via os.Setenv. Subprocesses spawned by runner
 // therefore inherit only the OTEL_* values the user's shell already set.
 var otelEnvKeys = []string{

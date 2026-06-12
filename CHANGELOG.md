@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.0.2](https://github.com/izumin5210/sloff/compare/v0.0.1...v0.0.2) - 2026-06-12
+- ci: pin GitHub Actions to full SHAs via pinact by @izumin5210 in https://github.com/izumin5210/sloff/pull/36
+- fix(pnpmlocal): fail fast on unsupported pnpm-lock.yaml lockfileVersion by @izumin5210 in https://github.com/izumin5210/sloff/pull/40
+- fix(fingerprint): treat superseded V2 records as misses and write local records atomically by @izumin5210 in https://github.com/izumin5210/sloff/pull/41
+- feat!: declare task dependencies explicitly in specs (ADR-0013) by @izumin5210 in https://github.com/izumin5210/sloff/pull/44
+- fix(cli): parse SLOFF_ALLOW_STALE_DEPS as a boolean instead of any non-empty value by @izumin5210 in https://github.com/izumin5210/sloff/pull/42
+- docs: renumber duplicated ADR-0009 (otel tracing) to ADR-0013 and fix README fingerprint format claim by @izumin5210 in https://github.com/izumin5210/sloff/pull/43
+
 ## [v0.0.1](https://github.com/izumin5210/sloff/commits/v0.0.1) - 2026-05-12
 - feat: foundation pipeline with script resolver by @izumin5210 in https://github.com/izumin5210/sloff/pull/1
 - fix: address Codex adversarial review findings by @izumin5210 in https://github.com/izumin5210/sloff/pull/2

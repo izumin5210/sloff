@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -68,18 +69,16 @@ func gitInitGraphWorkdir(t *testing.T, dir string) {
 	}
 }
 
+// runGraphCmd runs the graph command and asserts nothing was written to
+// stderr — an unexpected depends-missing warning must fail the golden test,
+// not vanish. Warning-asserting tests use runGraphCmdCaptureStderr directly.
 func runGraphCmd(t *testing.T, h *graphHarness, extra ...string) string {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	root := newRootCmd()
-	args := append([]string{"graph", "--root", h.workdir}, extra...)
-	root.SetArgs(args)
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	if err := root.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("graph cmd: %v\nstderr: %s", err, stderr.String())
+	stdout, stderr := runGraphCmdCaptureStderr(t, h, extra...)
+	if stderr != "" {
+		t.Fatalf("graph cmd: unexpected stderr output:\n%s", stderr)
 	}
-	return stdout.String()
+	return stdout
 }
 
 func assertGraphGolden(t *testing.T, h *graphHarness, got string) {
@@ -129,15 +128,52 @@ func TestGraph_MultiDeps_Mermaid(t *testing.T) {
 }
 
 // TestGraph_PnpmLocal_BuildChain_Mermaid validates that resolver-contributed
-// ExtraInputs (architecture.md:449) are visible to the graph subcommand:
-// the gen task pulls @org/codegen via pnpm-local, the build-codegen task
-// produces the workspace tool's dist files, and the auto-detected edge
-// connecting them must surface even though gen's spec doesn't name the dist
-// files directly. The fixture deliberately omits node_modules/.pnpm/lock.yaml
-// to cover the "graph remains usable when install state is drifted" claim
-// from runner.Plan's docstring.
+// ExtraInputs are visible to the graph subcommand: the gen task pulls
+// @org/codegen via pnpm-local and declares depends on build-codegen; the
+// rendered edge carries the dist files as overlap evidence because the
+// resolver folded them into gen's inputs. The fixture deliberately omits
+// node_modules/.pnpm/lock.yaml to cover the "graph remains usable when
+// install state is drifted" claim from runner.Plan's docstring.
 func TestGraph_PnpmLocal_BuildChain_Mermaid(t *testing.T) {
 	h := setupGraphHarness(t, "pnpmlocal-build-chain-mermaid")
 	got := runGraphCmd(t, h, "--format", "mermaid")
 	assertGraphGolden(t, h, got)
+}
+
+// runGraphCmdCaptureStderr is runGraphCmd plus the stderr text, for tests
+// asserting on the ADR-0013 depends-missing warning channel.
+func runGraphCmdCaptureStderr(t *testing.T, h *graphHarness, extra ...string) (string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd()
+	args := append([]string{"graph", "--root", h.workdir}, extra...)
+	root.SetArgs(args)
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("graph cmd: %v\nstderr: %s", err, stderr.String())
+	}
+	return stdout.String(), stderr.String()
+}
+
+// TestGraph_DeclaredEdgeWithoutObservableOverlap_Mermaid locks the clean-
+// checkout rendering: the declared edge appears with the "(declared)"
+// caption because no generated file exists to evidence it.
+func TestGraph_DeclaredEdgeWithoutObservableOverlap_Mermaid(t *testing.T) {
+	h := setupGraphHarness(t, "declared-edge-clean-mermaid")
+	got := runGraphCmd(t, h, "--format", "mermaid")
+	assertGraphGolden(t, h, got)
+}
+
+// TestGraph_MissingDependsWarnsButRenders locks ADR-0013 D3's graph
+// downgrade: an observable overlap without a declared edge produces a
+// stderr warning (with the suggested depends entry), while stdout still
+// renders the node set so the user can inspect the DAG they actually have.
+func TestGraph_MissingDependsWarnsButRenders(t *testing.T) {
+	h := setupGraphHarness(t, "missing-depends-warning-mermaid")
+	stdout, stderr := runGraphCmdCaptureStderr(t, h, "--format", "mermaid")
+	if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, "depends: [{task: producer}]") {
+		t.Errorf("expected depends warning on stderr, got: %q", stderr)
+	}
+	assertGraphGolden(t, h, stdout)
 }

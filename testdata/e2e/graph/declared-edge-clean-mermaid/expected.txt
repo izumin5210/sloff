@@ -1,0 +1,4 @@
+flowchart TD
+    n_spec_consumer["spec:consumer"]
+    n_spec_producer["spec:producer"]
+    n_spec_producer -->|"(declared)"| n_spec_consumer

@@ -12,6 +12,14 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
+// EscapesRoot reports whether joined — a path.Join-cleaned, slash-form,
+// repo-root-relative pattern or path — escapes the repository root. Expand
+// and the depends-validation layers share this single definition of the
+// escape policy.
+func EscapesRoot(joined string) bool {
+	return joined == ".." || strings.HasPrefix(joined, "../")
+}
+
 // Expand evaluates each pattern relative to specDir (which itself is relative to
 // repoRoot) and returns the union of matched file paths, expressed relative to
 // repoRoot, in path-ascending order with duplicates removed.
@@ -35,7 +43,7 @@ func Expand(repoRoot, specDir string, patterns []string) ([]string, error) {
 		// leaving doublestar's `**` token intact (Clean only normalises path
 		// separators and dot segments).
 		joined := path.Join(specDirSlash, p)
-		if joined == ".." || strings.HasPrefix(joined, "../") {
+		if EscapesRoot(joined) {
 			return nil, fmt.Errorf("glob %q escapes repo root", p)
 		}
 

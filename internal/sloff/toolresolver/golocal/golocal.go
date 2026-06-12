@@ -6,10 +6,10 @@
 // is split across two of sloff's hash buckets:
 //
 //   - Internal source files (main module / repo-local sources) become
-//     ExtraInputs and feed files_hash via the runner's input merge. This is
-//     what lets depgraph wire upstream codegen tasks (whose outputs land
-//     inside the same source tree the tool reads) to this task automatically
-//     by the existing output-overlap rule, with no extra dependency channel.
+//     ExtraInputs and feed files_hash via the runner's input merge. Upstream
+//     codegen tasks whose outputs land inside the same source tree the tool
+//     reads must be declared in the consuming task's depends (ADR-0013); the
+//     overlap validation flags the omission.
 //   - External Go modules become individual ResolvedVersion entries
 //     ("go-deps:<path>@<version>+sum:<go.sum-line>") and feed resolved_versions_hash, so
 //     dep bumps invalidate without re-reading the lister-traversed source set.
@@ -65,8 +65,8 @@ func (r *Resolver) Name() string { return Name }
 
 // Inputs returns every internal Go file path the lister enumerated for this
 // declared tool (repo-relative slash form). The runner folds these into the
-// task's input set so files_hash captures their content and depgraph can
-// wire upstream producers via output overlap.
+// task's input set so files_hash captures their content and the ADR-0013
+// overlap validation can see upstream producers.
 //
 // Inputs and Versions both consult the (memoised) lister — paying for a
 // single packages.Load per (specDir, entry) per run, see ADR-0008.

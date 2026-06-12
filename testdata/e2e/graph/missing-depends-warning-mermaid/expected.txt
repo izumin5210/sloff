@@ -1,0 +1,3 @@
+flowchart TD
+    n_spec_consumer["spec:consumer"]
+    n_spec_producer["spec:producer"]

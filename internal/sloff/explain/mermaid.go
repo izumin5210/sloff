@@ -35,9 +35,9 @@ func nodeIDs(refs []TaskRef) map[TaskRef]string {
 }
 
 // RenderMermaid emits a Mermaid `flowchart TD` representation of tasks and
-// their auto-detected edges. Output is byte-stable: nodes appear in
+// their declared dependency edges. Output is byte-stable: nodes appear in
 // (spec_relpath, name) order; edges are sorted by (To, From); each edge label
-// carries a sample of the justifying files (architecture.md:598).
+// carries a sample of the justifying files (architecture.md §タスク間依存).
 func RenderMermaid(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")

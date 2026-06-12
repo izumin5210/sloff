@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "specA",
+    "task_id": "producer",
+    "cmd": "sh -c cp seed.txt a.txt"
+  },
+  "input": {
+    "hash": "770e88b72839b1fb0016e1e871cb52b5f845191197806cb8e274689020ed6bd9",
+    "files_hash": "a6218e2d04e999e7e986c34ed102ce5caa703a0bdcfae7682d97a713f3b6aec4",
+    "cmd_hash": "ee23e245c8aef959fb0d65d949f14571febeb32ec76bd5610dbf1692506666ef",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "9e401de24c1598a491fec8d967d7639b4417c38795104cb6bcd38013a46664df",
+    "files": [
+      {
+        "path": "specA/a.txt",
+        "hash": "4a6689419b00b11700c9b6246bcfa8936c8f5e1e824db3a7e57030e2d1c1a684"
+      }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-// Package runner orchestrates spec discovery, preflight, dependency-graph derivation
+// Package runner orchestrates spec discovery, preflight, declared-dependency DAG construction
 // and per-task fingerprint lookup/execute/write. It is the integration point for the
 // foundation packages (spec / glob / hash / fingerprint / depgraph / toolresolver / preflight).
 package runner
@@ -9,16 +9,19 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -115,8 +118,8 @@ type Runner struct {
 	logger Logger
 	stdout io.Writer
 	stderr io.Writer
-	tracer trace.Tracer        // derived once in New from opts.TracerProvider
-	byKey  map[string]taskInfo // depgraph.Task key → taskInfo, filled by collectTasks
+	tracer trace.Tracer                  // derived once in New from opts.TracerProvider
+	byKey  map[depgraph.TaskRef]taskInfo // task ref → taskInfo, filled by collectTasks
 
 	// prefetched caches the records loaded by Storage.LoadMany at the top of
 	// Run; runTask consults this map first to avoid a per-task round-trip
@@ -149,7 +152,7 @@ type Runner struct {
 	// by producedByMu so independent tasks running in parallel via runTasks don't race on
 	// the shared map.
 	producedByMu sync.Mutex
-	producedBy   map[string]string
+	producedBy   map[string]depgraph.TaskRef
 }
 
 // New constructs a Runner.
@@ -234,12 +237,26 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Plan-time half of ADR-0013 D3: with the current tree's files, every
+	// observable producer→consumer overlap must be covered by a declared
+	// depends edge. The run-time half (validateProducedDependencies) covers
+	// what a clean checkout hides from this check.
+	if missing := r.findMissingDependenciesTraced(ctx, ordered); len(missing) > 0 {
+		return depgraph.MissingDependenciesError(missing)
+	}
+
 	if err := r.prefetchFingerprints(ctx, ordered); err != nil {
 		return err
 	}
 
-	r.producedBy = map[string]string{}
+	r.producedBy = map[string]depgraph.TaskRef{}
 	runErr := r.runTasks(ctx, ordered)
+	// Run-time half of ADR-0013 D3: validate against what was actually
+	// produced (clean checkouts hide everything from the plan-time check).
+	if depErr := r.validateProducedDependencies(ctx, ordered); depErr != nil {
+		runErr = errors.Join(runErr, depErr)
+	}
+	r.warnUnobservedDepends(ctx, ordered)
 	// Flush even when runTasks returned an error so records queued by tasks
 	// that completed *before* a later failure are still persisted. Failed
 	// tasks never enqueue a record (runTask only calls fingerprintStore
@@ -330,7 +347,7 @@ func (r *Runner) optimisticKey(ctx context.Context, t depgraph.Task) (fingerprin
 	if err := ctx.Err(); err != nil {
 		return fingerprint.Key{}, err
 	}
-	info := r.byKey[depgraphKey(t)]
+	info := r.byKey[t.Ref()]
 	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
 		return fingerprint.Key{}, err
@@ -387,11 +404,23 @@ func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task)
 	return depgraph.Build(tasks)
 }
 
+// findMissingDependenciesTraced wraps depgraph.FindMissingDependencies with a
+// span so the plan-time half of ADR-0013 D3 shows up in the trace tree
+// alongside the other phases.
+func (r *Runner) findMissingDependenciesTraced(ctx context.Context, ordered []depgraph.Task) []depgraph.MissingDependency {
+	_, span := r.tracer.Start(ctx, "runner.depends.validate", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer span.End()
+	missing := depgraph.FindMissingDependencies(ordered)
+	span.SetAttributes(attribute.Int("sloff.depends.missing_count", len(missing)))
+	return missing
+}
+
 // runTasks executes the topologically-ordered task list with bounded
-// concurrency. A task starts as soon as every task that produces one of its
-// inputs has finished — depgraph already sorted them, so we only need to
-// re-derive each task's predecessor set from the same output→producer mapping
-// it used. Independent tasks (the common case for fingerprint-hit runs across
+// concurrency. A task starts as soon as every declared dependency has
+// finished — depgraph already sorted them, so we only need to look up each
+// task's DependsOn indices. Independent tasks (the common case for fingerprint-hit runs across
 // service-local gen-db, where each spec's outputs sit in its own service dir)
 // fan out across NumCPU workers; tasks with real producer→consumer chains
 // (buf-default → buf-custom, build-protoc-plugins → buf-custom, …) still
@@ -454,22 +483,20 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err err
 	return err
 }
 
-// taskPredecessorIndices returns, for each task index in ordered, the set of
-// indices whose Outputs produce one of this task's Inputs. Same intersection
-// rule depgraph.Build uses internally; we recompute it here so the runner
-// stays decoupled from depgraph's internal edge representation.
+// taskPredecessorIndices returns, for each task index in ordered, the indices
+// of its declared dependencies (ADR-0013). Same edge source depgraph.Build
+// uses; we recompute it here so the runner stays decoupled from depgraph's
+// internal edge representation.
 func taskPredecessorIndices(ordered []depgraph.Task) [][]int {
-	producer := map[string]int{}
+	byRef := make(map[depgraph.TaskRef]int, len(ordered))
 	for i, t := range ordered {
-		for _, out := range t.Outputs {
-			producer[out] = i
-		}
+		byRef[t.Ref()] = i
 	}
 	preds := make([][]int, len(ordered))
 	for i, t := range ordered {
 		seen := map[int]struct{}{}
-		for _, in := range t.Inputs {
-			p, ok := producer[in]
+		for _, dep := range t.DependsOn {
+			p, ok := byRef[dep]
 			if !ok || p == i {
 				continue
 			}
@@ -502,47 +529,55 @@ func taskConcurrency(n int) int {
 }
 
 // Plan resolves all discovered specs into a topologically-ordered task list
-// without running preflight or executing any cmd. It is the planning core
-// shared with `sloff graph` (and the future `sloff run --explain` once that
-// path is wired up): same registry / Inputs path as Run, so callers observe
-// the exact set of inputs / outputs the runner would orchestrate.
+// without running preflight or executing any cmd, plus the overlap-validation
+// findings for the current tree. Callers decide severity: Run fails on a
+// non-empty missing list, `sloff graph` prints warnings and still renders
+// (the graph is a debugging surface for exactly this kind of spec problem).
 //
 // Plan deliberately calls `Registry.Inputs` only (not `Versions`) because
-// the depgraph never reads ResolvedVersions — they only feed `resolved_versions_hash`
-// (architecture.md, ADR-0008 D6 addendum). Skipping Versions means
-// `script` resolvers don't spawn `<bin> --version` here, which keeps
-// graph-style consumers usable when prebuilt binaries aren't installed.
+// the depgraph never reads ResolvedVersions — they only feed
+// `resolved_versions_hash` (architecture.md, ADR-0008 D6 addendum). Skipping
+// Versions means `script` resolvers don't spawn `<bin> --version` here, which
+// keeps graph-style consumers usable when prebuilt binaries aren't installed.
 //
 // Preflight is intentionally skipped for the same reason: debugging tools
 // that read the depgraph must remain useful when the install state is
 // drifted, since drift is one of the conditions users reach for the graph
 // to investigate.
-func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, error) {
+func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingDependency, error) {
 	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tasks, err := r.collectTasksTraced(ctx, inputsByTool, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return r.depgraphBuildTraced(ctx, tasks)
+	ordered, err := r.depgraphBuildTraced(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ordered, r.findMissingDependenciesTraced(ctx, ordered), nil
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
-// references against it, and collects the deduplicated set of names some
-// command actually pulls in. Both Run and Plan need this same triple, so the
-// helper keeps the two flows from diverging on the validation rules.
+// references against it, validates cross-spec depends references, and
+// collects the deduplicated set of names some command actually pulls in.
+// Both Run and Plan need this same triple, so the helper keeps the two flows
+// from diverging on the validation rules.
 func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 	registry, err := spec.BuildToolRegistry(r.opts.Specs)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return nil, nil, err
+	}
+	if err := spec.ValidateDependReferences(r.opts.Specs); err != nil {
 		return nil, nil, err
 	}
 	return registry, referencedTools(r.opts.Specs), nil
@@ -769,19 +804,25 @@ type taskInfo struct {
 	// the resolver registry. nil when collectTasks ran without versions
 	// (depgraph-only callers).
 	versions []toolresolver.ResolvedVersion
+
+	// inputSet is inputPaths as a set, and joinedInputPatterns are the
+	// declared input patterns pre-joined with the spec dir in slash form —
+	// both precomputed at collect time for the post-run ADR-0013 D3
+	// validation, which probes them once per produced path.
+	inputSet            map[string]struct{}
+	joinedInputPatterns []string
 }
 
 // collectTasks expands inputs/outputs for every spec command and folds each
 // task's referenced tools' contributions into the task's input set. Folding
-// extras in here is what lets depgraph wire up workspace-tool build tasks to
-// their consumers via the usual output-overlap rule, instead of needing a
-// parallel dependency channel.
+// extras in here keeps resolver-contributed sources inside files_hash and
+// makes them visible to overlap validation (ADR-0013 D3).
 //
 // versionsByTool may be nil for callers that don't need resolved_versions_hash (graph-
 // style consumers); inputsByTool must always be present so depgraph sees the
 // same inputs the runner would.
 func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) ([]depgraph.Task, error) {
-	r.byKey = map[string]taskInfo{}
+	r.byKey = map[depgraph.TaskRef]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	for _, sp := range r.opts.Specs {
 		for _, c := range sp.File.Commands {
@@ -802,19 +843,24 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 				versions = combineResolvedVersions(c.Tools, versionsByTool)
 			}
 
+			inputSet, joinedPatterns := inputSurface(sp.Dir, c.Inputs, mergedInputs)
+
 			t := depgraph.Task{
 				SpecRelpath: sp.Dir,
 				Name:        c.Name,
 				Inputs:      mergedInputs,
 				Outputs:     outputs,
+				DependsOn:   resolveDepends(sp.Dir, c.Depends),
 			}
 			tasks = append(tasks, t)
-			r.byKey[depgraphKey(t)] = taskInfo{
-				specRelpath:    sp.Dir,
-				command:        c,
-				inputPaths:     mergedInputs,
-				outputPatterns: c.Outputs,
-				versions:       versions,
+			r.byKey[t.Ref()] = taskInfo{
+				specRelpath:         sp.Dir,
+				command:             c,
+				inputPaths:          mergedInputs,
+				outputPatterns:      c.Outputs,
+				versions:            versions,
+				inputSet:            inputSet,
+				joinedInputPatterns: joinedPatterns,
 			}
 		}
 	}
@@ -845,10 +891,10 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 // Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`) are not
 // detected here; they still surface via the runtime recordProducedPaths check after
 // both cmds finish writing.
-func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[string]taskInfo) error {
+func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[depgraph.TaskRef]taskInfo) error {
 	patternProducers := map[string][]string{}
 	for _, t := range tasks {
-		info := byKey[depgraphKey(t)]
+		info := byKey[t.Ref()]
 		label := taskLabel(t)
 		specDir := filepath.ToSlash(t.SpecRelpath)
 		seen := map[string]struct{}{}
@@ -905,6 +951,48 @@ func combineResolvedVersions(names []string, versionsByTool map[string][]toolres
 	return combined
 }
 
+// resolveDepends maps declared depends entries to depgraph TaskRefs. The
+// reference rules (existence, self-reference, duplicates, repo-root escape)
+// are enforced by spec.ValidateDependReferences before collectTasks runs, so
+// this is pure path arithmetic: clean-join the consumer's spec dir with each
+// entry's relative spec path (empty = same dir), mirroring how inputs/outputs
+// globs resolve (ADR-0013 D1).
+func resolveDepends(specDir string, depends []spec.Depend) []depgraph.TaskRef {
+	if len(depends) == 0 {
+		return nil
+	}
+	dirSlash := filepath.ToSlash(specDir)
+	out := make([]depgraph.TaskRef, 0, len(depends))
+	for _, d := range depends {
+		out = append(out, depgraph.TaskRef{
+			SpecRelpath: filepath.FromSlash(path.Join(dirSlash, d.Spec)),
+			Name:        d.Task,
+		})
+	}
+	return out
+}
+
+// inputSurface precomputes the two lookup structures taskReadsPath probes:
+// the expanded input set and the spec-dir-joined slash-form patterns.
+// Patterns whose join escapes the repo root are dropped here — glob.Expand
+// already failed the run for them at collect time, so this is defensive.
+func inputSurface(specDir string, patterns, inputPaths []string) (map[string]struct{}, []string) {
+	set := make(map[string]struct{}, len(inputPaths))
+	for _, p := range inputPaths {
+		set[p] = struct{}{}
+	}
+	dirSlash := filepath.ToSlash(specDir)
+	joined := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		j := path.Join(dirSlash, pattern)
+		if glob.EscapesRoot(j) {
+			continue
+		}
+		joined = append(joined, j)
+	}
+	return set, joined
+}
+
 // mergeInputs returns the deduplicated, sorted union of declared and extra
 // input paths. Extras are normalised to OS-native form so they compare equal
 // to glob.Expand output, which uses the OS separator.
@@ -934,10 +1022,8 @@ func mergeInputs(declared, extra []string) []string {
 	return out
 }
 
-func depgraphKey(t depgraph.Task) string { return t.SpecRelpath + "\x00" + t.Name }
-
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
-	info := r.byKey[depgraphKey(t)]
+	info := r.byKey[t.Ref()]
 	versions := info.versions
 
 	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
@@ -962,7 +1048,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	span.SetAttributes(attribute.String("sloff.input.hash", inputHashAttr(inputHash)))
 
 	key := fingerprint.Key{SpecRelpath: t.SpecRelpath, TaskID: t.Name, InputHash: inputHash}
-	taskLabel := taskLabel(t)
+	ref := t.Ref()
 	hit, existing, paths, err := r.fingerprintLookup(ctx, key)
 	if err != nil {
 		return fmt.Errorf("%s: load record: %w", t.Name, err)
@@ -979,7 +1065,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	}
 	span.SetAttributes(attribute.Bool("sloff.fingerprint.hit", hit))
 	if hit {
-		if err := r.recordProducedPaths(taskLabel, paths); err != nil {
+		if err := r.recordProducedPaths(ref, paths); err != nil {
 			return err
 		}
 		r.logger.Infof("SKIP %s/%s (fingerprint hit)", t.SpecRelpath, t.Name)
@@ -995,7 +1081,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	if err != nil {
 		return fmt.Errorf("%s: %w", t.Name, err)
 	}
-	if err := r.recordProducedPaths(taskLabel, outputPaths); err != nil {
+	if err := r.recordProducedPaths(ref, outputPaths); err != nil {
 		return err
 	}
 	outputHash, err := hash.Files(r.opts.RepoRoot, outputPaths)
@@ -1166,24 +1252,155 @@ func outputsEquivalent(a, b *fingerprintv1.Output) bool {
 // conflicts that depgraph cannot see at planning time on a clean checkout, where the
 // pre-run glob expansion of generated files comes back empty. Protected by producedByMu
 // so concurrent runTask goroutines don't race on the shared map.
-func (r *Runner) recordProducedPaths(taskLabel string, paths []string) error {
+func (r *Runner) recordProducedPaths(producer depgraph.TaskRef, paths []string) error {
 	r.producedByMu.Lock()
 	defer r.producedByMu.Unlock()
 	for _, p := range paths {
-		if existing, exists := r.producedBy[p]; exists && existing != taskLabel {
-			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing, taskLabel)
+		if existing, exists := r.producedBy[p]; exists && existing != producer {
+			return fmt.Errorf("duplicate output %q produced by %s and %s; fix the spec to give each generated path exactly one writer", p, existing.Label(), producer.Label())
 		}
-		r.producedBy[p] = taskLabel
+		r.producedBy[p] = producer
 	}
 	return nil
 }
 
-func taskLabel(t depgraph.Task) string {
-	if t.SpecRelpath == "" {
-		return t.Name
+// validateProducedDependencies is the run-time half of ADR-0013 D3's
+// depends-missing check. Plan-time validation only sees files that already
+// exist; here every path actually produced during this run (fingerprint-hit
+// tasks included — their recorded outputs also pass through
+// recordProducedPaths) is matched against every other task's input surface.
+// A match without a declared depends edge means this run may have executed
+// in the wrong order — fail loudly with the exact entry to add.
+//
+// The check intentionally runs on partial output after a failed run too:
+// declared edges are filtered out, so anything it flags is a real spec
+// defect worth surfacing alongside the task failure. It executes after
+// runTasks has joined every goroutine; the snapshot lock is defensive.
+func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []depgraph.Task) (err error) {
+	_, span := r.tracer.Start(ctx, "runner.depends.validate_produced", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer endSpan(span, &err)
+
+	r.producedByMu.Lock()
+	produced := make(map[string]depgraph.TaskRef, len(r.producedBy))
+	maps.Copy(produced, r.producedBy)
+	r.producedByMu.Unlock()
+	if len(produced) == 0 {
+		return nil
 	}
-	return t.SpecRelpath + ":" + t.Name
+
+	var missing []depgraph.MissingDependency
+	for _, t := range ordered {
+		consumer := t.Ref()
+		info := r.byKey[t.Ref()]
+		byProducer := map[depgraph.TaskRef][]string{}
+		for p, producer := range produced {
+			if producer == consumer {
+				continue
+			}
+			// depends lists are short (a handful of entries); a linear scan
+			// beats building a set per task.
+			if slices.Contains(t.DependsOn, producer) {
+				continue
+			}
+			if !taskReadsPath(info, p) {
+				continue
+			}
+			byProducer[producer] = append(byProducer[producer], p)
+		}
+		producers := make([]depgraph.TaskRef, 0, len(byProducer))
+		for ref := range byProducer {
+			producers = append(producers, ref)
+		}
+		sort.Slice(producers, func(i, j int) bool { return producers[i].Label() < producers[j].Label() })
+		for _, ref := range producers {
+			// map iteration filled the groups in arbitrary order; sorting here
+			// (not via a pre-sorted path slice) enforces the
+			// MissingDependency.Files "sorted ascending" contract.
+			files := byProducer[ref]
+			sort.Strings(files)
+			missing = append(missing, depgraph.MissingDependency{Producer: ref, Consumer: consumer, Files: files})
+		}
+	}
+	span.SetAttributes(attribute.Int("sloff.depends.missing_count", len(missing)))
+	if len(missing) == 0 {
+		return nil
+	}
+	return depgraph.MissingDependenciesError(missing)
 }
+
+// taskReadsPath reports whether produced path p belongs to the task's input
+// surface: either it was in the expanded input set at collect time, or it
+// matches one of the declared input patterns — the clean-state case, where
+// the file did not exist when globs were expanded and only the pattern can
+// see it. Pattern-vs-path matching is exact and cheap (unlike the
+// glob-vs-glob intersection ADR-0004 D3 rejected).
+func taskReadsPath(info taskInfo, p string) bool {
+	if _, ok := info.inputSet[p]; ok {
+		return true
+	}
+	slashPath := filepath.ToSlash(p)
+	for _, pattern := range info.joinedInputPatterns {
+		if ok, err := doublestar.Match(pattern, slashPath); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// warnUnobservedDepends emits ADR-0013 D3's "inputs omission" warning: a
+// declared depends edge whose producer ran in this run, yet none of its
+// produced paths landed in the consumer's input surface. That usually means
+// the consumer's inputs are missing the upstream's generated files, so the
+// upstream can change without invalidating the consumer's fingerprint.
+// Conditional outputs (ADR-0004 D2) can legitimately produce zero overlap,
+// hence a warning rather than an error.
+// Safe on failed runs: producers that never ran are absent from producedBy
+// and skipped, so partial runs never produce misleading warnings.
+func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.Task) {
+	_, span := r.tracer.Start(ctx, "runner.depends.warn_unobserved", trace.WithAttributes(
+		attribute.Int("sloff.task.count", len(ordered)),
+	))
+	defer span.End()
+	warned := 0
+	defer func() { span.SetAttributes(attribute.Int("sloff.depends.unobserved_count", warned)) }()
+
+	if !slices.ContainsFunc(ordered, func(t depgraph.Task) bool { return len(t.DependsOn) > 0 }) {
+		return // no declared edges anywhere: nothing to judge
+	}
+
+	r.producedByMu.Lock()
+	producedByRef := map[depgraph.TaskRef][]string{}
+	for p, ref := range r.producedBy {
+		producedByRef[ref] = append(producedByRef[ref], p)
+	}
+	r.producedByMu.Unlock()
+
+	for _, t := range ordered {
+		info := r.byKey[t.Ref()]
+		for _, dep := range t.DependsOn {
+			outs, ran := producedByRef[dep]
+			if !ran {
+				continue
+			}
+			overlap := false
+			for _, p := range outs {
+				if taskReadsPath(info, p) {
+					overlap = true
+					break
+				}
+			}
+			if !overlap {
+				warned++
+				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); a generator that only emits some outputs in this configuration can also legitimately cause this",
+					t.Ref().Label(), dep.Label())
+			}
+		}
+	}
+}
+
+func taskLabel(t depgraph.Task) string { return t.Ref().Label() }
 
 // resolveOutputs re-expands every declared output pattern after execution and fails when
 // the union of matches is empty. A successful run that produced no declared outputs would

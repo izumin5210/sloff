@@ -14,6 +14,14 @@ func task(spec, name string, in, out []string) depgraph.Task {
 	return depgraph.Task{SpecRelpath: spec, Name: name, Inputs: in, Outputs: out}
 }
 
+func taskD(spec, name string, in, out []string, deps ...depgraph.TaskRef) depgraph.Task {
+	return depgraph.Task{SpecRelpath: spec, Name: name, Inputs: in, Outputs: out, DependsOn: deps}
+}
+
+func dref(spec, name string) depgraph.TaskRef {
+	return depgraph.TaskRef{SpecRelpath: spec, Name: name}
+}
+
 func TestEdges_NoTasksReturnsNil(t *testing.T) {
 	if got := explain.Edges(nil); got != nil {
 		t.Errorf("expected nil edges, got %v", got)
@@ -22,7 +30,7 @@ func TestEdges_NoTasksReturnsNil(t *testing.T) {
 
 func TestEdges_SingleEdgeCarriesIntersectionFile(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}),
+		taskD("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}, dref("svc", "producer")),
 		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	got := explain.Edges(tasks)
@@ -45,7 +53,7 @@ func TestEdges_SingleEdgeCarriesIntersectionFile(t *testing.T) {
 func TestEdges_MultipleJustifyingFilesDeduplicateAndSort(t *testing.T) {
 	tasks := []depgraph.Task{
 		task("", "A", []string{"src.proto"}, []string{"b.pb.go", "a.pb.go"}),
-		task("", "B", []string{"a.pb.go", "b.pb.go", "other.in"}, []string{"final.go"}),
+		taskD("", "B", []string{"a.pb.go", "b.pb.go", "other.in"}, []string{"final.go"}, dref("", "A")),
 	}
 	got := explain.Edges(tasks)
 	want := []explain.Edge{
@@ -66,7 +74,7 @@ func TestEdges_MultipleJustifyingFilesDeduplicateAndSort(t *testing.T) {
 // stable lexical order regardless of input slice order.
 func TestEdges_DiamondOrdersByToThenFrom(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("", "C", []string{"b.out", "a.out"}, []string{"c.out"}),
+		taskD("", "C", []string{"b.out", "a.out"}, []string{"c.out"}, dref("", "B"), dref("", "A")),
 		task("", "B", []string{"shared.in"}, []string{"b.out"}),
 		task("", "A", []string{"shared.in"}, []string{"a.out"}),
 	}
@@ -82,35 +90,44 @@ func TestEdges_DiamondOrdersByToThenFrom(t *testing.T) {
 	}
 }
 
-// TestEdges_SelfReferenceIsIgnored guards against a task that lists one of
-// its own outputs as an input from creating a self-loop in the graph. The
-// runner allows this (e.g. an iterative codegen that reads its previous
-// output); the explain projection should treat it as a no-op edge.
-func TestEdges_SelfReferenceIsIgnored(t *testing.T) {
+// TestEdges_DeclaredEdgeWithoutOverlapHasEmptyFiles is the clean-checkout
+// projection: the edge is declared in the spec but no generated file exists
+// yet, so the evidence list is empty and renderers fall back to the
+// "(declared)" caption.
+func TestEdges_DeclaredEdgeWithoutOverlapHasEmptyFiles(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("", "A", []string{"a.out", "src.in"}, []string{"a.out"}),
+		taskD("svc", "producer", []string{"svc/x.proto"}, nil),
+		taskD("svc", "consumer", []string{"svc/y.in"}, []string{"svc/out.go"}, dref("svc", "producer")),
+	}
+	got := explain.Edges(tasks)
+	want := []explain.Edge{
+		{
+			From: explain.TaskRef{SpecRelpath: "svc", Name: "producer"},
+			To:   explain.TaskRef{SpecRelpath: "svc", Name: "consumer"},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestEdges_OverlapWithoutDeclaredEdgeProducesNoEdge locks the inverse: file
+// overlap alone is validation territory (FindMissingDependencies), never a
+// rendered edge.
+func TestEdges_OverlapWithoutDeclaredEdgeProducesNoEdge(t *testing.T) {
+	tasks := []depgraph.Task{
+		task("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}),
+		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	if got := explain.Edges(tasks); len(got) != 0 {
-		t.Errorf("self-reference must not produce edges, got %v", got)
+		t.Errorf("expected no edges, got %v", got)
 	}
 }
 
-// TestTaskRef_LabelTreatsDotSpecRelpathAsRoot guards the rendering rule that
-// a sloff.yml discovered at the working tree root (spec.Discover sets
-// SpecRelpath="." for path.Dir("sloff.yml")) renders as just the task name,
-// matching the fingerprint layer's pathFor collapse and avoiding ".:copy"-style
-// labels in graph output.
-func TestTaskRef_LabelTreatsDotSpecRelpathAsRoot(t *testing.T) {
-	ref := explain.TaskRef{SpecRelpath: ".", Name: "copy"}
-	if got := ref.Label(); got != "copy" {
-		t.Errorf("expected bare task name, got %q", got)
-	}
-}
-
-func TestEdge_LabelSampleEmptyFilesYieldsEmpty(t *testing.T) {
+func TestEdge_LabelSampleEmptyFilesYieldsDeclared(t *testing.T) {
 	e := explain.Edge{}
-	if got := e.LabelSample(); got != "" {
-		t.Errorf("expected empty label, got %q", got)
+	if got := e.LabelSample(); got != "(declared)" {
+		t.Errorf("expected (declared), got %q", got)
 	}
 }
 
@@ -139,7 +156,7 @@ func TestEdge_LabelSampleMultipleFilesAnnotatedWithRemainder(t *testing.T) {
 // "first-file (+N more)" caption.
 func TestRenderMermaid_NodeAndEdgeOrderDeterministic(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}),
+		taskD("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}, dref("svc", "producer")),
 		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	edges := explain.Edges(tasks)
@@ -161,7 +178,7 @@ func TestRenderMermaid_NodeAndEdgeOrderDeterministic(t *testing.T) {
 // the same logical graph.
 func TestRenderDOT_QuotedLabelsMatchMermaidOrdering(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}),
+		taskD("svc", "consumer", []string{"shared.pb.go"}, []string{"out.go"}, dref("svc", "producer")),
 		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	edges := explain.Edges(tasks)

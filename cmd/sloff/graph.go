@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 	"github.com/izumin5210/sloff/internal/sloff/explain"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
@@ -28,22 +29,23 @@ func newGraphCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "graph",
-		Short: "Render the auto-detected task DAG (Mermaid or DOT)",
-		Long: `graph emits the inputs/outputs-derived dependency DAG for every
-discovered sloff.yml. Each edge is annotated with a sample of the
-files in the producer's outputs ∩ consumer's inputs intersection,
-so "why does B depend on A?" can be answered without reading every
-spec.
+		Short: "Render the declared task DAG (Mermaid or DOT)",
+		Long: `graph emits the dependency DAG declared via each task's depends
+entries for every discovered sloff.yml. Each edge is annotated with a
+sample of the files in the producer's outputs ∩ consumer's inputs
+intersection when those files exist, so "why does B depend on A?" can
+be answered without reading every spec; edges whose evidence is not
+observable in the current tree are captioned "(declared)".
 
 The subcommand is meant to remain useful in broken environments:
 preflight (install drift) and resolver Versions (e.g. <bin> --version
 for the script channel) are both skipped, since their failures don't
 affect the graph and drift / missing binaries are exactly what the
 user is trying to debug. Resolver Inputs are still resolved — failures
-there mean the depgraph would be incomplete (missing edges from
-resolver-contributed sources), so they fail loud.`,
+there mean the graph would be missing overlap evidence, so they fail
+loud.`,
 		RunE: func(cobraCmd *cobra.Command, _ []string) error {
-			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), root, pattern, format)
+			return graphE(cobraCmd.Context(), cobraCmd.OutOrStdout(), cobraCmd.ErrOrStderr(), root, pattern, format)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing sloff.yml specs")
@@ -53,7 +55,7 @@ resolver-contributed sources), so they fail loud.`,
 	return cmd
 }
 
-func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string) (err error) {
+func graphE(ctx context.Context, out, errOut io.Writer, rawRoot, pattern, format string) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -104,9 +106,14 @@ func graphE(ctx context.Context, out io.Writer, rawRoot, pattern, format string)
 		TracerProvider: tp,
 	})
 
-	tasks, err := r.Plan(ctx)
+	tasks, missing, err := r.Plan(ctx)
 	if err != nil {
 		return err
+	}
+	// ADR-0013 D3: graph downgrades the depends-missing check to a warning so
+	// the DAG stays inspectable while the user fixes the spec.
+	for _, m := range missing {
+		fmt.Fprintf(errOut, "warning: %s\n", depgraph.FormatMissing(m))
 	}
 	edges := explain.Edges(tasks)
 

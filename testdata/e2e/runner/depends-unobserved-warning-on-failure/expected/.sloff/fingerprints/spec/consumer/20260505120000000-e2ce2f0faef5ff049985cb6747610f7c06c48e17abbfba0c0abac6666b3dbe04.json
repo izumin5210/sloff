@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "spec",
+    "task_id": "consumer",
+    "cmd": "sh -c echo fixed > b-out.txt"
+  },
+  "input": {
+    "hash": "e2ce2f0faef5ff049985cb6747610f7c06c48e17abbfba0c0abac6666b3dbe04",
+    "files_hash": "6ad7f59ee49159fb00209f058bf9de3b6a0af924de7b2f88312d700f6d129730",
+    "cmd_hash": "e3ce789da9342a49d4d6fd010f08d629886dfe4ce5a6dac5597a383325217085",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "a6bcb4c193b83a680d333bb55ed9332322e8536c73ddbe14683bee34b184428a",
+    "files": [
+      {
+        "path": "spec/b-out.txt",
+        "hash": "0c3071418e6356e614898c84ed064ca95e88551bc0811b534bdf1952ecdae534"
+      }
+    ]
+  }
+}

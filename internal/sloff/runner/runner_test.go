@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,6 +140,7 @@ func runStep(opts ...runStepOption) step {
 		resolverReg.Register(pnpmRes)
 		preflightReg := preflight.NewRegistry()
 		preflightReg.Register(preflightpnpm.New(h.workdir))
+		logs := &captureLogger{t: t}
 		r := runner.New(runner.Options{
 			RepoRoot:  h.workdir,
 			Specs:     specs,
@@ -146,15 +148,43 @@ func runStep(opts ...runStepOption) step {
 			Resolvers: resolverReg,
 			Preflight: preflightReg,
 			Force:     cfg.force,
+			ReadOnly:  cfg.readOnly,
+			Logger:    logs,
 		})
-		if err := r.Run(context.Background()); err != nil {
+		err = r.Run(context.Background())
+		if cfg.wantErr != "" {
+			if err == nil {
+				t.Fatalf("Run: expected error containing %q, got nil", cfg.wantErr)
+			}
+			if !strings.Contains(err.Error(), cfg.wantErr) {
+				t.Fatalf("Run: error %q does not contain %q", err, cfg.wantErr)
+			}
+		} else if err != nil {
 			t.Fatalf("Run: %v", err)
+		}
+		if cfg.wantWarn != "" {
+			logs.mu.Lock()
+			warns := append([]string(nil), logs.warns...)
+			logs.mu.Unlock()
+			found := false
+			for _, w := range warns {
+				if strings.Contains(w, cfg.wantWarn) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("Run: no warning containing %q; warnings: %v", cfg.wantWarn, warns)
+			}
 		}
 	}
 }
 
 type runStepConfig struct {
-	force bool
+	force    bool
+	readOnly bool
+	wantErr  string
+	wantWarn string
 }
 
 type runStepOption func(*runStepConfig)
@@ -163,6 +193,50 @@ type runStepOption func(*runStepConfig)
 // fingerprint bypass path.
 func withForce() runStepOption {
 	return func(c *runStepConfig) { c.force = true }
+}
+
+// withReadOnly sets Options.ReadOnly so no fingerprint record is written.
+// Used by fixtures whose record bytes would otherwise depend on scheduling
+// order (e.g. whether an upstream output existed when a racing task hashed
+// its inputs).
+func withReadOnly() runStepOption {
+	return func(c *runStepConfig) { c.readOnly = true }
+}
+
+// expectError makes the step assert that Run fails with an error containing
+// substr, instead of failing the test on error.
+//
+// Note that runE2E still compares the workdir against expected/ afterwards:
+// an expectError case pins the failed run's on-disk side effects in its
+// golden too. Fixtures whose failed runs could leave nondeterministic
+// partial state must be made deterministic (fixed-content outputs,
+// withReadOnly to suppress order-dependent records) before snapshotting.
+func expectError(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantErr = substr }
+}
+
+// expectWarn asserts that Run logs at least one warning containing substr.
+func expectWarn(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantWarn = substr }
+}
+
+// captureLogger records warnings for expectWarn assertions while echoing all
+// runner output through t.Logf so failing tests keep their diagnostic logs.
+type captureLogger struct {
+	t     *testing.T
+	mu    sync.Mutex
+	warns []string
+}
+
+func (c *captureLogger) Infof(format string, args ...any) { c.t.Logf("sloff INFO  "+format, args...) }
+
+func (c *captureLogger) Errorf(format string, args ...any) { c.t.Logf("sloff ERROR "+format, args...) }
+
+func (c *captureLogger) Warnf(format string, args ...any) {
+	c.t.Logf("sloff WARN  "+format, args...)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warns = append(c.warns, fmt.Sprintf(format, args...))
 }
 
 func writeStep(relpath, contents string) step {
@@ -720,6 +794,8 @@ commands:
     inputs: ["a-output.txt"]
     outputs: ["b-output.txt"]
     tools: [versioner]
+    depends:
+      - task: upstream
 `
 	write("sloff.yml", yml)
 
@@ -922,19 +998,10 @@ func TestRunner_FlushPersistsRecordsAfterPartialFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(specDir, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-place a `good.txt` placeholder so depgraph sees the file at
-	// planning time and wires fail-task → ok-task. ok-task overwrites
-	// it at run time. Without the placeholder, the runner would expand
-	// fail-task.inputs against an empty disk and lose the dependency,
-	// letting fail-task race ok-task and potentially cancel its exec
-	// mid-flight via errgroup context cancellation — that race would
-	// mask the regression we want to detect.
-	if err := os.WriteFile(filepath.Join(specDir, "good.txt"), []byte(""), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// fail-task depends on ok-task via good.txt so the depgraph guarantees
+	// fail-task declares depends on ok-task so the scheduler guarantees
 	// ok-task completes (and enqueues its record) before fail-task starts
-	// failing.
+	// failing (ADR-0013: ordering comes from the declaration, not from
+	// file overlap, so no placeholder file is needed on a clean dir).
 	yml := `tools:
   versioner:
     exec: ["sh", "-c", "echo v1.0.0"]
@@ -951,6 +1018,8 @@ commands:
     inputs: ["good.txt"]
     outputs: ["never-written.txt"]
     tools: [versioner]
+    depends:
+      - task: ok-task
 `
 	if err := os.WriteFile(filepath.Join(specDir, "sloff.yml"), []byte(yml), 0o644); err != nil {
 		t.Fatal(err)
@@ -1479,6 +1548,31 @@ commands:
 	}
 }
 
+// TestRunner_DependsMissingAtRunTimeErrors covers the clean-checkout hole the
+// plan-time check cannot see: a-out.txt does not exist at plan time, so the
+// overlap is only discoverable after the producer actually writes it. The
+// run must end in the undeclared-dependency error. ReadOnly keeps the golden
+// deterministic: the consumer's record bytes would otherwise depend on
+// whether a-out.txt existed when its inputs were hashed (scheduling race).
+func TestRunner_DependsMissingAtRunTimeErrors(t *testing.T) {
+	runE2E(
+		t, "depends-missing-runtime-error",
+		runStep(withReadOnly(), expectError("undeclared task dependencies")),
+	)
+}
+
+// TestRunner_DependsWithoutObservedOverlapWarns locks ADR-0013 D3's inputs-
+// omission warning: the declared edge is honored for ordering, but no
+// produced file lands in the consumer's input surface, so the consumer's
+// fingerprint cannot invalidate when the producer changes — warn, don't fail
+// (conditional outputs can legitimately look like this).
+func TestRunner_DependsWithoutObservedOverlapWarns(t *testing.T) {
+	runE2E(
+		t, "depends-unobserved-warning",
+		runStep(expectWarn("none of the files it produced match")),
+	)
+}
+
 // TestRunner_ConcurrentFirstWriteCollapsesOnRewrite covers the rare branch of
 // ADR-0010's Save semantics: when two branches' first-writes were merged
 // (multiple `<timestamp>-<hash>.pb` for the same Key) and a subsequent run
@@ -1488,6 +1582,17 @@ commands:
 // generator (out of sloff scope), so the test forces the situation by
 // hand-crafting a pre-existing record whose output.hash deliberately
 // disagrees with what the generator currently produces.
+// TestRunner_DependsMissingAtPlanTimeErrors locks ADR-0013 D3's plan-time
+// check: produced.txt exists on disk, so the consumer/producer overlap is
+// observable before execution and Run must fail — with the exact depends
+// entry to add — without executing any task.
+func TestRunner_DependsMissingAtPlanTimeErrors(t *testing.T) {
+	runE2E(
+		t, "depends-missing-plan-error",
+		runStep(expectError("undeclared task dependencies")),
+	)
+}
+
 func TestRunner_ConcurrentFirstWriteCollapsesOnRewrite(t *testing.T) {
 	workdir := t.TempDir()
 	specDir := filepath.Join(workdir, "spec")
@@ -1596,4 +1701,38 @@ commands:
 	if postEntries[0].Name() != earlier {
 		t.Errorf("expected earliest-prefix retained (%q), got %q", earlier, postEntries[0].Name())
 	}
+}
+
+// TestRunner_DependsCleanStateOrdering is the ADR-0013 motivating scenario:
+// no generated file exists, yet the declared edge orders producer before
+// consumer (the old overlap derivation found no edge here and the consumer's
+// `cp` would race and fail). On the second run the producer is a fingerprint
+// hit; the consumer re-executes because its inputs were expanded while
+// produced.txt was still absent on run 1, so its files_hash changes once the
+// file exists — hence the two consumer records in the golden. Both runs must
+// pass run-time validation.
+func TestRunner_DependsCleanStateOrdering(t *testing.T) {
+	runE2E(
+		t, "depends-clean-state-ordering",
+		runStep(),
+		runStep(),
+	)
+}
+
+// TestRunner_DependsCrossSpec covers the {spec: ../dir, task: name} reference
+// form end to end on a clean checkout: resolution against the declaring
+// file's dir, cross-dir ordering, and per-spec record layout.
+func TestRunner_DependsCrossSpec(t *testing.T) {
+	runE2E(t, "depends-cross-spec", runStep())
+}
+
+// TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun locks that the
+// inputs-omission warning is not swallowed by an unrelated failure later in
+// the run: producer and consumer complete (declared chain), failing errors,
+// and the warning for the consumer→producer edge must still be emitted.
+func TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun(t *testing.T) {
+	runE2E(
+		t, "depends-unobserved-warning-on-failure",
+		runStep(expectError("exit status 1"), expectWarn("none of the files it produced match")),
+	)
 }

@@ -15,6 +15,8 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	yaml "github.com/goccy/go-yaml"
+
+	"github.com/izumin5210/sloff/internal/sloff/glob"
 )
 
 // File represents one parsed sloff.yml file. Each file may carry tool
@@ -26,10 +28,21 @@ type File struct {
 	Commands []Command               `yaml:"commands,omitempty"`
 }
 
+// Depend is one entry of commands[*].depends — a reference to another task
+// that must complete before this command runs (ADR-0013). Spec is the
+// dependency's spec dir relative to the sloff.yml that declares the
+// reference; empty means the same file. Depends affects scheduling only and
+// never feeds the fingerprint input_hash (ADR-0013 D4).
+type Depend struct {
+	Spec string `yaml:"spec,omitempty"`
+	Task string `yaml:"task"`
+}
+
 // Command corresponds to one entry in commands[]. Tools is a list of tool
 // names that must resolve to entries in the repo-wide tool registry.
 type Command struct {
 	Cmd     CmdLine  `yaml:"cmd"`
+	Depends []Depend `yaml:"depends,omitempty"`
 	Inputs  []string `yaml:"inputs"`
 	Name    string   `yaml:"name"`
 	Outputs []string `yaml:"outputs"`
@@ -226,6 +239,14 @@ func validateCommands(cmds []Command) error {
 				return fmt.Errorf("commands[%d] (%s): tools[%d] is empty", i, c.Name, j)
 			}
 		}
+		for j, d := range c.Depends {
+			if d.Task == "" {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: task is required", i, c.Name, j)
+			}
+			if filepath.IsAbs(d.Spec) {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: spec must be a relative path, got %q", i, c.Name, j, d.Spec)
+			}
+		}
 		if _, dup := seen[c.Name]; dup {
 			return fmt.Errorf("duplicate task name %q within the same sloff.yml", c.Name)
 		}
@@ -260,6 +281,49 @@ type Spec struct {
 var discoverSkipDirs = map[string]struct{}{
 	"node_modules": {},
 	".git":         {},
+}
+
+// ValidateDependReferences checks every commands[*].depends entry across the
+// discovered spec set (ADR-0013 D1): the referenced spec dir must stay inside
+// the repo, the referenced (spec dir, task) must exist, self-references are
+// rejected, and the same edge declared twice in one command is rejected.
+// Like ValidateToolReferences, this is a cross-file pass run on the full set
+// after Discover; per-file structural checks live in validate.
+func ValidateDependReferences(specs []Spec) error {
+	type taskKey struct{ dir, name string }
+	defined := map[taskKey]struct{}{}
+	for _, sp := range specs {
+		dir := filepath.ToSlash(sp.Dir)
+		for _, c := range sp.File.Commands {
+			defined[taskKey{dir, c.Name}] = struct{}{}
+		}
+	}
+	for _, sp := range specs {
+		dir := filepath.ToSlash(sp.Dir)
+		for _, c := range sp.File.Commands {
+			seen := map[taskKey]struct{}{}
+			for i, d := range c.Depends {
+				// path.Join cleans, so "../options" resolves against the
+				// declaring file's dir the same way inputs/outputs globs do.
+				target := path.Join(dir, d.Spec)
+				if glob.EscapesRoot(target) {
+					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", registryDefinitionPath(sp.Dir), c.Name, i, d.Spec)
+				}
+				key := taskKey{target, d.Task}
+				if target == dir && d.Task == c.Name {
+					return fmt.Errorf("%s/%s: depends[%d]: task depends on itself", registryDefinitionPath(sp.Dir), c.Name, i)
+				}
+				if _, ok := defined[key]; !ok {
+					return fmt.Errorf("%s/%s: depends[%d]: task %q not found in spec dir %q", registryDefinitionPath(sp.Dir), c.Name, i, d.Task, target)
+				}
+				if _, dup := seen[key]; dup {
+					return fmt.Errorf("%s/%s: depends[%d]: duplicate depends entry %s:%s", registryDefinitionPath(sp.Dir), c.Name, i, target, d.Task)
+				}
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return nil
 }
 
 // Discover walks root and returns each file matching pattern (a doublestar

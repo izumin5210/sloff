@@ -51,10 +51,10 @@ func TestBuild_NoDependenciesPreservesStableOrder(t *testing.T) {
 	}
 }
 
-func TestBuild_BDependsOnAPlacesABeforeB(t *testing.T) {
+func TestBuild_DeclaredDependencyOrdersProducerFirst(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("", "B", []string{"shared.proto", "x.options.pb.go"}, []string{"x.pb.go"}),
-		task("", "A", []string{"options.proto"}, []string{"x.options.pb.go"}),
+		taskD("", "B", []string{"shared.proto", "x.options.pb.go"}, []string{"x.pb.go"}, ref("", "A")),
+		taskD("", "A", []string{"options.proto"}, []string{"x.options.pb.go"}),
 	}
 	got, err := depgraph.Build(tasks)
 	if err != nil {
@@ -66,32 +66,64 @@ func TestBuild_BDependsOnAPlacesABeforeB(t *testing.T) {
 	}
 }
 
-func TestBuild_DiamondRespectsTopologicalOrder(t *testing.T) {
-	// A produces a.out; B and C consume a.out.
+// TestBuild_OverlapWithoutDependsDoesNotOrder locks ADR-0013 D2: file overlap
+// alone no longer creates edges. Ordering falls back to the stable
+// (SpecRelpath, Name) sort; the undeclared overlap is FindMissingDependencies'
+// concern, not Build's.
+func TestBuild_OverlapWithoutDependsDoesNotOrder(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("", "C", []string{"a.out"}, []string{"c.out"}),
-		task("", "B", []string{"a.out"}, []string{"b.out"}),
-		task("", "A", []string{"a.in"}, []string{"a.out"}),
+		taskD("", "consumer", []string{"mid.txt"}, []string{"out.txt"}),
+		taskD("", "producer", []string{"in.txt"}, []string{"mid.txt"}),
 	}
 	got, err := depgraph.Build(tasks)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got_names := names(got)
-	if got_names[0] != "A" {
-		t.Errorf("A must come first, got %v", got_names)
+	want := []string{"consumer", "producer"} // plain stable order, no edge
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
-	// B and C come after A in stable order
+}
+
+// TestBuild_JoinWaitsForAllDeclaredDependencies exercises a node with
+// in-degree 2: the sink must stay blocked until both declared upstreams have
+// been emitted (the cross-edge inDegree decrement path in Kahn's loop).
+func TestBuild_JoinWaitsForAllDeclaredDependencies(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "join", []string{"a.out", "b.out"}, []string{"j.out"}, ref("", "A"), ref("", "B")),
+		taskD("", "B", []string{"b.in"}, []string{"b.out"}),
+		taskD("", "A", []string{"a.in"}, []string{"a.out"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"A", "B", "join"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuild_DiamondRespectsTopologicalOrder(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "C", []string{"a.out"}, []string{"c.out"}, ref("", "A")),
+		taskD("", "B", []string{"a.out"}, []string{"b.out"}, ref("", "A")),
+		taskD("", "A", []string{"a.in"}, []string{"a.out"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"A", "B", "C"}
-	if diff := cmp.Diff(want, got_names); diff != "" {
+	if diff := cmp.Diff(want, names(got)); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestBuild_CycleErrors(t *testing.T) {
 	tasks := []depgraph.Task{
-		task("", "A", []string{"b.out"}, []string{"a.out"}),
-		task("", "B", []string{"a.out"}, []string{"b.out"}),
+		taskD("", "A", []string{"b.out"}, []string{"a.out"}, ref("", "B")),
+		taskD("", "B", []string{"a.out"}, []string{"b.out"}, ref("", "A")),
 	}
 	_, err := depgraph.Build(tasks)
 	if err == nil {
@@ -99,6 +131,31 @@ func TestBuild_CycleErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Errorf("error should mention cycle, got %v", err)
+	}
+}
+
+func TestBuild_DependencyDeclaredAcrossSpecDirs(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("svcB", "consumer", []string{"shared/proto/x.pb.go"}, []string{"svcB/y.go"}, ref("svcA", "producer")),
+		taskD("svcA", "producer", []string{"shared/proto/x.proto"}, []string{"shared/proto/x.pb.go"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"svcA:producer", "svcB:consumer"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuild_UnknownDependencyErrors(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "B", []string{"x.in"}, []string{"x.out"}, ref("", "ghost")),
+	}
+	_, err := depgraph.Build(tasks)
+	if err == nil || !strings.Contains(err.Error(), "unknown task") {
+		t.Errorf("expected unknown-task error, got %v", err)
 	}
 }
 
@@ -117,20 +174,5 @@ func TestBuild_DuplicateOutputProducersErrors(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error should mention %q, got: %v", want, err)
 		}
-	}
-}
-
-func TestBuild_DependencyDetectedAcrossSpecDirs(t *testing.T) {
-	tasks := []depgraph.Task{
-		task("svcB", "consumer", []string{"shared/proto/x.pb.go"}, []string{"svcB/y.go"}),
-		task("svcA", "producer", []string{"shared/proto/x.proto"}, []string{"shared/proto/x.pb.go"}),
-	}
-	got, err := depgraph.Build(tasks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"svcA:producer", "svcB:consumer"}
-	if diff := cmp.Diff(want, names(got)); diff != "" {
-		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }

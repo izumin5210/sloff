@@ -16,3 +16,5 @@ commands:
     inputs: ["input.txt"]
     outputs: ["output.txt"]
     tools: [codegen]
+    depends:
+      - task: build-codegen

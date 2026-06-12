@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,6 +29,24 @@ import (
 const otelShutdownTimeout = 5 * time.Second
 
 const allowStaleDepsEnv = "SLOFF_ALLOW_STALE_DEPS"
+
+// allowStaleDepsEnabled interprets SLOFF_ALLOW_STALE_DEPS as a boolean.
+// Unset and empty mean disabled; anything else must parse via
+// strconv.ParseBool, so a typo'd value fails loudly instead of silently
+// toggling the escape hatch in either direction — in particular, "0" and
+// "false" must behave exactly like unset rather than enabling read-only
+// mode and quietly stopping fingerprint writes.
+func allowStaleDepsEnabled() (bool, error) {
+	raw, ok := os.LookupEnv(allowStaleDepsEnv)
+	if !ok || raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a valid boolean: use 1/true to enable the escape hatch, 0/false (or leave it unset) to disable", allowStaleDepsEnv, raw)
+	}
+	return v, nil
+}
 
 func newRunCmd() *cobra.Command {
 	var (
@@ -83,7 +102,10 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 	}
 	span.SetAttributes(attribute.Int("sloff.spec.count", len(specs)))
 
-	readOnly := os.Getenv(allowStaleDepsEnv) != ""
+	readOnly, err := allowStaleDepsEnabled()
+	if err != nil {
+		return err
+	}
 	span.SetAttributes(attribute.Bool("sloff.read_only", readOnly))
 
 	resolvers, err := buildResolvers(root)

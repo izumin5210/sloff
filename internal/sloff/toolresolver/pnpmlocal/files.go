@@ -10,17 +10,23 @@ import (
 )
 
 // FileEnumerator returns the list of source files sloff should treat as
-// "everything in pkgDir that the user committed (or could commit)" —
+// "everything in the given pkgDirs that the user committed (or could commit)" —
 // repo-relative slash-form paths, deduplicated, but not necessarily sorted.
-// pkgDir is repo-relative OS-native form. The implementation must respect
-// .gitignore so that build outputs (typically dist/, build/, etc.) don't
-// leak into ExtraInputs (which would tie the fingerprint to artefacts the user
-// regenerates locally). Production enumerators must also exclude sloff's
-// own state directory (sloffStateDir) — see GitLsFiles for why.
+// pkgDirs are repo-relative OS-native form. Passing the whole set of a
+// package's (transitively-linked) workspace dirs in ONE call lets the
+// production enumerator batch them into a single `git ls-files` subprocess
+// instead of spawning one per dir — the dir count grows with a package's
+// workspace fan-out (e.g. graphql-gateway links a dozen packages), so the
+// per-dir spawn cost dominated the resolve phase. The implementation must
+// respect .gitignore so that build outputs (typically dist/, build/, etc.)
+// don't leak into ExtraInputs (which would tie the fingerprint to artefacts
+// the user regenerates locally). Production enumerators must also exclude
+// sloff's own state directory (sloffStateDir) — see GitLsFiles for why.
 //
 // Callers don't memoise: the resolver wraps the enumerator with its own
-// per-tool cache so each workspace dir is enumerated exactly once per run.
-type FileEnumerator func(ctx context.Context, repoRoot, pkgDir string) ([]string, error)
+// per-tool cache so a package's workspace dirs are enumerated exactly once
+// per run.
+type FileEnumerator func(ctx context.Context, repoRoot string, pkgDirs ...string) ([]string, error)
 
 // sloffStateDir is the path prefix of the directory sloff owns inside
 // the repo (fingerprints, etc.). pnpm-local enumeration must drop entries
@@ -32,9 +38,11 @@ const sloffStateDir = ".sloff/"
 
 // GitLsFiles is the default FileEnumerator: it shells out to
 //
-//	git ls-files --cached --others --exclude-standard -- <pkgDir>
+//	git ls-files --cached --others --exclude-standard -- <pkgDir>...
 //
-// run from repoRoot. The flag set returns:
+// run from repoRoot, passing every pkgDir as a pathspec so all of a package's
+// (transitively-linked) workspace dirs are enumerated in a SINGLE subprocess.
+// The flag set returns:
 //
 //   - --cached: tracked files (the canonical set the user committed)
 //   - --others --exclude-standard: untracked files NOT matched by .gitignore /
@@ -46,21 +54,30 @@ const sloffStateDir = ".sloff/"
 // that's in (or could be in) git". We rely on git rather than implementing a
 // .gitignore parser because sloff's fingerprints are already git-managed
 // and `git ls-files` is the bit-exact source of truth for "what's in this
-// repo from git's point of view".
-func GitLsFiles(ctx context.Context, repoRoot, pkgDir string) ([]string, error) {
-	relDir := filepath.ToSlash(pkgDir)
-	if relDir == "" {
-		relDir = "."
+// repo from git's point of view". git lists each matching index/worktree
+// entry once even when several pathspecs overlap, but callers still dedupe
+// defensively.
+func GitLsFiles(ctx context.Context, repoRoot string, pkgDirs ...string) ([]string, error) {
+	if len(pkgDirs) == 0 {
+		return nil, nil
 	}
 
-	cmd := exec.CommandContext(
-		ctx,
-		"git", "ls-files",
+	args := []string{
+		"ls-files",
 		"--cached",
 		"--others",
 		"--exclude-standard",
-		"--", relDir,
-	)
+		"--",
+	}
+	for _, d := range pkgDirs {
+		rel := filepath.ToSlash(d)
+		if rel == "" {
+			rel = "."
+		}
+		args = append(args, rel)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoRoot
 
 	var out, errBuf bytes.Buffer
@@ -69,9 +86,9 @@ func GitLsFiles(ctx context.Context, repoRoot, pkgDir string) ([]string, error) 
 	if err := cmd.Run(); err != nil {
 		stderr := strings.TrimSpace(errBuf.String())
 		if stderr != "" {
-			return nil, fmt.Errorf("git ls-files (dir %q): %w: %s", relDir, err, stderr)
+			return nil, fmt.Errorf("git ls-files (dirs %v): %w: %s", pkgDirs, err, stderr)
 		}
-		return nil, fmt.Errorf("git ls-files (dir %q): %w", relDir, err)
+		return nil, fmt.Errorf("git ls-files (dirs %v): %w", pkgDirs, err)
 	}
 
 	// git ls-files emits one path per line, slash-form, repo-relative.

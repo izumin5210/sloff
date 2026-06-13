@@ -46,6 +46,57 @@ func TestGitLsFiles_ReturnsTrackedAndUntrackedNonIgnored(t *testing.T) {
 	}
 }
 
+// TestGitLsFiles_BatchesMultipleDirs guards the batched-enumeration contract:
+// passing several workspace dirs in one call returns the union of their
+// files (still honouring .gitignore) from a single `git ls-files` subprocess.
+// This is the perf path — graphql-gateway transitively links a dozen packages,
+// and enumerating them per-dir spawned one git process each.
+func TestGitLsFiles_BatchesMultipleDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "packages", "codegen", "src", "cli.ts"), "x\n")
+	mustWrite(t, filepath.Join(root, "packages", "codegen", ".gitignore"), "dist/\n")
+	mustWrite(t, filepath.Join(root, "packages", "codegen", "dist", "out.js"), "compiled\n")
+	mustWrite(t, filepath.Join(root, "packages", "util", "src", "lib.ts"), "y\n")
+	mustWrite(t, filepath.Join(root, "packages", "other", "README.md"), "z\n")
+	gitInit(t, root)
+
+	got, err := pnpmlocal.GitLsFiles(
+		context.Background(),
+		root,
+		filepath.Join("packages", "codegen"),
+		filepath.Join("packages", "util"),
+	)
+	if err != nil {
+		t.Fatalf("GitLsFiles: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{
+		"packages/codegen/.gitignore",
+		"packages/codegen/src/cli.ts",
+		"packages/util/src/lib.ts",
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("batched file list mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGitLsFiles_NoDirsReturnsEmpty guards that a zero-dir call returns an
+// empty list rather than degenerating into a pathspec-less `git ls-files`
+// that would enumerate the entire repo.
+func TestGitLsFiles_NoDirsReturnsEmpty(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "src", "cli.ts"), "x\n")
+	gitInit(t, root)
+
+	got, err := pnpmlocal.GitLsFiles(context.Background(), root)
+	if err != nil {
+		t.Fatalf("GitLsFiles: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty result for zero dirs, got %v", got)
+	}
+}
+
 // TestGitLsFiles_HonoursTrackedFilesEvenWhenNowIgnored is the subtle case:
 // once a file is `git add`-ed, --cached returns it even if it later matches
 // .gitignore. This guards that we don't accidentally drop committed files.

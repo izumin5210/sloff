@@ -207,24 +207,36 @@ func (r *Resolver) loadWorkspace() (*Workspace, error) {
 	return r.workspace, r.workspaceErr
 }
 
-// collectFiles enumerates every file in each workspace dir via the injected
-// enumerator and returns the deduplicated, sorted union as repo-relative
-// slash-form paths suitable for the runner's input merge.
+// collectFiles enumerates every file across all of the package's workspace
+// dirs in a single enumerator call and returns the deduplicated, sorted union
+// as repo-relative slash-form paths suitable for the runner's input merge.
+// Batching every dir into one call (rather than one per dir) keeps the
+// production enumerator to a single `git ls-files` subprocess regardless of
+// how many workspace packages the tool transitively links.
 func (r *Resolver) collectFiles(ctx context.Context, workspaceDirs []string) ([]string, error) {
-	seen := map[string]struct{}{}
-	for _, slashDir := range workspaceDirs {
-		osDir := filepath.FromSlash(slashDir)
-		files, err := r.enumerator(ctx, r.repoRoot, osDir)
-		if err != nil {
-			return nil, fmt.Errorf("dir %q: %w", slashDir, err)
-		}
-		for _, f := range files {
-			seen[filepath.ToSlash(f)] = struct{}{}
-		}
+	if len(workspaceDirs) == 0 {
+		return nil, nil
 	}
-	out := make([]string, 0, len(seen))
-	for f := range seen {
-		out = append(out, f)
+
+	osDirs := make([]string, 0, len(workspaceDirs))
+	for _, slashDir := range workspaceDirs {
+		osDirs = append(osDirs, filepath.FromSlash(slashDir))
+	}
+
+	files, err := r.enumerator(ctx, r.repoRoot, osDirs...)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %d workspace dir(s): %w", len(osDirs), err)
+	}
+
+	seen := make(map[string]struct{}, len(files))
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		s := filepath.ToSlash(f)
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
 	sort.Strings(out)
 	return out, nil

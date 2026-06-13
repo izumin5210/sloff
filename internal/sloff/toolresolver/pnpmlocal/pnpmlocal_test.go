@@ -16,22 +16,26 @@ import (
 )
 
 // fakeEnumerator returns a fixed list per pkgDir key. Resolver tests use
-// this to keep the resolver decoupled from a real git working tree.
+// this to keep the resolver decoupled from a real git working tree. The
+// resolver now batches all of a package's workspace dirs into one enumerator
+// call, so enumerate records one calls entry per invocation (the comma-joined
+// dirs) and returns the union of the per-dir fixtures.
 type fakeEnumerator struct {
 	calls []string
 	files map[string][]string
 	err   error
 }
 
-func (f *fakeEnumerator) enumerate(_ context.Context, _, pkgDir string) ([]string, error) {
-	f.calls = append(f.calls, pkgDir)
+func (f *fakeEnumerator) enumerate(_ context.Context, _ string, pkgDirs ...string) ([]string, error) {
+	f.calls = append(f.calls, strings.Join(pkgDirs, ","))
 	if f.err != nil {
 		return nil, f.err
 	}
-	if files, ok := f.files[pkgDir]; ok {
-		return files, nil
+	var out []string
+	for _, pkgDir := range pkgDirs {
+		out = append(out, f.files[pkgDir]...)
 	}
-	return nil, nil
+	return out, nil
 }
 
 func TestResolver_Name(t *testing.T) {

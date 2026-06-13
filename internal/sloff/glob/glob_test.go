@@ -2,9 +2,12 @@ package glob_test
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"testing"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/izumin5210/sloff/internal/sloff/glob"
@@ -161,6 +164,69 @@ func TestExpand_EscapesRepoRootErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExpand_EquivalentToDoublestarGlob is the guard for the walk-once-per-base
+// optimisation: across shared bases, literal patterns, no-match patterns, a
+// missing base, and a root-anchored (base ".") pattern, the in-memory match
+// path must return exactly what a per-pattern doublestar.Glob would.
+func TestExpand_EquivalentToDoublestarGlob(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "svc", "a", "cmd", "main.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "a", "server", "server.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "a", "x.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "b", "cmd", "main.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "b", "y.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "top.go"), "")
+	mustWrite(t, filepath.Join(root, "other", "z.go"), "")
+
+	patternSets := [][]string{
+		{"svc/**/*.go"},
+		{"svc/**/cmd/main.gen.go"},
+		{"svc/**/server/server.gen.go"},
+		// Several patterns sharing the "svc" base in one pass — the case the
+		// optimisation targets (one walk, many matches).
+		{"svc/**/*.go", "svc/**/cmd/main.gen.go", "svc/**/server/server.gen.go"},
+		{"svc/top.go"},        // literal file under a base
+		{"svc/**/missing.go"}, // existing base, no match
+		{"missing/**/*.go"},   // absent base
+		{"**/*.go"},           // base "." → doublestar.Glob fallback
+	}
+	for _, ps := range patternSets {
+		got, err := glob.Expand(root, ".", ps)
+		if err != nil {
+			t.Fatalf("Expand(%v): %v", ps, err)
+		}
+		want := referenceExpand(t, root, ".", ps)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Expand(%v) diverges from doublestar.Glob (-want +got):\n%s", ps, diff)
+		}
+	}
+}
+
+// referenceExpand reproduces the pre-optimisation behaviour (one
+// doublestar.Glob per pattern) so the optimised Expander can be asserted
+// byte-for-byte equivalent.
+func referenceExpand(t *testing.T, root, specDir string, patterns []string) []string {
+	t.Helper()
+	fsys := os.DirFS(root)
+	seen := map[string]struct{}{}
+	for _, p := range patterns {
+		joined := path.Join(filepath.ToSlash(specDir), p)
+		matches, err := doublestar.Glob(fsys, joined, doublestar.WithFilesOnly())
+		if err != nil {
+			t.Fatalf("reference glob %q: %v", p, err)
+		}
+		for _, m := range matches {
+			seen[filepath.FromSlash(m)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func mustWrite(t *testing.T, path, contents string) {

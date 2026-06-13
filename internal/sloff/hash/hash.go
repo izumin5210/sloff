@@ -19,12 +19,23 @@ import (
 // not matter. Both the path and the file content contribute to the digest, so renames
 // and content changes are both detected.
 func Files(root string, paths []string) (string, error) {
+	return FilesWith(paths, func(p string) ([]byte, error) {
+		return fileSHA256(filepath.Join(root, p))
+	})
+}
+
+// FilesWith returns the same digest Files would produce for the same path set,
+// but obtains each file's raw content digest from fileDigest instead of reading
+// the disk itself. It is the single definition of the file-set digest
+// composition; callers use it to memoise or parallelise content reads (see
+// FileCache) without duplicating the composition rules.
+func FilesWith(paths []string, fileDigest func(path string) ([]byte, error)) (string, error) {
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
 
 	h := sha256.New()
 	for _, p := range sorted {
-		contentDigest, err := fileSHA256(filepath.Join(root, p))
+		contentDigest, err := fileDigest(p)
 		if err != nil {
 			return "", err
 		}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -34,7 +35,42 @@ func EscapesRoot(joined string) bool {
 // whose normalised form would resolve outside repoRoot are rejected so a
 // malformed spec can never read or hash files outside the repo.
 func Expand(repoRoot, specDir string, patterns []string) ([]string, error) {
-	fsys := os.DirFS(repoRoot)
+	return NewExpander(repoRoot).Expand(specDir, patterns)
+}
+
+// Expander expands patterns like Expand while memoising per-pattern glob
+// results within a single planning pass. Different specs routinely declare
+// the same normalised pattern (e.g. `**/*.proto` from proto/, or
+// `../go/pkg/proto/**/*.pb.go` from several spec dirs, which all join to the
+// same repo-relative pattern); without memoisation each occurrence re-walks
+// the same — often huge — subtree.
+//
+// The cache is keyed by the joined (spec-dir-resolved) pattern, so it is only
+// valid while the underlying tree is unchanged. Use it for plan-phase
+// expansion; never reuse one across task execution, which mutates the tree
+// (post-run output resolution must call Expand directly).
+//
+// Safe for concurrent use. Two goroutines racing on the same uncached
+// pattern may both walk it; the duplicate walk is accepted instead of
+// single-flighting because planning passes fan out across many distinct
+// patterns and collisions are rare.
+type Expander struct {
+	repoRoot string
+	mu       sync.Mutex
+	// cache maps the joined slash-form pattern to its raw doublestar matches
+	// (slash-form, repo-relative).
+	cache map[string][]string
+}
+
+// NewExpander returns an Expander rooted at repoRoot with an empty cache.
+func NewExpander(repoRoot string) *Expander {
+	return &Expander{repoRoot: repoRoot, cache: map[string][]string{}}
+}
+
+// Expand behaves exactly like the package-level Expand, consulting the
+// memoised per-pattern results first.
+func (e *Expander) Expand(specDir string, patterns []string) ([]string, error) {
+	fsys := os.DirFS(e.repoRoot)
 	specDirSlash := filepath.ToSlash(specDir)
 
 	seen := make(map[string]struct{})
@@ -47,9 +83,18 @@ func Expand(repoRoot, specDir string, patterns []string) ([]string, error) {
 			return nil, fmt.Errorf("glob %q escapes repo root", p)
 		}
 
-		matches, err := doublestar.Glob(fsys, joined, doublestar.WithFilesOnly())
-		if err != nil {
-			return nil, fmt.Errorf("glob %q: %w", p, err)
+		e.mu.Lock()
+		matches, ok := e.cache[joined]
+		e.mu.Unlock()
+		if !ok {
+			var err error
+			matches, err = doublestar.Glob(fsys, joined, doublestar.WithFilesOnly())
+			if err != nil {
+				return nil, fmt.Errorf("glob %q: %w", p, err)
+			}
+			e.mu.Lock()
+			e.cache[joined] = matches
+			e.mu.Unlock()
 		}
 		for _, m := range matches {
 			seen[filepath.FromSlash(m)] = struct{}{}

@@ -153,6 +153,13 @@ type Runner struct {
 	// the shared map.
 	producedByMu sync.Mutex
 	producedBy   map[string]depgraph.TaskRef
+
+	// fileCache memoises per-file content digests across the whole run.
+	// Prefetch, runTask's input re-hash, the hit-path output comparison and
+	// the post-exec output hashing all read overlapping file sets; the cache
+	// collapses those repeated reads to one per unchanged file (see
+	// hash.FileCache for the staleness rules).
+	fileCache *hash.FileCache
 }
 
 // New constructs a Runner.
@@ -178,11 +185,12 @@ func New(opts Options) *Runner {
 		tp = noop.NewTracerProvider()
 	}
 	return &Runner{
-		opts:   opts,
-		logger: logger,
-		stdout: stdout,
-		stderr: stderr,
-		tracer: tp.Tracer(runnerTracerName),
+		opts:      opts,
+		logger:    logger,
+		stdout:    stdout,
+		stderr:    stderr,
+		tracer:    tp.Tracer(runnerTracerName),
+		fileCache: hash.NewFileCache(),
 	}
 }
 
@@ -348,7 +356,7 @@ func (r *Runner) optimisticKey(ctx context.Context, t depgraph.Task) (fingerprin
 		return fingerprint.Key{}, err
 	}
 	info := r.byKey[t.Ref()]
-	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
+	filesHash, err := r.fileCache.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
 		return fingerprint.Key{}, err
 	}
@@ -824,44 +832,79 @@ type taskInfo struct {
 func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) ([]depgraph.Task, error) {
 	r.byKey = map[depgraph.TaskRef]taskInfo{}
 	tasks := make([]depgraph.Task, 0)
+	// Plan-phase expander: many specs declare patterns that join to the same
+	// repo-relative glob; memoising avoids re-walking the same large subtrees.
+	// Scoped to this pass only — post-run output resolution must observe the
+	// tree as mutated by task execution and keeps calling glob.Expand.
+	expander := glob.NewExpander(r.opts.RepoRoot)
+
+	// Expand every command's globs in parallel first: expansion is pure
+	// tree-reading I/O and a few wide patterns (whole-service `**/*.go`
+	// inputs and the like) dominate the planning wall-clock when walked one
+	// after another. The assembly pass below stays sequential so task order —
+	// and therefore depgraph input and error precedence — matches the spec
+	// declaration order exactly as before.
+	type expandedCommand struct {
+		specDir string
+		command spec.Command
+		inputs  []string
+		outputs []string
+	}
+	flat := make([]*expandedCommand, 0)
 	for _, sp := range r.opts.Specs {
 		for _, c := range sp.File.Commands {
-			inputs, err := glob.Expand(r.opts.RepoRoot, sp.Dir, c.Inputs)
+			flat = append(flat, &expandedCommand{specDir: sp.Dir, command: c})
+		}
+	}
+	g := new(errgroup.Group)
+	g.SetLimit(max(runtime.GOMAXPROCS(0), 1))
+	for _, ec := range flat {
+		g.Go(func() error {
+			inputs, err := expander.Expand(ec.specDir, ec.command.Inputs)
 			if err != nil {
-				return nil, fmt.Errorf("%s/%s: expand inputs: %w", sp.Dir, c.Name, err)
+				return fmt.Errorf("%s/%s: expand inputs: %w", ec.specDir, ec.command.Name, err)
 			}
-			outputs, err := glob.Expand(r.opts.RepoRoot, sp.Dir, c.Outputs)
+			outputs, err := expander.Expand(ec.specDir, ec.command.Outputs)
 			if err != nil {
-				return nil, fmt.Errorf("%s/%s: expand outputs: %w", sp.Dir, c.Name, err)
+				return fmt.Errorf("%s/%s: expand outputs: %w", ec.specDir, ec.command.Name, err)
 			}
+			ec.inputs, ec.outputs = inputs, outputs
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
 
-			extraInputs := combineToolInputs(c.Tools, inputsByTool)
-			mergedInputs := mergeInputs(inputs, extraInputs)
+	for _, ec := range flat {
+		c := ec.command
 
-			var versions []toolresolver.ResolvedVersion
-			if versionsByTool != nil {
-				versions = combineResolvedVersions(c.Tools, versionsByTool)
-			}
+		extraInputs := combineToolInputs(c.Tools, inputsByTool)
+		mergedInputs := mergeInputs(ec.inputs, extraInputs)
 
-			inputSet, joinedPatterns := inputSurface(sp.Dir, c.Inputs, mergedInputs)
+		var versions []toolresolver.ResolvedVersion
+		if versionsByTool != nil {
+			versions = combineResolvedVersions(c.Tools, versionsByTool)
+		}
 
-			t := depgraph.Task{
-				SpecRelpath: sp.Dir,
-				Name:        c.Name,
-				Inputs:      mergedInputs,
-				Outputs:     outputs,
-				DependsOn:   resolveDepends(sp.Dir, c.Depends),
-			}
-			tasks = append(tasks, t)
-			r.byKey[t.Ref()] = taskInfo{
-				specRelpath:         sp.Dir,
-				command:             c,
-				inputPaths:          mergedInputs,
-				outputPatterns:      c.Outputs,
-				versions:            versions,
-				inputSet:            inputSet,
-				joinedInputPatterns: joinedPatterns,
-			}
+		inputSet, joinedPatterns := inputSurface(ec.specDir, c.Inputs, mergedInputs)
+
+		t := depgraph.Task{
+			SpecRelpath: ec.specDir,
+			Name:        c.Name,
+			Inputs:      mergedInputs,
+			Outputs:     ec.outputs,
+			DependsOn:   resolveDepends(ec.specDir, c.Depends),
+		}
+		tasks = append(tasks, t)
+		r.byKey[t.Ref()] = taskInfo{
+			specRelpath:         ec.specDir,
+			command:             c,
+			inputPaths:          mergedInputs,
+			outputPatterns:      c.Outputs,
+			versions:            versions,
+			inputSet:            inputSet,
+			joinedInputPatterns: joinedPatterns,
 		}
 	}
 	if err := detectOutputPatternConflicts(tasks, r.byKey); err != nil {
@@ -1038,7 +1081,7 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	))
 	defer endSpan(span, &err)
 
-	filesHash, err := hash.Files(r.opts.RepoRoot, info.inputPaths)
+	filesHash, err := r.fileCache.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
 		return fmt.Errorf("%s: hash inputs: %w", t.Name, err)
 	}
@@ -1084,11 +1127,11 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	if err := r.recordProducedPaths(ref, outputPaths); err != nil {
 		return err
 	}
-	outputHash, err := hash.Files(r.opts.RepoRoot, outputPaths)
+	outputHash, err := r.fileCache.Files(r.opts.RepoRoot, outputPaths)
 	if err != nil {
 		return fmt.Errorf("%s: hash outputs: %w", t.Name, err)
 	}
-	files, err := perFileHashes(r.opts.RepoRoot, outputPaths)
+	files, err := r.perFileHashes(r.opts.RepoRoot, outputPaths)
 	if err != nil {
 		return fmt.Errorf("%s: per-file hash: %w", t.Name, err)
 	}
@@ -1170,7 +1213,7 @@ func (r *Runner) fingerprintLookup(ctx context.Context, key fingerprint.Key) (hi
 		return false, nil, nil, nil
 	}
 	candidate := fingerprint.FilePaths(rec.GetOutput().GetFiles())
-	current, hashErr := hash.Files(r.opts.RepoRoot, candidate)
+	current, hashErr := r.fileCache.Files(r.opts.RepoRoot, candidate)
 	if hashErr == nil && current == rec.GetOutput().GetHash() {
 		// The state attribute may already have been set to "fallback_hit"
 		// inside lookupRecord; the output-comparison promotion to "hit"
@@ -1502,10 +1545,10 @@ func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*finger
 	return out
 }
 
-func perFileHashes(root string, paths []string) ([]*fingerprintv1.FileEntry, error) {
+func (r *Runner) perFileHashes(root string, paths []string) ([]*fingerprintv1.FileEntry, error) {
 	out := make([]*fingerprintv1.FileEntry, 0, len(paths))
 	for _, p := range paths {
-		h, err := hash.File(root, p)
+		h, err := r.fileCache.FileHex(root, p)
 		if err != nil {
 			return nil, err
 		}

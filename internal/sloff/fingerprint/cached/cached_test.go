@@ -127,6 +127,41 @@ func newCached(t *testing.T) (*cached.Storage, *memStorage, string) {
 	return cached.New(mem, dir), mem, dir
 }
 
+// warmableMem is a memStorage that also implements the optional Warm hook, so
+// the decorator's forwarding can be asserted.
+type warmableMem struct {
+	*memStorage
+	warmCalls int
+}
+
+func (w *warmableMem) Warm(context.Context) error {
+	w.warmCalls++
+	return nil
+}
+
+// TestWarm_ForwardsToInnerWhenSupported locks the contract that warming the
+// decorator front-loads the inner backend's setup (e.g. DynamoDB credential
+// resolution) — the whole point of the run-start warm-up.
+func TestWarm_ForwardsToInnerWhenSupported(t *testing.T) {
+	w := &warmableMem{memStorage: newMem()}
+	s := cached.New(w, t.TempDir())
+	if err := s.Warm(context.Background()); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if w.warmCalls != 1 {
+		t.Errorf("inner.Warm calls = %d, want 1", w.warmCalls)
+	}
+}
+
+// TestWarm_NoopWhenInnerLacksWarm guards that backends without a Warm hook
+// (e.g. the local disk backend) don't break the run-start warm-up.
+func TestWarm_NoopWhenInnerLacksWarm(t *testing.T) {
+	s, _, _ := newCached(t) // inner is a plain memStorage (no Warm)
+	if err := s.Warm(context.Background()); err != nil {
+		t.Errorf("Warm should no-op when inner lacks Warm, got %v", err)
+	}
+}
+
 func TestSave_WritesThroughToCache(t *testing.T) {
 	st, mem, dir := newCached(t)
 	ctx := context.Background()

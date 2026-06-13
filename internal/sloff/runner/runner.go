@@ -203,6 +203,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		// RUN log stays uniform with cache-miss runs.
 		r.logger.Infof("force mode: fingerprint hits will be bypassed and every task re-executed")
 	}
+
+	// Front-load remote fingerprint-backend setup (e.g. DynamoDB credential
+	// resolution via the SSO/STS chain, a multi-hundred-ms to multi-second
+	// round-trip the aws-sdk-go-v2 default chain defers to the first request).
+	// Without this the cost lands on the prefetch BatchGetItem, squarely on the
+	// critical path; warming it in the background overlaps it with discovery,
+	// resolution, and task collection. Fire-and-forget: prefetch issues the
+	// real request regardless, and the SDK credential cache deduplicates
+	// concurrent resolution.
+	if w, ok := r.opts.Storage.(interface{ Warm(context.Context) error }); ok {
+		go func() { _ = w.Warm(ctx) }()
+	}
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
 	// references resolve to a defined tool, then resolve each *referenced*
 	// tool exactly once. Storing results by name lets collectTasks fan a

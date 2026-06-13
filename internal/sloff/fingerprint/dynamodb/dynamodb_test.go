@@ -60,6 +60,53 @@ func newRecord(taskID string) *fingerprintv1.Record {
 	}
 }
 
+// fakeCreds records Retrieve calls so the Warm path can be asserted without a
+// real AWS credential chain (which would do an SSO/STS round-trip).
+type fakeCreds struct{ calls int }
+
+func (f *fakeCreds) Retrieve(context.Context) (aws.Credentials, error) {
+	f.calls++
+	return aws.Credentials{AccessKeyID: "AKID", SecretAccessKey: "SECRET", Source: "fake"}, nil
+}
+
+// TestWarm_ResolvesCredentials guards that Warm forces credential resolution
+// (the run-start warm-up that keeps the SSO/STS round-trip off the prefetch
+// critical path). No kumo emulator needed — Warm only touches the provider.
+func TestWarm_ResolvesCredentials(t *testing.T) {
+	fake := &fakeCreds{}
+	st, err := ddbpkg.New(
+		context.Background(),
+		ddbpkg.Config{Table: "t"},
+		ddbpkg.WithClient(&awsddb.Client{}),
+		ddbpkg.WithCredentialsProvider(fake),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := st.Warm(context.Background()); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Errorf("creds.Retrieve calls = %d, want 1", fake.calls)
+	}
+}
+
+// TestWarm_NoopWithoutCredentials guards the WithClient (test/emulator) path
+// where no provider is set: Warm must be a harmless no-op, not a nil deref.
+func TestWarm_NoopWithoutCredentials(t *testing.T) {
+	st, err := ddbpkg.New(
+		context.Background(),
+		ddbpkg.Config{Table: "t"},
+		ddbpkg.WithClient(&awsddb.Client{}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := st.Warm(context.Background()); err != nil {
+		t.Errorf("Warm should no-op without a credentials provider, got %v", err)
+	}
+}
+
 func TestSaveLoad_RoundTrip(t *testing.T) {
 	st, _, _ := newStorage(t, 0, fixedClock)
 	ctx := context.Background()

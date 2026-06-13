@@ -93,6 +93,16 @@ func (s *Storage) CollapseDuplicates(ctx context.Context) (int, error) {
 	return s.inner.CollapseDuplicates(ctx)
 }
 
+// Warm forwards to the inner backend when it supports warming (e.g. the
+// DynamoDB backend resolving credentials), so callers can front-load remote
+// setup latency. No-op for backends that don't implement it.
+func (s *Storage) Warm(ctx context.Context) error {
+	if w, ok := s.inner.(interface{ Warm(context.Context) error }); ok {
+		return w.Warm(ctx)
+	}
+	return nil
+}
+
 // LoadMany serves cached entries directly and only goes to inner for keys
 // it could not satisfy locally. The inner result is then mirrored to the
 // cache so future runs see those keys without a network round-trip.

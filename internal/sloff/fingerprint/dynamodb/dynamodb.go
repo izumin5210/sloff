@@ -55,6 +55,7 @@ type Config struct {
 // zero value.
 type Storage struct {
 	client    *dynamodb.Client
+	creds     aws.CredentialsProvider
 	table     string
 	expiresIn time.Duration // zero means "never set TTL"
 	clock     func() time.Time
@@ -76,6 +77,13 @@ func WithClock(clock func() time.Time) Option {
 // aws-sdk-go-v2 default chain.
 func WithClient(c *dynamodb.Client) Option {
 	return func(s *Storage) { s.client = c }
+}
+
+// WithCredentialsProvider lets tests inject the provider Warm resolves. New
+// sets this from the resolved aws.Config; the WithClient path leaves it nil
+// (Warm then no-ops), so tests that want to exercise Warm pass it explicitly.
+func WithCredentialsProvider(p aws.CredentialsProvider) Option {
+	return func(s *Storage) { s.creds = p }
 }
 
 // New constructs a Storage from cfg. Credentials come from the
@@ -109,8 +117,25 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Storage, error) {
 				o.BaseEndpoint = aws.String(cfg.Endpoint)
 			}
 		})
+		st.creds = awsCfg.Credentials
 	}
 	return st, nil
+}
+
+// Warm forces credential resolution (the aws-sdk-go-v2 default chain retrieves
+// lazily on first request — with SSO/STS that is a multi-hundred-ms to
+// multi-second round-trip). Callers kick this off in the background at run
+// start so the first real request (the prefetch BatchGetItem) hits an already
+// populated credential cache instead of paying the resolution latency on the
+// critical path. Safe to call concurrently with real requests: the SDK's
+// CredentialsCache serialises resolution and shares the result. A no-op when
+// the client was injected via WithClient (tests / emulators).
+func (s *Storage) Warm(ctx context.Context) error {
+	if s.creds == nil {
+		return nil
+	}
+	_, err := s.creds.Retrieve(ctx)
+	return err
 }
 
 func loadAWSConfig(ctx context.Context, cfg Config) (aws.Config, error) {

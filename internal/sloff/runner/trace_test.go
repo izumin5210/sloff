@@ -160,8 +160,7 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 	// in scope for this test, so phases have no parent under the recorder).
 	for _, name := range []string{
 		"runner.preflight",
-		"runner.resolve.inputs",
-		"runner.resolve.versions",
+		"runner.resolve",
 		"runner.collect_tasks",
 		"runner.depgraph.build",
 		"runner.tasks.run",
@@ -171,12 +170,13 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 		}
 	}
 
-	// Per-tool resolver spans should land under resolve.inputs and resolve.versions.
-	inputsSpan := findSpan(spans, "runner.resolve.inputs")
-	if inputsSpan == nil {
-		t.Fatal("runner.resolve.inputs missing — cannot continue")
+	// Per-tool resolver spans should land under the single merged resolve span
+	// (inputs + versions are resolved together per tool — see resolveContribs).
+	resolveSpan := findSpan(spans, "runner.resolve")
+	if resolveSpan == nil {
+		t.Fatal("runner.resolve missing — cannot continue")
 	}
-	resolverChildren := childrenOf(spans, inputsSpan)
+	resolverChildren := childrenOf(spans, resolveSpan)
 	wantChild := "resolver.script[versioner]"
 	found := false
 	for _, c := range resolverChildren {
@@ -186,7 +186,7 @@ func TestTrace_FirstRunCacheMiss(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected child %q under runner.resolve.inputs, got %d children", wantChild, len(resolverChildren))
+		t.Errorf("expected child %q under runner.resolve, got %d children", wantChild, len(resolverChildren))
 	}
 
 	// runner.task.run must exist with fingerprint.hit=false on first run, and have all

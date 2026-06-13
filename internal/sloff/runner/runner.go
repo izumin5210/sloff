@@ -239,11 +239,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
-	if err != nil {
-		return err
-	}
-	versionsByTool, err := r.resolveVersionContribs(ctx, registry, referencedToolNames)
+	inputsByTool, versionsByTool, err := r.resolveContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
 	}
@@ -727,21 +723,33 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 	return out, nil
 }
 
-// resolveVersionContribs invokes Registry.Versions once per referenced tool
-// name. Same scoping discipline as resolveInputContribs.
-func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (out map[string][]toolresolver.ResolvedVersion, err error) {
-	ctx, span := r.tracer.Start(ctx, "runner.resolve.versions", trace.WithAttributes(
+// resolveContribs resolves every referenced tool's Inputs AND Versions in a
+// single parallel pass. Each tool's goroutine calls Inputs then Versions on the
+// same resolver instance, which memoises the shared discovery work (lockfile
+// walk / packages.Load / git ls-files), so the second call is a cache hit.
+//
+// This folds what used to be two sequential phases — whose wall times were
+// dominated by *different* resolvers (inputs by go-local / pnpm-local file
+// enumeration, versions by the script backend's per-tool version lookup) — into
+// one, overlapping their costs in the scheduler instead of summing them.
+//
+// Run needs both maps before collectTasks. Plan (read-only, no
+// resolved_versions_hash) still uses resolveInputContribs to skip the Versions
+// path entirely (ADR-0008 / IZU-16).
+func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (inputs map[string][]string, versions map[string][]toolresolver.ResolvedVersion, err error) {
+	ctx, span := r.tracer.Start(ctx, "runner.resolve", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
 	defer endSpan(span, &err)
 
-	results := make([][]toolresolver.ResolvedVersion, len(referenced))
+	insResults := make([][]string, len(referenced))
+	verResults := make([][]toolresolver.ResolvedVersion, len(referenced))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(resolverConcurrency(len(referenced)))
 	for i, name := range referenced {
 		entry, ok := registry.Lookup(name)
 		if !ok {
-			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
+			return nil, nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
 		}
 		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 		g.Go(func() (gerr error) {
@@ -750,28 +758,36 @@ func (r *Runner) resolveVersionContribs(ctx context.Context, registry *spec.Tool
 				trace.WithAttributes(
 					attribute.String("sloff.tool.name", entry.Name),
 					attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-					attribute.String("sloff.resolver.phase", "versions"),
 				))
 			defer endSpan(toolSpan, &gerr)
 
+			ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
+			if gerr != nil {
+				return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+			}
 			vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
 			if gerr != nil {
-				gerr = fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
-				return gerr
+				return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
 			}
-			toolSpan.SetAttributes(attribute.Int("sloff.tool.version.count", len(vs)))
-			results[i] = vs
+			toolSpan.SetAttributes(
+				attribute.Int("sloff.tool.input.count", len(ins)),
+				attribute.Int("sloff.tool.version.count", len(vs)),
+			)
+			insResults[i] = ins
+			verResults[i] = vs
 			return nil
 		})
 	}
 	if err = g.Wait(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
+	inputs = make(map[string][]string, len(referenced))
+	versions = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
 	for i, name := range referenced {
-		out[name] = results[i]
+		inputs[name] = insResults[i]
+		versions[name] = verResults[i]
 	}
-	return out, nil
+	return inputs, versions, nil
 }
 
 // resolverConcurrency caps how many resolver goroutines run in parallel.

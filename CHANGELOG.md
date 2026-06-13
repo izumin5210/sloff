@@ -1,5 +1,8 @@
 # Changelog
 
+## [v0.0.3](https://github.com/izumin5210/sloff/compare/v0.0.2...v0.0.3) - 2026-06-13
+- perf: memoise file digests and glob expansion across a run by @izumin5210 in https://github.com/izumin5210/sloff/pull/47
+
 ## [v0.0.2](https://github.com/izumin5210/sloff/compare/v0.0.1...v0.0.2) - 2026-06-12
 - ci: pin GitHub Actions to full SHAs via pinact by @izumin5210 in https://github.com/izumin5210/sloff/pull/36
 - fix(pnpmlocal): fail fast on unsupported pnpm-lock.yaml lockfileVersion by @izumin5210 in https://github.com/izumin5210/sloff/pull/40

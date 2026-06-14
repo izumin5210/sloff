@@ -188,7 +188,8 @@ func TestExpand_EquivalentToDoublestarGlob(t *testing.T) {
 		// Several patterns sharing the "svc" base in one pass — the case the
 		// optimisation targets (one walk, many matches).
 		{"svc/**/*.go", "svc/**/cmd/main.gen.go", "svc/**/server/server.gen.go"},
-		{"svc/top.go"},        // literal file under a base
+		{"svc/top.go"},        // literal file under a base (shallow → Glob)
+		{"svc/*.go"},          // single-level wildcard (shallow → Glob)
 		{"svc/**/missing.go"}, // existing base, no match
 		{"missing/**/*.go"},   // absent base
 		{"**/*.go"},           // base "." → doublestar.Glob fallback

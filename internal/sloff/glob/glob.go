@@ -167,6 +167,18 @@ func (e *Expander) computeMatches(joined string) ([]string, error) {
 		return doublestar.Glob(e.fsys, joined, doublestar.WithFilesOnly())
 	}
 
+	// Without a `**` segment the pattern matches within a bounded depth, so a
+	// direct Glob descends only as far as the pattern allows and never walks the
+	// whole subtree. The flatten-the-base reuse only pays off for recursive
+	// `**` patterns that would otherwise re-walk a shared base once per pattern;
+	// for a shallow pattern it would walk the entire base subtree for nothing
+	// (e.g. a single literal file under a large service dir). A non-segment
+	// `**` (e.g. `a**b`) at worst takes the slower base walk and still matches
+	// correctly, so the cheap substring test is safe.
+	if !strings.Contains(joined, "**") {
+		return doublestar.Glob(e.fsys, joined, doublestar.WithFilesOnly())
+	}
+
 	files, err := e.filesUnder(base)
 	if err != nil {
 		return nil, err

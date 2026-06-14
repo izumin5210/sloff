@@ -1,0 +1,55 @@
+// Schema for the host-local per-file content-digest cache (ADR-0014).
+//
+// Unlike the fingerprint Record, this cache is NOT content-addressed: it is a
+// per-machine acceleration cache keyed by absolute file path and is safe to
+// delete at any time. Byte stability is therefore not a correctness
+// requirement, but entries are still sorted by path and marshalled
+// deterministically (proto.MarshalOptions{Deterministic: true}) so the on-disk
+// file is reproducible and easy to diff while debugging.
+//
+// The serialization mirrors the fingerprint record (ADR-0009): protobuf with a
+// closed schema_version enum, no `map<,>` fields. See
+// ../../../../docs/adr/0014-persistent-file-content-hash-cache.md.
+
+syntax = "proto3";
+
+package sloff.filecache.v1;
+
+option go_package = "github.com/izumin5210/sloff/internal/proto/sloff/filecache/v1;filecachev1";
+
+// Cache is the whole on-disk file at <cache_root>/filehashes.pb. A missing,
+// unreadable, or schema-mismatched file is treated as an empty (cold) cache —
+// never an error — so a first run or a format bump simply rehashes.
+message Cache {
+  SchemaVersion schema_version = 1;
+  // One entry per cached file. Sorted by path ascending before marshal.
+  repeated Entry entries = 2;
+}
+
+// SchemaVersion is a closed enum so an incompatible on-disk cache is rejected
+// wholesale (read as cold) instead of returning incompatible digests. Bump it
+// whenever the on-disk schema OR the digest composition changes.
+enum SchemaVersion {
+  SCHEMA_VERSION_UNSPECIFIED = 0;
+  // First schema. Entry identity = (size, mtime, ctime, inode).
+  SCHEMA_VERSION_V1 = 1;
+}
+
+// Entry caches one file's content digest under its file identity. A cached
+// digest is reused only when the live stat still matches size + mtime (and
+// ctime + inode when identity_ok). See ADR-0014.
+message Entry {
+  // Absolute (root-joined) filesystem path.
+  string path = 1;
+  int64 size = 2;
+  int64 mtime_nanos = 3;
+  // Inode-change time, unix nanos; 0 when the platform has no ctime.
+  int64 ctime_nanos = 4;
+  // 0 when the platform has no inode.
+  uint64 inode = 5;
+  // Whether ctime_nanos + inode are meaningful for this entry. When false the
+  // cache degrades to (size, mtime) for this entry.
+  bool identity_ok = 6;
+  // Raw SHA-256 content digest (32 bytes).
+  bytes digest = 7;
+}

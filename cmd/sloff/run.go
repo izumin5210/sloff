@@ -48,6 +48,28 @@ func allowStaleDepsEnabled() (bool, error) {
 	return v, nil
 }
 
+const noFileHashCacheEnv = "SLOFF_NO_FILE_HASH_CACHE"
+
+// fileHashCacheDisabled interprets SLOFF_NO_FILE_HASH_CACHE as a boolean, with
+// the same strict parsing as allowStaleDepsEnabled (unset/empty = keep the
+// cache, a typo fails loudly, "0"/"false" behave like unset). It is ADR-0014's
+// escape hatch: when set, the runner skips its run-spanning per-file digest
+// cache and recomputes every digest from disk (Option C, "実測"), so a
+// suspected or corrupted filehashes.pb can never keep a stale digest alive
+// across runs. --force only bypasses fingerprint hits, not this digest cache,
+// so it is not a substitute.
+func fileHashCacheDisabled() (bool, error) {
+	raw, ok := os.LookupEnv(noFileHashCacheEnv)
+	if !ok || raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a valid boolean: use 1/true to disable the persistent file-hash cache, 0/false (or leave it unset) to keep it", noFileHashCacheEnv, raw)
+	}
+	return v, nil
+}
+
 func newRunCmd() *cobra.Command {
 	var (
 		root    string
@@ -108,6 +130,20 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 	}
 	span.SetAttributes(attribute.Bool("sloff.read_only", readOnly))
 
+	noHashCache, err := fileHashCacheDisabled()
+	if err != nil {
+		return err
+	}
+	span.SetAttributes(attribute.Bool("sloff.file_hash_cache_disabled", noHashCache))
+
+	// Leaving the path empty makes the runner keep digests in-memory only
+	// (no run-spanning persistence), which is exactly the escape hatch's
+	// "recompute from disk every run" behaviour.
+	hashCachePath := fileHashCachePath(root)
+	if noHashCache {
+		hashCachePath = ""
+	}
+
 	resolvers, err := buildResolvers(root)
 	if err != nil {
 		return err
@@ -119,14 +155,15 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 	}
 
 	r := runner.New(runner.Options{
-		RepoRoot:       root,
-		Specs:          specs,
-		Storage:        storage,
-		Resolvers:      resolvers,
-		Preflight:      buildPreflight(root),
-		ReadOnly:       readOnly,
-		Force:          force,
-		TracerProvider: tp,
+		RepoRoot:          root,
+		Specs:             specs,
+		Storage:           storage,
+		Resolvers:         resolvers,
+		Preflight:         buildPreflight(root),
+		ReadOnly:          readOnly,
+		Force:             force,
+		FileHashCachePath: hashCachePath,
+		TracerProvider:    tp,
 	})
 
 	return r.Run(ctx)

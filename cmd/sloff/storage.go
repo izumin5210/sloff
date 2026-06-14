@@ -3,12 +3,25 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/cached"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/dynamodb"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 )
+
+// fileHashCachePath returns the host-local path where the runner persists its
+// per-file content-digest cache (ADR-0014), co-located with the per-machine
+// fingerprint cache root. Returns "" when the cache root can't be derived, in
+// which case the runner keeps the digest cache in-memory only.
+func fileHashCachePath(repoRoot string) string {
+	dir, err := cached.CacheRoot(repoRoot)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "filehashes.pb")
+}
 
 // loadStorage builds the fingerprint.Storage backend selected in
 // <repoRoot>/.sloff/config.yml. The cmd layer is the single place that

@@ -2,9 +2,13 @@ package glob_test
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
+	"sort"
 	"testing"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/izumin5210/sloff/internal/sloff/glob"
@@ -161,6 +165,130 @@ func TestExpand_EscapesRepoRootErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExpand_EquivalentToDoublestarGlob is the guard for the walk-once-per-base
+// optimisation: across shared bases, literal patterns, no-match patterns, a
+// missing base, and a root-anchored (base ".") pattern, the in-memory match
+// path must return exactly what a per-pattern doublestar.Glob would.
+func TestExpand_EquivalentToDoublestarGlob(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "svc", "a", "cmd", "main.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "a", "server", "server.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "a", "x.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "b", "cmd", "main.gen.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "b", "y.go"), "")
+	mustWrite(t, filepath.Join(root, "svc", "top.go"), "")
+	mustWrite(t, filepath.Join(root, "other", "z.go"), "")
+
+	patternSets := [][]string{
+		{"svc/**/*.go"},
+		{"svc/**/cmd/main.gen.go"},
+		{"svc/**/server/server.gen.go"},
+		// Several patterns sharing the "svc" base in one pass — the case the
+		// optimisation targets (one walk, many matches).
+		{"svc/**/*.go", "svc/**/cmd/main.gen.go", "svc/**/server/server.gen.go"},
+		{"svc/top.go"},        // literal file under a base (shallow → Glob)
+		{"svc/*.go"},          // single-level wildcard (shallow → Glob)
+		{"svc/**/missing.go"}, // existing base, no match
+		{"missing/**/*.go"},   // absent base
+		{"**/*.go"},           // base "." → doublestar.Glob fallback
+	}
+	for _, ps := range patternSets {
+		got, err := glob.Expand(root, ".", ps)
+		if err != nil {
+			t.Fatalf("Expand(%v): %v", ps, err)
+		}
+		want := referenceExpand(t, root, ".", ps)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Expand(%v) diverges from doublestar.Glob (-want +got):\n%s", ps, diff)
+		}
+	}
+}
+
+// TestExpand_FollowsSymlinkedDirs guards the walk-once-per-base optimisation
+// against a symlink regression: doublestar.Glob descends into directory
+// symlinks, so the in-memory match path must enumerate files through them too.
+// fs.WalkDir does not follow symlinks, which silently dropped these inputs.
+func TestExpand_FollowsSymlinkedDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "svc", "real", "a.go"), "")
+	mustWrite(t, filepath.Join(root, "external", "b.go"), "")
+	if err := os.Symlink(filepath.Join(root, "external"), filepath.Join(root, "svc", "link")); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	patterns := []string{"svc/**/*.go"}
+	got, err := glob.Expand(root, ".", patterns)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	want := referenceExpand(t, root, ".", patterns)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Expand diverges from doublestar.Glob (-want +got):\n%s", diff)
+	}
+	// Guard against a vacuous pass: the file reached only through the symlink
+	// must actually be present in the result.
+	linkFile := filepath.Join("svc", "link", "b.go")
+	if !slices.Contains(got, linkFile) {
+		t.Errorf("expected %q (reached via symlink) in results, got %v", linkFile, got)
+	}
+}
+
+// TestExpand_LiteralMetaInBaseDir guards the walk-once-per-base optimisation
+// against directories whose names contain glob metacharacters (e.g. a dir
+// literally named "[api]"). doublestar.SplitPattern returns the literal base
+// with its escapes stripped, so feeding it back into a glob would treat those
+// characters as a pattern and silently drop every file under the directory.
+func TestExpand_LiteralMetaInBaseDir(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "web", "[api]", "a.ts"), "")
+	mustWrite(t, filepath.Join(root, "web", "[api]", "sub", "b.ts"), "")
+	mustWrite(t, filepath.Join(root, "web", "[api]", "c.txt"), "")
+
+	patternSets := [][]string{
+		{`web/\[api\]/**/*.ts`}, // recursive → per-base enumeration path
+		{`web/\[api\]/*.ts`},    // shallow → direct Glob path
+		{`web/\[api\]/**`},      // recursive, every file
+	}
+	for _, ps := range patternSets {
+		got, err := glob.Expand(root, ".", ps)
+		if err != nil {
+			t.Fatalf("Expand(%v): %v", ps, err)
+		}
+		want := referenceExpand(t, root, ".", ps)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Expand(%v) diverges from doublestar.Glob (-want +got):\n%s", ps, diff)
+		}
+		if len(got) == 0 {
+			t.Errorf("Expand(%v) returned nothing; the bracket dir was likely parsed as a glob class", ps)
+		}
+	}
+}
+
+// referenceExpand reproduces the pre-optimisation behaviour (one
+// doublestar.Glob per pattern) so the optimised Expander can be asserted
+// byte-for-byte equivalent.
+func referenceExpand(t *testing.T, root, specDir string, patterns []string) []string {
+	t.Helper()
+	fsys := os.DirFS(root)
+	seen := map[string]struct{}{}
+	for _, p := range patterns {
+		joined := path.Join(filepath.ToSlash(specDir), p)
+		matches, err := doublestar.Glob(fsys, joined, doublestar.WithFilesOnly())
+		if err != nil {
+			t.Fatalf("reference glob %q: %v", p, err)
+		}
+		for _, m := range matches {
+			seen[filepath.FromSlash(m)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func mustWrite(t *testing.T, path, contents string) {

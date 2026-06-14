@@ -100,11 +100,14 @@ within-run FileCache の (size, mtime) キーをそのままディスク永続�
   必ず更新される** (mtime は保存できても ctime は userspace から保存できない)。
   Option A が取りこぼす保存系操作をこの 1 軸で捕捉できる
 - inode を加えると削除 → 再作成の取り違えも防げる
-- racy guard (保存時刻から見て mtime **または** ctime が直近で settle していない
-  ファイルは保存しない = dirty 扱い) で「同一解像度内の書込みレース」も保守的に
-  再ハッシュへ倒す。ctime も対象にするのが要点で、mtime 保存系操作では ctime だけが
-  新鮮なため、mtime のみ見ると粗い ctime 解像度の FS で「ハッシュ直後の mtime 保存
-  書き換え」を取りこぼし stale を返しうる
+- racy guard (**観測 (= run 開始) 時刻**から見て mtime **または** ctime が
+  racyMargin 以内 = まだ settle していないファイルは保存しない = dirty 扱い) で
+  「同一解像度内の書込みレース」も保守的に再ハッシュへ倒す。基準は run 開始時刻に
+  固定し、**保存時刻 (Save は run 終了時に遅延実行) は使わない**。長い run では
+  「ハッシュ直後に同 tick で書き換わったファイル」も save 時には racyMargin を
+  超えて settled に見えてしまい、stale を保存しうるため。また ctime も対象にするのが
+  要点で、mtime 保存系操作では ctime だけが新鮮なため、mtime のみ見ると粗い ctime
+  解像度の FS で「ハッシュ直後の mtime 保存書き換え」を取りこぼし stale を返しうる
 - 変化検出は stat 1 回 (~µs) で、read+SHA (~十µs〜) より十分安い (R3)
 
 👎 **Cons**

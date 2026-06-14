@@ -325,6 +325,31 @@ func TestFileCache_SaveDropsRacyEntries(t *testing.T) {
 	}
 }
 
+// TestFileCache_RacyCheckAnchoredToRunStart guards against measuring the racy
+// window from the (deferred) Save time. A long run started while a file's
+// stamps were still in the racy window must drop that entry even though Save
+// happens many seconds later — anchoring to Save time would persist a digest a
+// same-tick rewrite has already made stale.
+func TestFileCache_RacyCheckAnchoredToRunStart(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
+	c := NewPersistentFileCache(cachePath)
+	// Run started an hour ago, in the same tick as the file's stamps; Save runs
+	// now (real clock), far outside racyMargin from those stamps.
+	start := time.Now().Add(-time.Hour)
+	c.startedAt = start
+	c.entries = map[string]fileCacheEntry{
+		"/x": {size: 1, mtime: start, ctime: start.UnixNano(), inode: 1, idOK: true, digest: []byte("d")},
+	}
+	if err := c.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	c2 := NewPersistentFileCache(cachePath)
+	if _, ok := c2.entries["/x"]; ok {
+		t.Error("entry observed within racyMargin of run start must not persist, even when Save is deferred past the window")
+	}
+}
+
 // TestFileCache_IgnoresVersionMismatch: a cache written with an incompatible
 // schema version is ignored wholesale (cold), never returning incompatible
 // digests.

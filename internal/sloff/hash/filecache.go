@@ -43,6 +43,12 @@ type FileCache struct {
 	entries map[string]fileCacheEntry // keyed by full (root-joined) path
 
 	savePath string // "" disables cross-run persistence
+
+	// startedAt anchors the racy-window check to run start rather than the
+	// (deferred) Save time. A file hashed early on a coarse-timestamp FS and
+	// rewritten in the same tick must still be judged racy even when the run —
+	// and thus Save — finishes many seconds later. See entryIsRacy.
+	startedAt time.Time
 }
 
 type fileCacheEntry struct {
@@ -56,7 +62,7 @@ type fileCacheEntry struct {
 
 // NewFileCache returns an empty, non-persistent FileCache (single-run memoise).
 func NewFileCache() *FileCache {
-	return &FileCache{entries: map[string]fileCacheEntry{}}
+	return &FileCache{entries: map[string]fileCacheEntry{}, startedAt: time.Now()}
 }
 
 // NewPersistentFileCache returns a FileCache seeded from a prior run's digests
@@ -64,7 +70,7 @@ func NewFileCache() *FileCache {
 // version-mismatched file yields an empty (cold) cache — never an error — so a
 // first run or a format bump simply rehashes. See ADR-0014.
 func NewPersistentFileCache(path string) *FileCache {
-	c := &FileCache{entries: map[string]fileCacheEntry{}, savePath: path}
+	c := &FileCache{entries: map[string]fileCacheEntry{}, savePath: path, startedAt: time.Now()}
 	c.load()
 	return c
 }
@@ -217,26 +223,28 @@ func entryMatches(e fileCacheEntry, fi os.FileInfo, ctime int64, inode uint64, i
 // rejected wholesale instead of returning incompatible digests.
 const cacheSchemaVersion = filecachev1.SchemaVersion_SCHEMA_VERSION_V1
 
-// racyMargin is the window around the save time within which a file's timestamp
-// is considered unsettled: the file may have been rewritten within the same
-// (possibly coarse) tick after we hashed it, so trusting it next run could
-// serve a stale digest. Such entries are dropped on Save (cheap to rehash).
-// Mirrors Git's racy-clean handling.
+// racyMargin is the window around the run-start (observation) time within which
+// a file's timestamp is considered unsettled: the file may have been rewritten
+// within the same (possibly coarse) tick after we hashed it, so trusting it
+// next run could serve a stale digest. Such entries are dropped on Save (cheap
+// to rehash). Mirrors Git's racy-clean handling.
 const racyMargin = 2 * time.Second
 
-// entryIsRacy reports whether e is too fresh to persist: racy when its mtime —
-// or, on identity-bearing platforms, its ctime — falls within racyMargin of
-// now. Checking ctime is essential, not redundant: mtime-preserving operations
-// (rsync --times / tar / cp -p / restore) advance only ctime, so a
-// same-(size, mtime) rewrite right after hashing would read back as a cache hit
-// and serve a stale digest unless its racy ctime drops the entry here. When the
-// platform has no identity (idOK == false) ctime is meaningless and ignored,
-// degrading to the mtime-only guard.
-func entryIsRacy(e fileCacheEntry, now time.Time) bool {
-	if now.Sub(e.mtime) < racyMargin {
+// entryIsRacy reports whether e is too fresh to persist, judged against ref —
+// the instant the run started, which bounds when its files were observed/hashed
+// — and NOT the deferred Save time (a long run would otherwise age every entry
+// out of the window). Racy when e's mtime — or, on identity-bearing platforms,
+// its ctime — falls within racyMargin of ref. Checking ctime is essential, not
+// redundant: mtime-preserving operations (rsync --times / tar / cp -p / restore)
+// advance only ctime, so a same-(size, mtime) rewrite right after hashing would
+// read back as a cache hit and serve a stale digest unless its racy ctime drops
+// the entry here. When the platform has no identity (idOK == false) ctime is
+// meaningless and ignored, degrading to the mtime-only guard.
+func entryIsRacy(e fileCacheEntry, ref time.Time) bool {
+	if ref.Sub(e.mtime) < racyMargin {
 		return true
 	}
-	if e.idOK && now.Sub(time.Unix(0, e.ctime)) < racyMargin {
+	if e.idOK && ref.Sub(time.Unix(0, e.ctime)) < racyMargin {
 		return true
 	}
 	return false
@@ -270,12 +278,15 @@ func (c *FileCache) load() {
 // contract: a stale or missing cache only costs rehashing next run, never
 // correctness, so callers may ignore the error.
 func (c *FileCache) Save() error {
-	return c.saveAt(time.Now())
+	return c.saveAt(c.startedAt)
 }
 
-// saveAt is Save with an injectable reference time, so the racy-window logic
-// can be tested deterministically without sleeping. Save passes the wall clock.
-func (c *FileCache) saveAt(now time.Time) error {
+// saveAt is Save with an injectable reference time — the run-start instant the
+// racy window is measured against — so the racy logic can be tested
+// deterministically without sleeping. Save passes c.startedAt; it deliberately
+// does NOT read the wall clock here, because a long run would otherwise push
+// just-hashed files out of the racy window by the time Save runs.
+func (c *FileCache) saveAt(ref time.Time) error {
 	if c.savePath == "" {
 		return nil
 	}
@@ -286,7 +297,7 @@ func (c *FileCache) saveAt(now time.Time) error {
 		Entries:       make([]*filecachev1.Entry, 0, len(c.entries)),
 	}
 	for path, e := range c.entries {
-		if entryIsRacy(e, now) {
+		if entryIsRacy(e, ref) {
 			continue
 		}
 		pc.Entries = append(pc.Entries, &filecachev1.Entry{

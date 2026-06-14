@@ -1,11 +1,14 @@
 package hash
 
 import (
-	"encoding/gob"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	filecachev1 "github.com/izumin5210/sloff/internal/proto/sloff/filecache/v1"
 )
 
 func writeFile(t *testing.T, root, rel, content string) {
@@ -132,7 +135,7 @@ func TestFileCache_PersistsAcrossInstances(t *testing.T) {
 	writeFile(t, root, "a.txt", "alpha")
 	full := filepath.Join(root, "a.txt")
 	ageFile(t, full)
-	cachePath := filepath.Join(t.TempDir(), "fh.gob")
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
 
 	c1 := NewPersistentFileCache(cachePath)
 	want, err := c1.Files(root, []string{"a.txt"})
@@ -163,7 +166,7 @@ func TestFileCache_PersistContentChangeNotStale(t *testing.T) {
 	writeFile(t, root, "a.txt", "alpha")
 	full := filepath.Join(root, "a.txt")
 	ageFile(t, full)
-	cachePath := filepath.Join(t.TempDir(), "fh.gob")
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
 
 	c1 := NewPersistentFileCache(cachePath)
 	stale, _ := c1.Files(root, []string{"a.txt"})
@@ -206,7 +209,7 @@ func TestFileCache_CtimeInvalidatesMtimePreservedRewrite(t *testing.T) {
 	}
 	oldMtime := fi.ModTime()
 
-	cachePath := filepath.Join(t.TempDir(), "fh.gob")
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
 	c1 := NewPersistentFileCache(cachePath)
 	stale, _ := c1.Files(root, []string{"a.txt"})
 	if err := c1.Save(); err != nil {
@@ -247,7 +250,7 @@ func TestFileCache_RacyEntryNotPersisted(t *testing.T) {
 	recent := filepath.Join(root, "recent.txt")
 	ageFile(t, stable) // settled; recent keeps its just-written (now) mtime
 
-	cachePath := filepath.Join(t.TempDir(), "fh.gob")
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
 	c1 := NewPersistentFileCache(cachePath)
 	if _, err := c1.Files(root, []string{"stable.txt", "recent.txt"}); err != nil {
 		t.Fatal(err)
@@ -265,22 +268,20 @@ func TestFileCache_RacyEntryNotPersisted(t *testing.T) {
 	}
 }
 
-// TestFileCache_IgnoresVersionMismatch: a cache written by an incompatible
-// format version is ignored wholesale (cold), never returning incompatible
+// TestFileCache_IgnoresVersionMismatch: a cache written with an incompatible
+// schema version is ignored wholesale (cold), never returning incompatible
 // digests.
 func TestFileCache_IgnoresVersionMismatch(t *testing.T) {
-	cachePath := filepath.Join(t.TempDir(), "fh.gob")
-	f, err := os.Create(cachePath)
+	cachePath := filepath.Join(t.TempDir(), "fh.pb")
+	b, err := proto.Marshal(&filecachev1.Cache{
+		SchemaVersion: filecachev1.SchemaVersion(99), // unsupported / future
+		Entries:       []*filecachev1.Entry{{Path: "/x", Digest: []byte("d")}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	enc := gob.NewEncoder(f).Encode(persistedCache{
-		Version: fileCacheFormatVersion + 1,
-		Entries: []persistedEntry{{Path: "/x", Digest: []byte("d")}},
-	})
-	f.Close()
-	if enc != nil {
-		t.Fatal(enc)
+	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	c := NewPersistentFileCache(cachePath)

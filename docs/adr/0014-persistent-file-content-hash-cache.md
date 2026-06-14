@@ -155,7 +155,16 @@ within-run のみ。warm run でも全 input を毎回ハッシュ。
 
 format / 無効化:
 
-- キャッシュファイルに **format version** を持たせ、sloff 側の digest 規約変更時は全体 invalidate
+- **on-disk フォーマットは protobuf** (`proto/sloff/filecache/v1/filecache.proto` の
+  `Cache` メッセージ) とする。fingerprint record ([ADR-0009](./0009-fingerprint-binary-serialization.md))
+  と同じ方式に揃え、`gob` のような Go 専用・スキーマレスな表現を避ける
+  (スキーマの明示・後方互換の管理・将来の言語/ツール跨ぎの読み取りがしやすい)
+- バージョンは **closed enum** (`SchemaVersion`) で持たせ、sloff 側の on-disk スキーマ
+  または digest 規約変更時はキャッシュ全体を invalidate (cold 扱い) する。
+  fingerprint と同様、互換性のないキャッシュは読み飛ばして再ハッシュに倒せる
+- エントリは marshal 前に path でソートし `Deterministic: true` で書き出す。
+  content-addressed ではない (削除しても安全な per-machine キャッシュ) ため byte 一致は
+  正確性要件ではないが、再現性とデバッグ時の差分の取りやすさのために決定的に書く
 - 不安時の **escape hatch** (`SLOFF_*` env でキャッシュ無効化) を用意し、疑わしければ
   常に「実測 (C 相当)」に戻せるようにする
 

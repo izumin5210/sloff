@@ -20,7 +20,7 @@ func fileHashCachePath(repoRoot string) string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "filehashes.v1.gob")
+	return filepath.Join(dir, "filehashes.pb")
 }
 
 // loadStorage builds the fingerprint.Storage backend selected in

@@ -1,7 +1,6 @@
 package hash
 
 import (
-	"encoding/gob"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -11,6 +10,9 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
+
+	filecachev1 "github.com/izumin5210/sloff/internal/proto/sloff/filecache/v1"
 )
 
 // FileCache memoises per-file content digests keyed by file identity, so one
@@ -166,10 +168,12 @@ func entryMatches(e fileCacheEntry, fi os.FileInfo, ctime int64, inode uint64, i
 
 // --- cross-run persistence (ADR-0014) -------------------------------------
 
-// fileCacheFormatVersion is bumped whenever the on-disk schema or the digest
-// composition changes, so a stale cache is ignored wholesale instead of
-// returning incompatible digests.
-const fileCacheFormatVersion = 1
+// cacheSchemaVersion is the schema embedded in newly written caches. The
+// on-disk format is protobuf (filecachev1.Cache), mirroring the fingerprint
+// record (ADR-0009). Bump the enum (V2, …) whenever the on-disk schema OR the
+// digest composition changes, so a cache written by an incompatible binary is
+// rejected wholesale instead of returning incompatible digests.
+const cacheSchemaVersion = filecachev1.SchemaVersion_SCHEMA_VERSION_V1
 
 // racyMargin drops entries whose file mtime is within this window of the save
 // time: such a file may have been rewritten within the same (possibly coarse)
@@ -177,42 +181,25 @@ const fileCacheFormatVersion = 1
 // digest. They are cheap to rehash. Mirrors Git's racy-clean handling.
 const racyMargin = 2 * time.Second
 
-type persistedEntry struct {
-	Path       string
-	Size       int64
-	MtimeNanos int64
-	Ctime      int64
-	Inode      uint64
-	IDOK       bool
-	Digest     []byte
-}
-
-type persistedCache struct {
-	Version int
-	Entries []persistedEntry
-}
-
-// load seeds entries from savePath, best-effort. Any error or version mismatch
-// leaves the cache empty (cold).
+// load seeds entries from savePath, best-effort. Any read / decode error or
+// schema-version mismatch leaves the cache empty (cold).
 func (c *FileCache) load() {
-	f, err := os.Open(c.savePath)
+	b, err := os.ReadFile(c.savePath)
 	if err != nil {
 		return
 	}
-	defer f.Close()
-
-	var pc persistedCache
-	if err := gob.NewDecoder(f).Decode(&pc); err != nil || pc.Version != fileCacheFormatVersion {
+	var pc filecachev1.Cache
+	if err := proto.Unmarshal(b, &pc); err != nil || pc.GetSchemaVersion() != cacheSchemaVersion {
 		return
 	}
-	for _, pe := range pc.Entries {
-		c.entries[pe.Path] = fileCacheEntry{
-			size:   pe.Size,
-			mtime:  time.Unix(0, pe.MtimeNanos),
-			ctime:  pe.Ctime,
-			inode:  pe.Inode,
-			idOK:   pe.IDOK,
-			digest: pe.Digest,
+	for _, pe := range pc.GetEntries() {
+		c.entries[pe.GetPath()] = fileCacheEntry{
+			size:   pe.GetSize(),
+			mtime:  time.Unix(0, pe.GetMtimeNanos()),
+			ctime:  pe.GetCtimeNanos(),
+			inode:  pe.GetInode(),
+			idOK:   pe.GetIdentityOk(),
+			digest: pe.GetDigest(),
 		}
 	}
 }
@@ -228,30 +215,44 @@ func (c *FileCache) Save() error {
 	now := time.Now()
 
 	c.mu.Lock()
-	pc := persistedCache{Version: fileCacheFormatVersion, Entries: make([]persistedEntry, 0, len(c.entries))}
+	pc := &filecachev1.Cache{
+		SchemaVersion: cacheSchemaVersion,
+		Entries:       make([]*filecachev1.Entry, 0, len(c.entries)),
+	}
 	for path, e := range c.entries {
 		if now.Sub(e.mtime) < racyMargin {
 			continue
 		}
-		pc.Entries = append(pc.Entries, persistedEntry{
+		pc.Entries = append(pc.Entries, &filecachev1.Entry{
 			Path:       path,
 			Size:       e.size,
 			MtimeNanos: e.mtime.UnixNano(),
-			Ctime:      e.ctime,
+			CtimeNanos: e.ctime,
 			Inode:      e.inode,
-			IDOK:       e.idOK,
+			IdentityOk: e.idOK,
 			Digest:     e.digest,
 		})
 	}
 	c.mu.Unlock()
 
+	// Sort by path so the marshalled bytes are reproducible (mirrors the
+	// fingerprint Sort discipline); the map iteration order above is otherwise
+	// nondeterministic.
+	sort.Slice(pc.Entries, func(i, j int) bool {
+		return pc.Entries[i].GetPath() < pc.Entries[j].GetPath()
+	})
+
 	return writeCacheAtomic(c.savePath, pc)
 }
 
-// writeCacheAtomic encodes pc to a temp file in the destination directory and
-// renames it into place, so a crashed / concurrent run never observes a
-// half-written cache.
-func writeCacheAtomic(path string, pc persistedCache) error {
+// writeCacheAtomic marshals pc and writes it to a temp file in the destination
+// directory, then renames it into place, so a crashed / concurrent run never
+// observes a half-written cache.
+func writeCacheAtomic(path string, pc *filecachev1.Cache) error {
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(pc)
+	if err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -263,7 +264,7 @@ func writeCacheAtomic(path string, pc persistedCache) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op after a successful rename
 
-	if err := gob.NewEncoder(tmp).Encode(pc); err != nil {
+	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}

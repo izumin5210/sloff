@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.4](https://github.com/izumin5210/sloff/compare/v0.0.3...v0.0.4) - 2026-06-14
+- perf(pnpmlocal): batch git ls-files across a tool's workspace dirs by @izumin5210 in https://github.com/izumin5210/sloff/pull/49
+- perf(fingerprint): warm DynamoDB credentials in the background at run start by @izumin5210 in https://github.com/izumin5210/sloff/pull/51
+- perf(runner): cut setup-phase latency (glob walk, resolve merge, file-hash cache) by @izumin5210 in https://github.com/izumin5210/sloff/pull/52
+
 ## [v0.0.3](https://github.com/izumin5210/sloff/compare/v0.0.2...v0.0.3) - 2026-06-13
 - perf: memoise file digests and glob expansion across a run by @izumin5210 in https://github.com/izumin5210/sloff/pull/47
 

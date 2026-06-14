@@ -78,8 +78,9 @@ type Expander struct {
 
 	baseMu sync.Mutex
 	// baseFiles maps a literal base dir (slash-form, repo-relative) to every
-	// regular file beneath it (slash-form, repo-relative). nil entry = the
-	// base does not exist (parity with doublestar.Glob's empty result).
+	// regular file beneath it (slash-form, repo-relative). An empty entry means
+	// the base has no files or does not exist (parity with doublestar.Glob's
+	// empty result), and is still cached so siblings skip the re-walk.
 	baseFiles map[string][]string
 }
 
@@ -187,14 +188,15 @@ func (e *Expander) computeMatches(joined string) ([]string, error) {
 // repo-relative), walking it once and memoising the result so sibling patterns
 // reuse it.
 //
-// The enumeration goes through doublestar (a `base/**` glob, files-only) rather
-// than fs.WalkDir so it descends into symlinked directories exactly as a
-// per-pattern doublestar.Glob would — fs.WalkDir does not follow symlinks and
-// would silently drop inputs reachable only through one, diverging from the
-// pre-optimisation behaviour this path must stay equivalent to. The base is
-// still walked just once, so the optimisation holds. A non-existent base yields
-// an empty list, matching the empty result doublestar.Glob produces for a
-// pattern whose base is absent.
+// base is the literal prefix doublestar.SplitPattern peeled off the pattern,
+// and SplitPattern unescapes it — so a directory named e.g. `[api]` arrives as
+// the four bytes `[api]`. We therefore must NOT splice base back into a glob
+// string (`base+"/**"` would parse `[api]` as a character class and match
+// nothing). Instead fs.Sub roots a subtree FS at base literally, and `**` is
+// globbed inside it. fs.Sub keeps delegating Stat to the os.DirFS, so the walk
+// still follows symlinked directories exactly as a per-pattern doublestar.Glob
+// would. A non-existent base yields an empty list, matching the empty result
+// doublestar.Glob produces for a pattern whose base is absent.
 func (e *Expander) filesUnder(base string) ([]string, error) {
 	e.baseMu.Lock()
 	cached, ok := e.baseFiles[base]
@@ -203,11 +205,17 @@ func (e *Expander) filesUnder(base string) ([]string, error) {
 		return cached, nil
 	}
 
-	// base carries no meta characters (it is the literal prefix from
-	// SplitPattern), so `base/**` enumerates every regular file beneath it.
-	files, err := doublestar.Glob(e.fsys, base+"/**", doublestar.WithFilesOnly())
+	sub, err := fs.Sub(e.fsys, base)
 	if err != nil {
 		return nil, err
+	}
+	rel, err := doublestar.Glob(sub, "**", doublestar.WithFilesOnly())
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, len(rel))
+	for i, r := range rel {
+		files[i] = base + "/" + r
 	}
 
 	e.baseMu.Lock()

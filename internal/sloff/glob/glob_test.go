@@ -234,6 +234,37 @@ func TestExpand_FollowsSymlinkedDirs(t *testing.T) {
 	}
 }
 
+// TestExpand_LiteralMetaInBaseDir guards the walk-once-per-base optimisation
+// against directories whose names contain glob metacharacters (e.g. a dir
+// literally named "[api]"). doublestar.SplitPattern returns the literal base
+// with its escapes stripped, so feeding it back into a glob would treat those
+// characters as a pattern and silently drop every file under the directory.
+func TestExpand_LiteralMetaInBaseDir(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "web", "[api]", "a.ts"), "")
+	mustWrite(t, filepath.Join(root, "web", "[api]", "sub", "b.ts"), "")
+	mustWrite(t, filepath.Join(root, "web", "[api]", "c.txt"), "")
+
+	patternSets := [][]string{
+		{`web/\[api\]/**/*.ts`}, // recursive → per-base enumeration path
+		{`web/\[api\]/*.ts`},    // shallow → direct Glob path
+		{`web/\[api\]/**`},      // recursive, every file
+	}
+	for _, ps := range patternSets {
+		got, err := glob.Expand(root, ".", ps)
+		if err != nil {
+			t.Fatalf("Expand(%v): %v", ps, err)
+		}
+		want := referenceExpand(t, root, ".", ps)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Expand(%v) diverges from doublestar.Glob (-want +got):\n%s", ps, diff)
+		}
+		if len(got) == 0 {
+			t.Errorf("Expand(%v) returned nothing; the bracket dir was likely parsed as a glob class", ps)
+		}
+	}
+}
+
 // referenceExpand reproduces the pre-optimisation behaviour (one
 // doublestar.Glob per pattern) so the optimised Expander can be asserted
 // byte-for-byte equivalent.

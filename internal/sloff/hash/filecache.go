@@ -68,37 +68,78 @@ func NewPersistentFileCache(path string) *FileCache {
 	return c
 }
 
+// FileDigest pairs a repo-relative path with the hex SHA-256 of its content.
+type FileDigest struct {
+	Path string
+	Hex  string
+}
+
 // Files returns the same digest hash.Files would produce, reading every
 // cache-missed file in parallel and reusing cached digests for files whose
 // identity is unchanged.
 func (c *FileCache) Files(root string, paths []string) (string, error) {
-	sorted := append([]string(nil), paths...)
-	sort.Strings(sorted)
+	ds, err := c.computeDigests(root, paths)
+	if err != nil {
+		return "", err
+	}
+	return foldDigests(paths, ds)
+}
 
-	// Resolve content digests up front (parallel, cache-aware) so the
-	// composition pass below never blocks on I/O.
-	digests := make([][]byte, len(sorted))
+// FilesAndDigests returns the folded file-set digest (identical to Files) and
+// the per-file hex digest of every path, computing each file's content digest
+// exactly once. Callers that need both the combined hash and the per-file
+// entries (e.g. writing a fingerprint record) use this instead of calling
+// Files followed by a second per-file pass over the same set.
+func (c *FileCache) FilesAndDigests(root string, paths []string) (string, []FileDigest, error) {
+	ds, err := c.computeDigests(root, paths)
+	if err != nil {
+		return "", nil, err
+	}
+	folded, err := foldDigests(paths, ds)
+	if err != nil {
+		return "", nil, err
+	}
+	entries := make([]FileDigest, len(paths))
+	for i, p := range paths {
+		entries[i] = FileDigest{Path: p, Hex: hex.EncodeToString(ds[i])}
+	}
+	return folded, entries, nil
+}
+
+// computeDigests resolves the content digest of every path (joined onto root)
+// in parallel, reusing cached digests for unchanged files. The result is
+// index-aligned with paths.
+func (c *FileCache) computeDigests(root string, paths []string) ([][]byte, error) {
+	ds := make([][]byte, len(paths))
 	g := new(errgroup.Group)
 	g.SetLimit(max(runtime.GOMAXPROCS(0), 1))
-	for i, p := range sorted {
+	for i, p := range paths {
 		g.Go(func() error {
 			d, err := c.digest(filepath.Join(root, p))
 			if err != nil {
 				return err
 			}
-			digests[i] = d
+			ds[i] = d
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return "", err
+		return nil, err
 	}
+	return ds, nil
+}
 
-	i := 0
-	return FilesWith(sorted, func(string) ([]byte, error) {
-		d := digests[i]
-		i++
-		return d, nil
+// foldDigests composes pre-computed per-file digests into the file-set digest
+// via FilesWith (the single definition of the composition rules), looking each
+// digest up by path so the caller never has to pre-sort to stay index-aligned
+// with FilesWith's internal sort.
+func foldDigests(paths []string, ds [][]byte) (string, error) {
+	m := make(map[string][]byte, len(paths))
+	for i, p := range paths {
+		m[p] = ds[i]
+	}
+	return FilesWith(paths, func(p string) ([]byte, error) {
+		return m[p], nil
 	})
 }
 

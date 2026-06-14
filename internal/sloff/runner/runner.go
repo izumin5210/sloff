@@ -1172,13 +1172,15 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	if err := r.recordProducedPaths(ref, outputPaths); err != nil {
 		return err
 	}
-	outputHash, err := r.fileCache.Files(r.opts.RepoRoot, outputPaths)
+	// One pass over the outputs yields both the folded output hash and the
+	// per-file entries; the per-file content digest is computed exactly once.
+	outputHash, fileDigests, err := r.fileCache.FilesAndDigests(r.opts.RepoRoot, outputPaths)
 	if err != nil {
 		return fmt.Errorf("%s: hash outputs: %w", t.Name, err)
 	}
-	files, err := r.perFileHashes(r.opts.RepoRoot, outputPaths)
-	if err != nil {
-		return fmt.Errorf("%s: per-file hash: %w", t.Name, err)
+	files := make([]*fingerprintv1.FileEntry, len(fileDigests))
+	for i, fd := range fileDigests {
+		files[i] = &fingerprintv1.FileEntry{Path: fd.Path, Hash: fd.Hex}
 	}
 
 	if r.opts.ReadOnly {
@@ -1588,16 +1590,4 @@ func resolvedVersionsFromTool(versions []toolresolver.ResolvedVersion) []*finger
 		out[i] = &fingerprintv1.ResolvedVersion{Name: v.Name, Source: v.Source, Version: v.Version}
 	}
 	return out
-}
-
-func (r *Runner) perFileHashes(root string, paths []string) ([]*fingerprintv1.FileEntry, error) {
-	out := make([]*fingerprintv1.FileEntry, 0, len(paths))
-	for _, p := range paths {
-		h, err := r.fileCache.FileHex(root, p)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, &fingerprintv1.FileEntry{Path: p, Hash: h})
-	}
-	return out, nil
 }

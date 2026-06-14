@@ -108,6 +108,45 @@ func TestFileCache_FileHexMatchesFile(t *testing.T) {
 	}
 }
 
+// TestFileCache_FilesAndDigestsMatchesFiles: the folded digest equals Files,
+// and the per-file entries carry each path's standalone hex digest in path
+// order — the single-pass replacement for Files + a separate per-file pass.
+func TestFileCache_FilesAndDigestsMatchesFiles(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha")
+	writeFile(t, root, "sub/b.txt", "beta")
+	paths := []string{"a.txt", filepath.Join("sub", "b.txt")}
+
+	c := NewFileCache()
+	wantFolded, err := c.Files(root, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	folded, entries, err := c.FilesAndDigests(root, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folded != wantFolded {
+		t.Fatalf("folded digest %q != Files %q", folded, wantFolded)
+	}
+	if len(entries) != len(paths) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(paths))
+	}
+	for i, p := range paths {
+		if entries[i].Path != p {
+			t.Errorf("entry %d path = %q, want %q", i, entries[i].Path, p)
+		}
+		want, err := File(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entries[i].Hex != want {
+			t.Errorf("entry %d hex = %q, want %q", i, entries[i].Hex, want)
+		}
+	}
+}
+
 func TestFileCache_MissingFile(t *testing.T) {
 	root := t.TempDir()
 	c := NewFileCache()

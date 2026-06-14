@@ -165,8 +165,13 @@ format / 無効化:
 - エントリは marshal 前に path でソートし `Deterministic: true` で書き出す。
   content-addressed ではない (削除しても安全な per-machine キャッシュ) ため byte 一致は
   正確性要件ではないが、再現性とデバッグ時の差分の取りやすさのために決定的に書く
-- 不安時の **escape hatch** (`SLOFF_*` env でキャッシュ無効化) を用意し、疑わしければ
-  常に「実測 (C 相当)」に戻せるようにする
+- 不安時の **escape hatch** として `SLOFF_NO_FILE_HASH_CACHE` env を用意し、疑わしければ
+  常に「実測 (C 相当)」に戻せるようにする。boolean として解釈し
+  (`1`/`true` で永続キャッシュ無効、`0`/`false`/未設定で有効、解釈できない値は即エラー)、
+  `SLOFF_ALLOW_STALE_DEPS` と同じ厳格パースに揃える。有効時は永続ストアを読み書きせず
+  within-run の memoise のみで走る。`--force` ([ADR-0012](./0012-force-rerun-flag.md)) は
+  fingerprint hit の bypass であって digest 自体はこのキャッシュ経由で計算されるため、
+  キャッシュ汚染からの復旧手段にはならない (責務が異なる) 点に注意
 
 ## Consequences
 

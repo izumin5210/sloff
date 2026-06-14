@@ -167,6 +167,72 @@ func TestAllowStaleDepsEnabled(t *testing.T) {
 	}
 }
 
+// TestFileHashCacheDisabled mirrors TestAllowStaleDepsEnabled for the
+// SLOFF_NO_FILE_HASH_CACHE escape hatch: set values follow strconv.ParseBool,
+// unset/empty keep the cache, and anything unparseable is a hard error that
+// names the env var and the offending value.
+func TestFileHashCacheDisabled(t *testing.T) {
+	set := func(v string) *string { return &v }
+	cases := []struct {
+		name    string
+		value   *string // nil = unset
+		want    bool
+		wantErr bool
+	}{
+		{name: "unset", value: nil, want: false},
+		{name: "empty", value: set(""), want: false},
+		{name: "1", value: set("1"), want: true},
+		{name: "true", value: set("true"), want: true},
+		{name: "0", value: set("0"), want: false},
+		{name: "false", value: set("false"), want: false},
+		{name: "yes", value: set("yes"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value == nil {
+				t.Setenv(noFileHashCacheEnv, "")
+				os.Unsetenv(noFileHashCacheEnv)
+			} else {
+				t.Setenv(noFileHashCacheEnv, *tc.value)
+			}
+			got, err := fileHashCacheDisabled()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", *tc.value)
+				}
+				if !strings.Contains(err.Error(), noFileHashCacheEnv) || !strings.Contains(err.Error(), *tc.value) {
+					t.Errorf("error should name the env var and value, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("fileHashCacheDisabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRun_NoFileHashCacheInvalidValueFails guards the fail-loudly contract for
+// the cache escape hatch: an unparseable value aborts the run with an
+// actionable error rather than silently keeping or dropping the cache.
+func TestRun_NoFileHashCacheInvalidValueFails(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	workdir := setupRunHarness(t, "first-run-writes-record")
+	t.Setenv(noFileHashCacheEnv, "nope")
+	_, err := runRunCmd(t, workdir)
+	if err == nil {
+		t.Fatal("expected error for unparseable SLOFF_NO_FILE_HASH_CACHE value")
+	}
+	if !strings.Contains(err.Error(), noFileHashCacheEnv) || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("error should name the env var and the offending value, got: %v", err)
+	}
+}
+
 // TestRun_AllowStaleDepsFalseValueWritesRecords pins the boolean
 // interpretation of SLOFF_ALLOW_STALE_DEPS: explicitly disabling the escape
 // hatch must behave exactly like leaving it unset, i.e. records are written.
@@ -206,6 +272,70 @@ func TestRun_AllowStaleDepsInvalidValueFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), allowStaleDepsEnv) || !strings.Contains(err.Error(), "yes") {
 		t.Errorf("error should name the env var and the offending value, got: %v", err)
+	}
+}
+
+// addOriginRemote gives the workdir an `origin` remote so cached.CacheRoot can
+// derive a namespace; without it the persistent file-hash cache stays disabled
+// (CacheRoot errors → empty path) and the cache assertions below would be
+// vacuous.
+func addOriginRemote(t *testing.T, dir string) {
+	t.Helper()
+	c := exec.Command("git", "remote", "add", "origin", "https://github.com/sloff-test/fixture.git")
+	c.Dir = dir
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add origin: %v\n%s", err, out)
+	}
+}
+
+// TestRun_FileHashCacheWrittenByDefault is the baseline for the escape-hatch
+// test below: with a derivable cache root and no opt-out, a successful run must
+// persist filehashes.pb (ADR-0014). It also keeps the disabled-case assertion
+// honest — if the cache were never written here, the "not written" check would
+// pass vacuously.
+func TestRun_FileHashCacheWrittenByDefault(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	workdir := setupRunHarness(t, "first-run-writes-record")
+	addOriginRemote(t, workdir)
+
+	cachePath := fileHashCachePath(workdir)
+	if cachePath == "" {
+		t.Skip("cache root not derivable in this environment")
+	}
+	if _, err := runRunCmd(t, workdir); err != nil {
+		t.Fatalf("run cmd failed: %v", err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("expected persistent file-hash cache at %s, got: %v", cachePath, err)
+	}
+}
+
+// TestRun_NoFileHashCacheSkipsPersistentCache exercises ADR-0014's escape
+// hatch: SLOFF_NO_FILE_HASH_CACHE=1 must make the runner skip its persistent
+// digest cache, so a suspected or corrupted filehashes.pb can never keep
+// returning a stale digest. The cache file must not be created even though the
+// cache root is derivable.
+func TestRun_NoFileHashCacheSkipsPersistentCache(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	workdir := setupRunHarness(t, "first-run-writes-record")
+	addOriginRemote(t, workdir)
+
+	cachePath := fileHashCachePath(workdir)
+	if cachePath == "" {
+		t.Skip("cache root not derivable in this environment")
+	}
+	t.Setenv("SLOFF_NO_FILE_HASH_CACHE", "1")
+	if _, err := runRunCmd(t, workdir); err != nil {
+		t.Fatalf("run cmd failed: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("SLOFF_NO_FILE_HASH_CACHE=1 must skip the persistent cache, but stat(%s) err=%v", cachePath, err)
 	}
 }
 

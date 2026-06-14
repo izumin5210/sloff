@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 
@@ -201,6 +202,35 @@ func TestExpand_EquivalentToDoublestarGlob(t *testing.T) {
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("Expand(%v) diverges from doublestar.Glob (-want +got):\n%s", ps, diff)
 		}
+	}
+}
+
+// TestExpand_FollowsSymlinkedDirs guards the walk-once-per-base optimisation
+// against a symlink regression: doublestar.Glob descends into directory
+// symlinks, so the in-memory match path must enumerate files through them too.
+// fs.WalkDir does not follow symlinks, which silently dropped these inputs.
+func TestExpand_FollowsSymlinkedDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "svc", "real", "a.go"), "")
+	mustWrite(t, filepath.Join(root, "external", "b.go"), "")
+	if err := os.Symlink(filepath.Join(root, "external"), filepath.Join(root, "svc", "link")); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	patterns := []string{"svc/**/*.go"}
+	got, err := glob.Expand(root, ".", patterns)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	want := referenceExpand(t, root, ".", patterns)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Expand diverges from doublestar.Glob (-want +got):\n%s", diff)
+	}
+	// Guard against a vacuous pass: the file reached only through the symlink
+	// must actually be present in the result.
+	linkFile := filepath.Join("svc", "link", "b.go")
+	if !slices.Contains(got, linkFile) {
+		t.Errorf("expected %q (reached via symlink) in results, got %v", linkFile, got)
 	}
 }
 

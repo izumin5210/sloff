@@ -2,7 +2,6 @@
 package glob
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -186,8 +185,16 @@ func (e *Expander) computeMatches(joined string) ([]string, error) {
 
 // filesUnder returns every regular file beneath base (slash-form,
 // repo-relative), walking it once and memoising the result so sibling patterns
-// reuse it. A non-existent base yields an empty list, matching the empty
-// result doublestar.Glob produces for a pattern whose base is absent.
+// reuse it.
+//
+// The enumeration goes through doublestar (a `base/**` glob, files-only) rather
+// than fs.WalkDir so it descends into symlinked directories exactly as a
+// per-pattern doublestar.Glob would — fs.WalkDir does not follow symlinks and
+// would silently drop inputs reachable only through one, diverging from the
+// pre-optimisation behaviour this path must stay equivalent to. The base is
+// still walked just once, so the optimisation holds. A non-existent base yields
+// an empty list, matching the empty result doublestar.Glob produces for a
+// pattern whose base is absent.
 func (e *Expander) filesUnder(base string) ([]string, error) {
 	e.baseMu.Lock()
 	cached, ok := e.baseFiles[base]
@@ -196,22 +203,11 @@ func (e *Expander) filesUnder(base string) ([]string, error) {
 		return cached, nil
 	}
 
-	var files []string
-	walkErr := fs.WalkDir(e.fsys, base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			files = append(files, p)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		if errors.Is(walkErr, fs.ErrNotExist) {
-			files = nil
-		} else {
-			return nil, walkErr
-		}
+	// base carries no meta characters (it is the literal prefix from
+	// SplitPattern), so `base/**` enumerates every regular file beneath it.
+	files, err := doublestar.Glob(e.fsys, base+"/**", doublestar.WithFilesOnly())
+	if err != nil {
+		return nil, err
 	}
 
 	e.baseMu.Lock()

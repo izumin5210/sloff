@@ -33,8 +33,9 @@ import (
 // A stale digest would produce a wrong fingerprint hit and a wrong SKIP
 // (silent stale codegen that output-comparison cannot catch — ADR-0002/0014),
 // so every uncertain case re-hashes: stat failures propagate, the identity is
-// re-checked after the read, and the persistent layer drops entries whose
-// mtime is too recent to have settled.
+// re-checked after the read, and the persistent layer drops entries whose mtime
+// or ctime is too recent to have settled (ctime guards mtime-preserving
+// rewrites — see entryIsRacy).
 //
 // Safe for concurrent use.
 type FileCache struct {
@@ -216,11 +217,30 @@ func entryMatches(e fileCacheEntry, fi os.FileInfo, ctime int64, inode uint64, i
 // rejected wholesale instead of returning incompatible digests.
 const cacheSchemaVersion = filecachev1.SchemaVersion_SCHEMA_VERSION_V1
 
-// racyMargin drops entries whose file mtime is within this window of the save
-// time: such a file may have been rewritten within the same (possibly coarse)
-// mtime tick after we hashed it, so trusting it next run could serve a stale
-// digest. They are cheap to rehash. Mirrors Git's racy-clean handling.
+// racyMargin is the window around the save time within which a file's timestamp
+// is considered unsettled: the file may have been rewritten within the same
+// (possibly coarse) tick after we hashed it, so trusting it next run could
+// serve a stale digest. Such entries are dropped on Save (cheap to rehash).
+// Mirrors Git's racy-clean handling.
 const racyMargin = 2 * time.Second
+
+// entryIsRacy reports whether e is too fresh to persist: racy when its mtime —
+// or, on identity-bearing platforms, its ctime — falls within racyMargin of
+// now. Checking ctime is essential, not redundant: mtime-preserving operations
+// (rsync --times / tar / cp -p / restore) advance only ctime, so a
+// same-(size, mtime) rewrite right after hashing would read back as a cache hit
+// and serve a stale digest unless its racy ctime drops the entry here. When the
+// platform has no identity (idOK == false) ctime is meaningless and ignored,
+// degrading to the mtime-only guard.
+func entryIsRacy(e fileCacheEntry, now time.Time) bool {
+	if now.Sub(e.mtime) < racyMargin {
+		return true
+	}
+	if e.idOK && now.Sub(time.Unix(0, e.ctime)) < racyMargin {
+		return true
+	}
+	return false
+}
 
 // load seeds entries from savePath, best-effort. Any read / decode error or
 // schema-version mismatch leaves the cache empty (cold).
@@ -250,10 +270,15 @@ func (c *FileCache) load() {
 // contract: a stale or missing cache only costs rehashing next run, never
 // correctness, so callers may ignore the error.
 func (c *FileCache) Save() error {
+	return c.saveAt(time.Now())
+}
+
+// saveAt is Save with an injectable reference time, so the racy-window logic
+// can be tested deterministically without sleeping. Save passes the wall clock.
+func (c *FileCache) saveAt(now time.Time) error {
 	if c.savePath == "" {
 		return nil
 	}
-	now := time.Now()
 
 	c.mu.Lock()
 	pc := &filecachev1.Cache{
@@ -261,7 +286,7 @@ func (c *FileCache) Save() error {
 		Entries:       make([]*filecachev1.Entry, 0, len(c.entries)),
 	}
 	for path, e := range c.entries {
-		if now.Sub(e.mtime) < racyMargin {
+		if entryIsRacy(e, now) {
 			continue
 		}
 		pc.Entries = append(pc.Entries, &filecachev1.Entry{

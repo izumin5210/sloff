@@ -155,14 +155,27 @@ func TestFileCache_MissingFile(t *testing.T) {
 	}
 }
 
-// ageFile pushes a file's mtime/atime well into the past so the racy guard
-// (which drops just-modified entries) keeps it on Save. ctime updates to "now"
-// as a side effect of the chtimes call, which is fine for these tests.
+// ageFile pushes a file's mtime/atime well into the past so the mtime racy
+// guard keeps it. ctime still moves to "now" (userspace can't backdate it), so
+// tests that need the entry actually persisted must Save via saveSettled —
+// otherwise the ctime racy guard drops it.
 func ageFile(t *testing.T, full string) {
 	t.Helper()
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(full, old, old); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// saveSettled persists as if the run happened well after the test's files
+// settled. A freshly written file carries a "now" ctime that the racy guard
+// would drop; advancing Save's reference time past racyMargin treats both
+// timestamps as settled, so warm-reuse assertions see a populated cache. Plain
+// Save() (real clock) is exercised by TestFileCache_SaveDropsRacyEntries.
+func saveSettled(t *testing.T, c *FileCache) {
+	t.Helper()
+	if err := c.saveAt(time.Now().Add(2 * racyMargin)); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 }
 
@@ -181,9 +194,7 @@ func TestFileCache_PersistsAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Save(); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	saveSettled(t, c1)
 
 	c2 := NewPersistentFileCache(cachePath)
 	if _, ok := c2.entries[full]; !ok {
@@ -209,9 +220,7 @@ func TestFileCache_PersistContentChangeNotStale(t *testing.T) {
 
 	c1 := NewPersistentFileCache(cachePath)
 	stale, _ := c1.Files(root, []string{"a.txt"})
-	if err := c1.Save(); err != nil {
-		t.Fatal(err)
-	}
+	saveSettled(t, c1)
 
 	writeFile(t, root, "a.txt", "alphaX") // different size + fresh mtime
 	c2 := NewPersistentFileCache(cachePath)
@@ -251,9 +260,7 @@ func TestFileCache_CtimeInvalidatesMtimePreservedRewrite(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "fh.pb")
 	c1 := NewPersistentFileCache(cachePath)
 	stale, _ := c1.Files(root, []string{"a.txt"})
-	if err := c1.Save(); err != nil {
-		t.Fatal(err)
-	}
+	saveSettled(t, c1)
 
 	// Same size, mtime reset to the cached value, but content differs. chtimes
 	// cannot rewind ctime, so ctime now differs from the cached entry.
@@ -278,32 +285,43 @@ func TestFileCache_CtimeInvalidatesMtimePreservedRewrite(t *testing.T) {
 	}
 }
 
-// TestFileCache_RacyEntryNotPersisted: a file modified within racyMargin of the
-// Save must not be persisted (its mtime tick may not be settled), while a
-// settled file is.
-func TestFileCache_RacyEntryNotPersisted(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "stable.txt", "s")
-	writeFile(t, root, "recent.txt", "r")
-	stable := filepath.Join(root, "stable.txt")
-	recent := filepath.Join(root, "recent.txt")
-	ageFile(t, stable) // settled; recent keeps its just-written (now) mtime
-
+// TestFileCache_SaveDropsRacyEntries pins the racy-window contract directly on
+// the persisted set, building entries by hand so each timestamp axis is
+// controlled independently (a real file's ctime can't be backdated from
+// userspace). An entry is racy — and must be dropped — when EITHER its mtime or
+// (on identity-bearing platforms) its ctime is within racyMargin of the Save:
+// mtime catches ordinary edits, ctime catches mtime-preserving rewrites
+// (rsync --times / tar / cp -p) where ctime is the only fresh stamp.
+func TestFileCache_SaveDropsRacyEntries(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	old := now.Add(-time.Hour)
 	cachePath := filepath.Join(t.TempDir(), "fh.pb")
-	c1 := NewPersistentFileCache(cachePath)
-	if _, err := c1.Files(root, []string{"stable.txt", "recent.txt"}); err != nil {
-		t.Fatal(err)
+
+	c := NewPersistentFileCache(cachePath)
+	c.entries = map[string]fileCacheEntry{
+		"/settled":     {size: 1, mtime: old, ctime: old.UnixNano(), inode: 1, idOK: true, digest: []byte("s")},
+		"/racy-mtime":  {size: 1, mtime: now, ctime: old.UnixNano(), inode: 2, idOK: true, digest: []byte("m")},
+		"/racy-ctime":  {size: 1, mtime: old, ctime: now.UnixNano(), inode: 3, idOK: true, digest: []byte("c")},
+		"/no-identity": {size: 1, mtime: old, ctime: now.UnixNano(), inode: 0, idOK: false, digest: []byte("n")},
 	}
-	if err := c1.Save(); err != nil {
-		t.Fatal(err)
+	if err := c.saveAt(now); err != nil {
+		t.Fatalf("saveAt: %v", err)
 	}
 
 	c2 := NewPersistentFileCache(cachePath)
-	if _, ok := c2.entries[stable]; !ok {
-		t.Error("settled entry should be persisted")
-	}
-	if _, ok := c2.entries[recent]; ok {
-		t.Error("entry modified within racyMargin must not be persisted")
+	for _, tc := range []struct {
+		path      string
+		persisted bool
+		why       string
+	}{
+		{"/settled", true, "both timestamps older than racyMargin"},
+		{"/racy-mtime", false, "mtime within racyMargin"},
+		{"/racy-ctime", false, "ctime within racyMargin (mtime-preserved rewrite window)"},
+		{"/no-identity", true, "idOK=false ignores ctime; mtime is settled"},
+	} {
+		if _, ok := c2.entries[tc.path]; ok != tc.persisted {
+			t.Errorf("%s: persisted=%v, want %v (%s)", tc.path, ok, tc.persisted, tc.why)
+		}
 	}
 }
 

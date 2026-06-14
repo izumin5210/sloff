@@ -119,14 +119,15 @@ func runE(ctx context.Context, rawRoot, pattern string, force bool) (err error) 
 	}
 
 	r := runner.New(runner.Options{
-		RepoRoot:       root,
-		Specs:          specs,
-		Storage:        storage,
-		Resolvers:      resolvers,
-		Preflight:      buildPreflight(root),
-		ReadOnly:       readOnly,
-		Force:          force,
-		TracerProvider: tp,
+		RepoRoot:          root,
+		Specs:             specs,
+		Storage:           storage,
+		Resolvers:         resolvers,
+		Preflight:         buildPreflight(root),
+		ReadOnly:          readOnly,
+		Force:             force,
+		FileHashCachePath: fileHashCachePath(root),
+		TracerProvider:    tp,
 	})
 
 	return r.Run(ctx)

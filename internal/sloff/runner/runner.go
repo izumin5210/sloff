@@ -86,6 +86,12 @@ type Options struct {
 	Resolvers *toolresolver.Registry
 	Preflight *preflight.Registry
 
+	// FileHashCachePath, when set, persists per-file content digests across
+	// runs at this path (per-machine; see ADR-0014). Empty keeps the cache
+	// in-memory only (single run). The CLI derives it from the host-local
+	// cache root; embedders may leave it empty.
+	FileHashCachePath string
+
 	// ReadOnly suppresses Storage.Save (used when SLOFF_ALLOW_STALE_DEPS=1).
 	ReadOnly bool
 
@@ -184,13 +190,17 @@ func New(opts Options) *Runner {
 		// TracerProvider.
 		tp = noop.NewTracerProvider()
 	}
+	fileCache := hash.NewFileCache()
+	if opts.FileHashCachePath != "" {
+		fileCache = hash.NewPersistentFileCache(opts.FileHashCachePath)
+	}
 	return &Runner{
 		opts:      opts,
 		logger:    logger,
 		stdout:    stdout,
 		stderr:    stderr,
 		tracer:    tp.Tracer(runnerTracerName),
-		fileCache: hash.NewFileCache(),
+		fileCache: fileCache,
 	}
 }
 
@@ -215,6 +225,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	if w, ok := r.opts.Storage.(interface{ Warm(context.Context) error }); ok {
 		go func() { _ = w.Warm(ctx) }()
 	}
+
+	// Persist the per-file content-digest cache when the run ends so the next
+	// run skips rehashing unchanged inputs (ADR-0014). Deferred so it captures
+	// every digest computed during prefetch and task execution. Best-effort: a
+	// missing or stale cache only costs rehashing, never correctness.
+	defer func() { _ = r.fileCache.Save() }()
+
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
 	// references resolve to a defined tool, then resolve each *referenced*
 	// tool exactly once. Storing results by name lets collectTasks fan a

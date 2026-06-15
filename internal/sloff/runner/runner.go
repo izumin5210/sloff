@@ -256,10 +256,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Warm resolver caches (notably go-local's packages.Load) in one batch
-	// before the per-tool fan-out below; see prewarmResolvers.
-	r.prewarmResolvers(ctx, registry, referencedToolNames)
-
 	inputsByTool, versionsByTool, err := r.resolveContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
@@ -586,9 +582,6 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingD
 	if err != nil {
 		return nil, nil, err
 	}
-	// Same batch cache-warming as Run, so graph-style consumers also pay the
-	// go-local packages.Load cost once per spec dir rather than once per tool.
-	r.prewarmResolvers(ctx, registry, referencedToolNames)
 	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return nil, nil, err
@@ -724,6 +717,43 @@ func (r *Runner) prewarmResolvers(ctx context.Context, registry *spec.ToolRegist
 	}
 }
 
+// startPrewarm runs prewarmResolvers in the background and returns a channel
+// closed when it finishes. resolveContribs / resolveInputContribs resolve the
+// eager channels (script / pnpm-local) concurrently while this runs, then wait
+// on the channel before resolving the prewarmed (go-local) channel — so the
+// batch packages.Load overlaps the script version spawns instead of running
+// serially before them. The per-tool path stays correct even if a go-local
+// resolve races ahead of prewarm (it just recomputes via List), so the channel
+// is an optimisation barrier, not a correctness one.
+func (r *Runner) startPrewarm(ctx context.Context, registry *spec.ToolRegistry, referenced []string) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.prewarmResolvers(ctx, registry, referenced)
+	}()
+	return done
+}
+
+// splitByPrewarm partitions referenced tool indices into eager (resolver does
+// not implement Prewarmer — resolve immediately) and gated (resolver is
+// prewarmed — resolve after the prewarm channel closes so the per-tool calls
+// hit the warmed cache). A name missing from the registry is a programmer error
+// (ValidateToolReferences runs first), surfaced as an error.
+func splitByPrewarm(registry *spec.ToolRegistry, referenced []string, gatedChannels map[string]struct{}) (eager, gated []int, err error) {
+	for i, name := range referenced {
+		entry, ok := registry.Lookup(name)
+		if !ok {
+			return nil, nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
+		}
+		if _, isGated := gatedChannels[entry.Declared.Resolver]; isGated {
+			gated = append(gated, i)
+		} else {
+			eager = append(eager, i)
+		}
+	}
+	return eager, gated, nil
+}
+
 // resolveInputContribs invokes Registry.Inputs once per referenced tool name.
 // specDir for each invocation is the dir where the tool was *defined*
 // (ADR-0008 D3), not where it's referenced from, so tool definitions stay
@@ -741,38 +771,52 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 	))
 	defer endSpan(span, &err)
 
-	results := make([][]string, len(referenced))
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(resolverConcurrency(len(referenced)))
-	for i, name := range referenced {
-		entry, ok := registry.Lookup(name)
-		if !ok {
-			return nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
-		}
-		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		g.Go(func() (gerr error) {
-			toolCtx, toolSpan := r.tracer.Start(gctx,
-				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-				trace.WithAttributes(
-					attribute.String("sloff.tool.name", entry.Name),
-					attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-					attribute.String("sloff.resolver.phase", "inputs"),
-				))
-			defer endSpan(toolSpan, &gerr)
+	prewarmDone := r.startPrewarm(ctx, registry, referenced)
+	defer func() { <-prewarmDone }()
 
-			ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
-			if gerr != nil {
-				gerr = fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
-				return gerr
-			}
-			toolSpan.SetAttributes(attribute.Int("sloff.tool.input.count", len(ins)))
-			results[i] = ins
-			return nil
-		})
-	}
-	if err = g.Wait(); err != nil {
+	eager, gated, err := splitByPrewarm(registry, referenced, r.opts.Resolvers.PrewarmChannels())
+	if err != nil {
 		return nil, err
 	}
+
+	results := make([][]string, len(referenced))
+
+	resolveSet := func(idxs []int) error {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(resolverConcurrency(len(idxs)))
+		for _, i := range idxs {
+			entry, _ := registry.Lookup(referenced[i]) // presence validated by splitByPrewarm
+			declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+			g.Go(func() (gerr error) {
+				toolCtx, toolSpan := r.tracer.Start(gctx,
+					fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+					trace.WithAttributes(
+						attribute.String("sloff.tool.name", entry.Name),
+						attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+						attribute.String("sloff.resolver.phase", "inputs"),
+					))
+				defer endSpan(toolSpan, &gerr)
+
+				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
+				if gerr != nil {
+					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				}
+				toolSpan.SetAttributes(attribute.Int("sloff.tool.input.count", len(ins)))
+				results[i] = ins
+				return nil
+			})
+		}
+		return g.Wait()
+	}
+
+	if err = resolveSet(eager); err != nil {
+		return nil, err
+	}
+	<-prewarmDone
+	if err = resolveSet(gated); err != nil {
+		return nil, err
+	}
+
 	out = make(map[string][]string, len(referenced))
 	for i, name := range referenced {
 		out[name] = results[i]
@@ -799,45 +843,68 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 	))
 	defer endSpan(span, &err)
 
-	insResults := make([][]string, len(referenced))
-	verResults := make([][]toolresolver.ResolvedVersion, len(referenced))
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(resolverConcurrency(len(referenced)))
-	for i, name := range referenced {
-		entry, ok := registry.Lookup(name)
-		if !ok {
-			return nil, nil, fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", name)
-		}
-		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		g.Go(func() (gerr error) {
-			toolCtx, toolSpan := r.tracer.Start(gctx,
-				fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-				trace.WithAttributes(
-					attribute.String("sloff.tool.name", entry.Name),
-					attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-				))
-			defer endSpan(toolSpan, &gerr)
+	// Start the batch prewarm (go-local packages.Load) in the background and
+	// resolve the eager channels (script / pnpm-local) while it runs; only the
+	// gated (prewarmed) tools wait on it, so the batch overlaps the script
+	// version spawns instead of running serially before them.
+	prewarmDone := r.startPrewarm(ctx, registry, referenced)
+	// Join the prewarm before returning even on an early eager-stage error, so
+	// the background goroutine can't outlive this call.
+	defer func() { <-prewarmDone }()
 
-			ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
-			if gerr != nil {
-				return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
-			}
-			vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
-			if gerr != nil {
-				return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
-			}
-			toolSpan.SetAttributes(
-				attribute.Int("sloff.tool.input.count", len(ins)),
-				attribute.Int("sloff.tool.version.count", len(vs)),
-			)
-			insResults[i] = ins
-			verResults[i] = vs
-			return nil
-		})
-	}
-	if err = g.Wait(); err != nil {
+	eager, gated, err := splitByPrewarm(registry, referenced, r.opts.Resolvers.PrewarmChannels())
+	if err != nil {
 		return nil, nil, err
 	}
+
+	insResults := make([][]string, len(referenced))
+	verResults := make([][]toolresolver.ResolvedVersion, len(referenced))
+
+	resolveSet := func(idxs []int) error {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(resolverConcurrency(len(idxs)))
+		for _, i := range idxs {
+			entry, _ := registry.Lookup(referenced[i]) // presence validated by splitByPrewarm
+			declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+			g.Go(func() (gerr error) {
+				toolCtx, toolSpan := r.tracer.Start(gctx,
+					fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+					trace.WithAttributes(
+						attribute.String("sloff.tool.name", entry.Name),
+						attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+					))
+				defer endSpan(toolSpan, &gerr)
+
+				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
+				if gerr != nil {
+					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				}
+				vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
+				if gerr != nil {
+					return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				}
+				toolSpan.SetAttributes(
+					attribute.Int("sloff.tool.input.count", len(ins)),
+					attribute.Int("sloff.tool.version.count", len(vs)),
+				)
+				insResults[i] = ins
+				verResults[i] = vs
+				return nil
+			})
+		}
+		return g.Wait()
+	}
+
+	// Eager channels run concurrently with the prewarm; gated channels wait for
+	// it so their per-tool resolve is a cache hit.
+	if err = resolveSet(eager); err != nil {
+		return nil, nil, err
+	}
+	<-prewarmDone
+	if err = resolveSet(gated); err != nil {
+		return nil, nil, err
+	}
+
 	inputs = make(map[string][]string, len(referenced))
 	versions = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
 	for i, name := range referenced {

@@ -34,6 +34,7 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/glob"
 	"github.com/izumin5210/sloff/internal/sloff/hash"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
+	"github.com/izumin5210/sloff/internal/sloff/provider"
 	"github.com/izumin5210/sloff/internal/sloff/spec"
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver"
 )
@@ -231,6 +232,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	// every digest computed during prefetch and task execution. Best-effort: a
 	// missing or stale cache only costs rehashing, never correctness.
 	defer func() { _ = r.fileCache.Save() }()
+
+	// ADR-0015: expand command_providers before anything else inspects the
+	// command set. Each provider is exec'd and the tasks it emits are folded
+	// into the declaring spec's commands; from here on they are
+	// indistinguishable from hand-written commands and flow through tool/depends
+	// validation, collectTasks, depgraph, and fingerprinting unchanged.
+	if err := r.expandCommandProviders(ctx); err != nil {
+		return err
+	}
 
 	// ADR-0008: build the repo-wide tool registry once, validate every task's
 	// references resolve to a defined tool, then resolve each *referenced*
@@ -578,6 +588,9 @@ func taskConcurrency(n int) int {
 // drifted, since drift is one of the conditions users reach for the graph
 // to investigate.
 func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingDependency, error) {
+	if err := r.expandCommandProviders(ctx); err != nil {
+		return nil, nil, err
+	}
 	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
 		return nil, nil, err
@@ -595,6 +608,84 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingD
 		return nil, nil, err
 	}
 	return ordered, r.findMissingDependenciesTraced(ctx, ordered), nil
+}
+
+// expandCommandProviders execs every declared command_provider (ADR-0015 D2)
+// and folds the tasks it emits into the spec set before any other phase reads
+// it. Generated commands are appended to the declaring spec's command list and
+// the merged set is re-validated (ADR-0015 D5), so from collectTasks onward
+// they are indistinguishable from hand-written commands. The providers are
+// cleared from the augmented spec so a second call — e.g. Plan then Run on the
+// same Runner — does not re-expand them.
+func (r *Runner) expandCommandProviders(ctx context.Context) (err error) {
+	if !slices.ContainsFunc(r.opts.Specs, func(sp spec.Spec) bool {
+		return len(sp.File.CommandProviders) > 0
+	}) {
+		return nil
+	}
+
+	ctx, span := r.tracer.Start(ctx, "runner.providers.expand")
+	defer endSpan(span, &err)
+
+	augmented := make([]spec.Spec, 0, len(r.opts.Specs))
+	generated := 0
+	for _, sp := range r.opts.Specs {
+		if len(sp.File.CommandProviders) == 0 {
+			augmented = append(augmented, sp)
+			continue
+		}
+		var generatedCmds []spec.Command
+		for _, p := range sp.File.CommandProviders {
+			cmds, perr := r.expandOneProvider(ctx, sp.Dir, p)
+			if perr != nil {
+				return fmt.Errorf("%s: %w", providerDefinitionPath(sp.Dir), perr)
+			}
+			generatedCmds = append(generatedCmds, cmds...)
+		}
+		// Sort the combined generated set by name so the merged command set is
+		// independent of how many providers ran and of the order they declared
+		// or emitted their tasks (ADR-0015 D5, R2). Static commands keep their
+		// declaration order ahead of the generated ones.
+		sort.Slice(generatedCmds, func(i, j int) bool { return generatedCmds[i].Name < generatedCmds[j].Name })
+		merged := append(append([]spec.Command(nil), sp.File.Commands...), generatedCmds...)
+		generated += len(generatedCmds)
+		// Re-validate the merged set so generated commands face the same
+		// required-field and name-uniqueness rules as static ones (ADR-0015 D5).
+		if vErr := spec.ValidateCommands(merged); vErr != nil {
+			return fmt.Errorf("%s: %w", providerDefinitionPath(sp.Dir), vErr)
+		}
+		newFile := *sp.File
+		newFile.Commands = merged
+		newFile.CommandProviders = nil
+		augmented = append(augmented, spec.Spec{Dir: sp.Dir, Path: sp.Path, File: &newFile})
+	}
+	r.opts.Specs = augmented
+	span.SetAttributes(attribute.Int("sloff.providers.generated_count", generated))
+	return nil
+}
+
+// expandOneProvider wraps provider.Expand in a span so each provider's exec and
+// emitted-task count show up in the trace tree.
+func (r *Runner) expandOneProvider(ctx context.Context, specDir string, decl spec.CommandProviderDecl) (cmds []spec.Command, err error) {
+	_, span := r.tracer.Start(ctx, fmt.Sprintf("provider[%s]", decl.Name),
+		trace.WithAttributes(attribute.String("sloff.provider.name", decl.Name)))
+	defer endSpan(span, &err)
+	cmds, err = provider.Expand(ctx, r.opts.RepoRoot, specDir, decl)
+	if err != nil {
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("sloff.provider.task_count", len(cmds)))
+	return cmds, nil
+}
+
+// providerDefinitionPath formats a spec dir for command-provider error
+// messages, mirroring spec.registryDefinitionPath so the repo root prints as a
+// concrete "sloff.yml" instead of an empty path.
+func providerDefinitionPath(specDir string) string {
+	if specDir == "" || specDir == "." {
+		return "sloff.yml"
+	}
+	return filepath.ToSlash(specDir) + "/sloff.yml"
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool

@@ -32,7 +32,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver"
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/lister"
@@ -150,4 +153,67 @@ func (r *Resolver) resolveEntry(declared *toolresolver.DeclaredTool) (string, er
 			"./", "../", ".", "..", declared.Entry)
 	}
 	return declared.Entry, nil
+}
+
+// Prewarm batch-loads the source listings for every declared go-local tool
+// that shares a spec dir, warming the memoised lister so the per-tool
+// Inputs/Versions calls that follow are cache hits. Tools whose entries live in
+// the same Go module then pay that module's packages.Load cost once instead of
+// once per tool — the dominant setup cost on a monorepo with many repo-local
+// generators. Implements toolresolver.Prewarmer.
+//
+// It is a pure optimisation: the warmed listings are exactly what List would
+// compute per entry, so a failure is non-fatal — the runner logs it and the
+// per-tool path recomputes (and re-surfaces any genuine error). Does nothing
+// when the lister can't batch (no BatchSourceLister) — e.g. the glob fallback.
+func (r *Resolver) Prewarm(ctx context.Context, reqs []toolresolver.PrewarmRequest) error {
+	bl, ok := r.lister.(lister.BatchSourceLister)
+	if !ok {
+		return nil
+	}
+	bySpec := map[string][]string{}
+	for i := range reqs {
+		entry, err := r.resolveEntry(reqs[i].Declared)
+		if err != nil {
+			// Malformed entry: skip warming it; the per-tool Inputs/Versions
+			// path surfaces the error for that specific tool.
+			continue
+		}
+		bySpec[reqs[i].SpecDir] = append(bySpec[reqs[i].SpecDir], entry)
+	}
+	// Each spec dir's batch is an independent packages.Load; run them
+	// concurrently so the warm phase costs roughly one load (the largest spec
+	// dir) rather than the serial sum across spec dirs. The fan-out is capped at
+	// prewarmConcurrency: every batch can spawn `go list` (itself parallel
+	// across GOMAXPROCS), so an unbounded loop over many spec dirs would
+	// stampede the file system and the toolchain — the same reasoning behind the
+	// runner's per-tool resolver cap.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(prewarmConcurrency(len(bySpec)))
+	for specDir, entries := range bySpec {
+		g.Go(func() error {
+			if _, err := bl.ListBatch(gctx, specDir, entries); err != nil {
+				return fmt.Errorf("go-local: prewarm batch for spec %q: %w", specDir, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+// prewarmConcurrency caps how many spec-dir batches load in parallel. Each
+// batch's packages.Load ultimately spawns `go list`, which already parallelises
+// across GOMAXPROCS, so letting every spec dir load at once would stampede the
+// file system and the toolchain. NumCPU keeps the box busy but bounded. This
+// mirrors the runner's resolverConcurrency; it is duplicated rather than shared
+// because that helper is unexported and lives in the runner package.
+func prewarmConcurrency(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	cpu := max(runtime.NumCPU(), 1)
+	if n < cpu {
+		return n
+	}
+	return cpu
 }

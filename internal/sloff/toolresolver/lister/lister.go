@@ -27,6 +27,22 @@ type SourceLister interface {
 	List(ctx context.Context, specDir, entry string) (Listing, error)
 }
 
+// BatchSourceLister is an optional SourceLister extension that resolves many
+// entries sharing one spec dir in a single underlying load. goPackagesLister
+// implements it by passing every entry to one packages.Load, so a monorepo
+// whose tools all live in the same module builds that module's shared
+// dependency graph once instead of once per entry. The returned map is keyed
+// by entry; entries the batch could not resolve 1:1 (e.g. a "./..." wildcard
+// or a missing package) are simply absent so the caller can fall back to List.
+//
+// ListBatch must return, for each resolved entry, a Listing identical to what
+// List would return for that (specDir, entry) — batching is a performance
+// optimisation only.
+type BatchSourceLister interface {
+	SourceLister
+	ListBatch(ctx context.Context, specDir string, entries []string) (map[string]Listing, error)
+}
+
 // Listing is the union of source contributions enumerated for one entry.
 // Implementations always return paths relative to the lister's repo root so
 // the result is reproducible across machines.
@@ -96,4 +112,62 @@ func (m *Memoized) List(ctx context.Context, specDir, entry string) (Listing, er
 	m.cache[key] = l
 	m.mu.Unlock()
 	return l, nil
+}
+
+// ListBatch resolves entries under specDir, serving already-cached entries
+// from the per-(specDir, entry) cache and computing the rest in a single batch
+// when the inner lister is a BatchSourceLister. Every result is cached, so a
+// later List for the same (specDir, entry) is a hit — this is the method the
+// go-local resolver's prewarm phase drives to collapse N packages.Load calls
+// into one. Entries the batch can't resolve 1:1 fall back to sequential List,
+// and when the inner lister can't batch at all every entry takes that path.
+func (m *Memoized) ListBatch(ctx context.Context, specDir string, entries []string) (map[string]Listing, error) {
+	out := make(map[string]Listing, len(entries))
+	var missing []string
+	for _, e := range entries {
+		key := specDir + "\x00" + e
+		m.mu.Lock()
+		l, ok := m.cache[key]
+		m.mu.Unlock()
+		if ok {
+			out[e] = l
+			continue
+		}
+		missing = append(missing, e)
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+
+	if bl, ok := m.inner.(BatchSourceLister); ok {
+		batched, err := bl.ListBatch(ctx, specDir, missing)
+		if err != nil {
+			return nil, err
+		}
+		remaining := missing[:0:0]
+		for _, e := range missing {
+			l, ok := batched[e]
+			if !ok {
+				// Entry the batch declined (wildcard / unmapped): resolve it
+				// the slow way below.
+				remaining = append(remaining, e)
+				continue
+			}
+			key := specDir + "\x00" + e
+			m.mu.Lock()
+			m.cache[key] = l
+			m.mu.Unlock()
+			out[e] = l
+		}
+		missing = remaining
+	}
+
+	for _, e := range missing {
+		l, err := m.List(ctx, specDir, e) // List populates m.cache
+		if err != nil {
+			return nil, err
+		}
+		out[e] = l
+	}
+	return out, nil
 }

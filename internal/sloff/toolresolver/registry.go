@@ -69,3 +69,34 @@ func (r *Registry) Versions(ctx context.Context, specDir string, declared []Decl
 	}
 	return out, nil
 }
+
+// Prewarm gives every registered resolver that implements Prewarmer a chance
+// to batch expensive discovery work across all the declared tools referencing
+// it, before the runner fans out per-tool Inputs/Versions calls. Requests are
+// grouped by resolver channel; resolvers that don't implement Prewarmer are
+// skipped. A prewarm is a pure cache-warming optimisation (see Prewarmer), so
+// the caller may treat a returned error as non-fatal and fall back to the
+// per-tool path.
+func (r *Registry) Prewarm(ctx context.Context, reqs []PrewarmRequest) error {
+	byResolver := map[string][]PrewarmRequest{}
+	for _, req := range reqs {
+		if req.Declared == nil {
+			continue
+		}
+		byResolver[req.Declared.Resolver] = append(byResolver[req.Declared.Resolver], req)
+	}
+	for name, group := range byResolver {
+		res, ok := r.byName[name]
+		if !ok {
+			continue
+		}
+		pw, ok := res.(Prewarmer)
+		if !ok {
+			continue
+		}
+		if err := pw.Prewarm(ctx, group); err != nil {
+			return fmt.Errorf("prewarm %s: %w", name, err)
+		}
+	}
+	return nil
+}

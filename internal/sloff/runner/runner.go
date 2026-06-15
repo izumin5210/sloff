@@ -256,6 +256,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Warm resolver caches (notably go-local's packages.Load) in one batch
+	// before the per-tool fan-out below; see prewarmResolvers.
+	r.prewarmResolvers(ctx, registry, referencedToolNames)
+
 	inputsByTool, versionsByTool, err := r.resolveContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return err
@@ -582,6 +586,9 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingD
 	if err != nil {
 		return nil, nil, err
 	}
+	// Same batch cache-warming as Run, so graph-style consumers also pay the
+	// go-local packages.Load cost once per spec dir rather than once per tool.
+	r.prewarmResolvers(ctx, registry, referencedToolNames)
 	inputsByTool, err := r.resolveInputContribs(ctx, registry, referencedToolNames)
 	if err != nil {
 		return nil, nil, err
@@ -682,6 +689,39 @@ func scopeCheckers(checkerNames []string, registry *spec.ToolRegistry, reference
 		}
 	}
 	return out
+}
+
+// prewarmResolvers gives resolvers a chance to batch their discovery work
+// across every referenced tool before resolveContribs / resolveInputContribs
+// fan out per tool. Best-effort: a prewarm failure is logged and the per-tool
+// resolve path — which recomputes the same data — is relied on, so this never
+// changes resolution results, only their cost. The headline win is the
+// go-local resolver collapsing one packages.Load per tool into one per spec dir
+// (toolresolver.Prewarmer); on a monorepo whose generators share a module that
+// turns dozens of `go list` spawns into a handful.
+func (r *Runner) prewarmResolvers(ctx context.Context, registry *spec.ToolRegistry, referenced []string) {
+	if len(referenced) == 0 {
+		return
+	}
+	reqs := make([]toolresolver.PrewarmRequest, 0, len(referenced))
+	for _, name := range referenced {
+		entry, ok := registry.Lookup(name)
+		if !ok {
+			continue
+		}
+		d := toolresolverDeclared(entry.Declared)
+		reqs = append(reqs, toolresolver.PrewarmRequest{SpecDir: entry.SpecDir, Declared: &d})
+	}
+	_, span := r.tracer.Start(ctx, "runner.resolve.prewarm", trace.WithAttributes(
+		attribute.Int("sloff.tool.referenced_count", len(reqs)),
+	))
+	defer span.End()
+	if err := r.opts.Resolvers.Prewarm(ctx, reqs); err != nil {
+		// Non-fatal: prewarm only warms caches. The per-tool path recomputes
+		// the same listings and re-surfaces any genuine error.
+		r.logger.Warnf("resolver prewarm failed (continuing with per-tool resolution): %v", err)
+		span.RecordError(err)
+	}
 }
 
 // resolveInputContribs invokes Registry.Inputs once per referenced tool name.

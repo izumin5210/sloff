@@ -68,12 +68,30 @@ func TestParse_InvalidJSONFails(t *testing.T) {
 }
 
 func TestParse_EmptyTasks(t *testing.T) {
+	// An explicit empty list is a valid "no tasks" declaration.
 	got, err := parse("gen", []byte(`{"schema_version": "v1", "tasks": []}`))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("expected no commands, got %d", len(got))
+	}
+}
+
+func TestParse_MissingTasksFails(t *testing.T) {
+	// An absent or null "tasks" field must fail rather than be treated as an
+	// empty set, otherwise a malformed provider silently suppresses codegen.
+	for _, in := range []string{
+		`{"schema_version": "v1"}`,
+		`{"schema_version": "v1", "tasks": null}`,
+	} {
+		_, err := parse("gen", []byte(in))
+		if err == nil {
+			t.Fatalf("expected error for missing tasks in %s", in)
+		}
+		if !strings.Contains(err.Error(), "tasks") {
+			t.Errorf("error should mention the tasks field, got: %v", err)
+		}
 	}
 }
 

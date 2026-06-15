@@ -27,9 +27,12 @@ import (
 const SchemaVersion = "v1"
 
 // output is the versioned JSON envelope a command provider prints to stdout.
+// Tasks is a pointer so an absent or null "tasks" field (nil) is distinguished
+// from an explicit empty list ("tasks": []): the former is a malformed envelope
+// that must fail loudly rather than silently suppress every generated task.
 type output struct {
-	SchemaVersion string `json:"schema_version"`
-	Tasks         []task `json:"tasks"`
+	SchemaVersion string  `json:"schema_version"`
+	Tasks         *[]task `json:"tasks"`
 }
 
 // task is one entry of output.tasks, a 1:1 JSON mirror of spec.Command.
@@ -103,8 +106,15 @@ func parse(providerName string, stdout []byte) ([]spec.Command, error) {
 	if out.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("command provider %q: unsupported schema_version %q (want %q)", providerName, out.SchemaVersion, SchemaVersion)
 	}
-	cmds := make([]spec.Command, 0, len(out.Tasks))
-	for _, t := range out.Tasks {
+	// A missing or null "tasks" field is a malformed envelope, not "no tasks";
+	// accepting it would silently skip every generated task (ADR-0015 D2). Use
+	// an explicit "tasks": [] to declare no tasks.
+	if out.Tasks == nil {
+		return nil, fmt.Errorf(`command provider %q: output is missing the "tasks" field (emit "tasks": [] to declare no tasks)`, providerName)
+	}
+	tasks := *out.Tasks
+	cmds := make([]spec.Command, 0, len(tasks))
+	for _, t := range tasks {
 		cmds = append(cmds, spec.Command{
 			Name:    t.Name,
 			Cmd:     spec.CmdLine(t.Cmd),

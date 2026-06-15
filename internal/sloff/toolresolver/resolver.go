@@ -47,6 +47,30 @@ type Resolver interface {
 	Versions(ctx context.Context, specDir string, declared *DeclaredTool) ([]ResolvedVersion, error)
 }
 
+// Prewarmer is an optional interface a Resolver may implement to batch the
+// expensive per-tool discovery work (e.g. packages.Load / lockfile walks)
+// across every declared tool referencing it, before the runner fans out the
+// per-tool Inputs/Versions calls. The runner calls Prewarm once, ahead of
+// resolution; resolvers that don't implement it keep paying the original
+// per-tool cost.
+//
+// Prewarm MUST be a pure cache-warming optimisation: a resolver that
+// implements it has to return Inputs/Versions identical to what it would
+// without Prewarm, so the runner can treat a Prewarm error as non-fatal and
+// fall back to the per-tool path (which recomputes — and re-surfaces — the
+// same work).
+type Prewarmer interface {
+	Prewarm(ctx context.Context, reqs []PrewarmRequest) error
+}
+
+// PrewarmRequest pairs one declared tool with the spec dir it was defined in,
+// mirroring the (specDir, declared) arguments the runner passes to
+// Inputs/Versions. The runner builds one per referenced tool.
+type PrewarmRequest struct {
+	SpecDir  string
+	Declared *DeclaredTool
+}
+
 // ResolvedVersion is the OS-neutral logical version of a single tool.
 type ResolvedVersion struct {
 	Name    string // human-friendly identifier, e.g. "buf"

@@ -100,3 +100,18 @@ func (r *Registry) Prewarm(ctx context.Context, reqs []PrewarmRequest) error {
 	}
 	return nil
 }
+
+// PrewarmChannels returns the set of resolver channel names whose resolver
+// implements Prewarmer. The runner uses it to split referenced tools into a
+// "gated" group (resolved after Prewarm so they hit the warmed cache) and an
+// "eager" group (resolved concurrently with Prewarm), letting the batch
+// discovery overlap the eager channels' work instead of preceding it.
+func (r *Registry) PrewarmChannels() map[string]struct{} {
+	out := map[string]struct{}{}
+	for name, res := range r.byName {
+		if _, ok := res.(Prewarmer); ok {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}

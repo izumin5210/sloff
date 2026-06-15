@@ -24,12 +24,27 @@ import (
 )
 
 // File represents one parsed sloff.yml file. Each file may carry tool
-// definitions, command definitions, or both — at least one must be present.
-// Tool names declared here are merged into the repo-wide tool registry by
-// BuildToolRegistry; commands reference tools by name only.
+// definitions, command definitions, command providers, or any mix — at least
+// one must be present. Tool names declared here are merged into the repo-wide
+// tool registry by BuildToolRegistry; commands reference tools by name only.
+// CommandProviders are programs the runner execs at plan time to emit
+// additional commands dynamically (ADR-0015); they are resolved before
+// collectTasks, after which their output is indistinguishable from a
+// hand-written command.
 type File struct {
-	Tools    map[string]DeclaredTool `yaml:"tools,omitempty"`
-	Commands []Command               `yaml:"commands,omitempty"`
+	Tools            map[string]DeclaredTool `yaml:"tools,omitempty"`
+	Commands         []Command               `yaml:"commands,omitempty"`
+	CommandProviders []CommandProviderDecl   `yaml:"command_providers,omitempty"`
+}
+
+// CommandProviderDecl is one entry of the file-level command_providers: list
+// (ADR-0015). Exec is run at plan time with cwd set to the declaring spec dir;
+// its stdout is a versioned JSON envelope of task definitions that the runner
+// folds into the command set. Name is an identifier used in diagnostics and
+// must be unique within the file.
+type CommandProviderDecl struct {
+	Name string   `yaml:"name"`
+	Exec []string `yaml:"exec"`
 }
 
 // Depend is one entry of commands[*].depends — a reference to another task
@@ -195,13 +210,37 @@ func Parse(b []byte) (*File, error) {
 }
 
 func validate(f *File) error {
-	if len(f.Tools) == 0 && len(f.Commands) == 0 {
-		return errors.New("sloff.yml must declare at least one of tools[] or commands[]")
+	if len(f.Tools) == 0 && len(f.Commands) == 0 && len(f.CommandProviders) == 0 {
+		return errors.New("sloff.yml must declare at least one of tools[], commands[], or command_providers[]")
 	}
 	if err := validateTools(f.Tools); err != nil {
 		return err
 	}
-	return validateCommands(f.Commands)
+	if err := validateCommandProviders(f.CommandProviders); err != nil {
+		return err
+	}
+	return ValidateCommands(f.Commands)
+}
+
+// validateCommandProviders checks the file-level command_providers[] entries
+// (ADR-0015 D1): each needs a name and an exec, and names are unique within the
+// file. The commands a provider emits are validated separately, after the
+// runner execs the provider and merges the output into the command set.
+func validateCommandProviders(providers []CommandProviderDecl) error {
+	seen := make(map[string]struct{}, len(providers))
+	for i, p := range providers {
+		if p.Name == "" {
+			return fmt.Errorf("command_providers[%d]: name is required", i)
+		}
+		if len(p.Exec) == 0 {
+			return fmt.Errorf("command_providers[%d] (%s): exec is required", i, p.Name)
+		}
+		if _, dup := seen[p.Name]; dup {
+			return fmt.Errorf("duplicate command provider name %q within the same sloff.yml", p.Name)
+		}
+		seen[p.Name] = struct{}{}
+	}
+	return nil
 }
 
 func validateTools(tools map[string]DeclaredTool) error {
@@ -214,7 +253,13 @@ func validateTools(tools map[string]DeclaredTool) error {
 	return nil
 }
 
-func validateCommands(cmds []Command) error {
+// ValidateCommands enforces the per-command structural rules — required name /
+// cmd / inputs / outputs / tools, non-empty tool and depends references, and
+// name uniqueness within the set. Parse calls it on a file's static commands;
+// the runner re-runs it on the merged static+generated command set after
+// expanding command_providers (ADR-0015 D5) so dynamically emitted tasks face
+// the same validation as hand-written ones.
+func ValidateCommands(cmds []Command) error {
 	seen := make(map[string]struct{}, len(cmds))
 	for i, c := range cmds {
 		if c.Name == "" {

@@ -3,12 +3,12 @@
   "spec": {
     "dir": "spec",
     "task_id": "copy-a",
-    "cmd": "sh -c cp a.src a.out; printf v2 >> a.out"
+    "cmd": "cp a.src a.txt"
   },
   "input": {
-    "hash": "64c909d3870fed9f29b4f11e2e050031cc51c9c323af5d7a2c43ac062356dc5b",
+    "hash": "25b687536c377569b7d7b99f41741c25d4b0e97a8c6db9fd746847561239f464",
     "files_hash": "09405e6bf737e1072cb5019520ab8e14bcb3abd2a4362861715995a2f71eb924",
-    "cmd_hash": "2e74bb4eb59113573cc1f98cf07ba02e28ec81dd95a9401cc7a566471b895790",
+    "cmd_hash": "cfea22812e3f0b3ec7e4e26d004ebe7d80c1bb4a67e327b0a9ec706e1ae49cf9",
     "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
     "resolved_versions": [
       {
@@ -19,11 +19,11 @@
     ]
   },
   "output": {
-    "hash": "d1761f8115dea11a39ea70f5fdebac715164ad903f47fc78f21125ddb1599373",
+    "hash": "3c519576186bd3155368cc5aa24736e1609ca43389c14b128cb4971f780d6e8a",
     "files": [
       {
-        "path": "spec/a.out",
-        "hash": "b959dc9c4fa7d1cb78edbcbf7b3e6815a13ff9a3c71338b4faee9d30cfdf5bea"
+        "path": "spec/a.txt",
+        "hash": "b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060"
       }
     ]
   }

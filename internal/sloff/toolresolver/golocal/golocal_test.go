@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -34,6 +35,33 @@ func (f *fakeLister) List(_ context.Context, specDir, entry string) (lister.List
 		return lister.Listing{}, f.err
 	}
 	return f.listing, nil
+}
+
+// fakeBatchLister stubs BatchSourceLister, recording the entries each spec dir
+// batch received. Prewarm fans out one batch per spec dir concurrently, so the
+// recording is mutex-guarded.
+type fakeBatchLister struct {
+	mu        sync.Mutex
+	bySpecDir map[string][]string
+	listing   lister.Listing
+}
+
+func (f *fakeBatchLister) List(_ context.Context, _, _ string) (lister.Listing, error) {
+	return f.listing, nil
+}
+
+func (f *fakeBatchLister) ListBatch(_ context.Context, specDir string, entries []string) (map[string]lister.Listing, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bySpecDir == nil {
+		f.bySpecDir = map[string][]string{}
+	}
+	f.bySpecDir[specDir] = append(f.bySpecDir[specDir], entries...)
+	out := make(map[string]lister.Listing, len(entries))
+	for _, e := range entries {
+		out[e] = f.listing
+	}
+	return out, nil
 }
 
 func TestResolver_Name(t *testing.T) {
@@ -299,4 +327,61 @@ func mustVersion(t *testing.T, stub *fakeLister) string {
 		t.Fatalf("len(Versions) = %d, want 1", len(got))
 	}
 	return got[0].Version
+}
+
+// TestResolver_PrewarmBatchesEachSpecDirOnce locks the prewarm fan-out: reqs are
+// grouped by spec dir and each dir is warmed with a single ListBatch carrying
+// that dir's entries. The concurrent fan-out is capped by prewarmConcurrency; a
+// broken cap (e.g. SetLimit(0)) would deadlock this test rather than miscount.
+func TestResolver_PrewarmBatchesEachSpecDirOnce(t *testing.T) {
+	stub := &fakeBatchLister{listing: lister.Listing{InternalFiles: []string{"x.go"}}}
+	r := golocal.New(t.TempDir(), stub)
+
+	reqs := []toolresolver.PrewarmRequest{
+		{SpecDir: "a", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/one"}},
+		{SpecDir: "a", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/two"}},
+		{SpecDir: "b", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/three"}},
+	}
+	if err := r.Prewarm(context.Background(), reqs); err != nil {
+		t.Fatalf("Prewarm: %v", err)
+	}
+
+	if got := stub.bySpecDir["a"]; len(got) != 2 {
+		t.Errorf("spec a batch entries = %v, want 2 (./cmd/one, ./cmd/two)", got)
+	}
+	if got := stub.bySpecDir["b"]; len(got) != 1 {
+		t.Errorf("spec b batch entries = %v, want 1 (./cmd/three)", got)
+	}
+}
+
+// TestResolver_PrewarmNoopWithoutBatchLister guards the documented fallback:
+// when the lister can't batch (e.g. the glob fallback), Prewarm does nothing and
+// returns nil rather than erroring, leaving the per-tool path to do the work.
+func TestResolver_PrewarmNoopWithoutBatchLister(t *testing.T) {
+	r := golocal.New(t.TempDir(), &fakeLister{})
+	err := r.Prewarm(context.Background(), []toolresolver.PrewarmRequest{
+		{SpecDir: "a", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/x"}},
+	})
+	if err != nil {
+		t.Errorf("Prewarm with non-batch lister must be a no-op, got %v", err)
+	}
+}
+
+// TestResolver_PrewarmSkipsMalformedEntry guards that a malformed declared entry
+// is dropped from the warm set (its real error surfaces later on the per-tool
+// path) instead of failing the whole prewarm.
+func TestResolver_PrewarmSkipsMalformedEntry(t *testing.T) {
+	stub := &fakeBatchLister{listing: lister.Listing{InternalFiles: []string{"x.go"}}}
+	r := golocal.New(t.TempDir(), stub)
+
+	reqs := []toolresolver.PrewarmRequest{
+		{SpecDir: "a", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "cmd/bad"}}, // missing ./
+		{SpecDir: "a", Declared: &toolresolver.DeclaredTool{Resolver: "go-local", Entry: "./cmd/ok"}},
+	}
+	if err := r.Prewarm(context.Background(), reqs); err != nil {
+		t.Fatalf("Prewarm: %v", err)
+	}
+	if got := stub.bySpecDir["a"]; len(got) != 1 || got[0] != "./cmd/ok" {
+		t.Errorf("spec a batch entries = %v, want only [./cmd/ok]", got)
+	}
 }

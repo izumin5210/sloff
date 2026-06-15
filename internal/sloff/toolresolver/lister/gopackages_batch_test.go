@@ -2,6 +2,7 @@ package lister_test
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"sort"
 	"testing"
@@ -77,5 +78,46 @@ func TestGoPackages_ListBatchSkipsWildcard(t *testing.T) {
 	}
 	if len(batched) != 0 {
 		t.Errorf("wildcard entry should be skipped for fallback, got %v", batched)
+	}
+}
+
+// TestGoPackages_ListBatchGoWorkDisjointMains exercises the multi-main-module
+// path: a go.work build whose entries live in different repo-local modules with
+// no import edge between them. The batch must still return, for each entry, a
+// Listing byte-identical to a standalone List — and must not bleed one module's
+// files (or, by extension, go.sum corpus) into the other.
+func TestGoPackages_ListBatchGoWorkDisjointMains(t *testing.T) {
+	requireGo(t)
+	root := t.TempDir()
+	mustWriteFile(t, root, "go.work", "go 1.22\n\nuse ./a\nuse ./b\n")
+	mustWriteFile(t, root, "a/go.mod", "module example.test/a\n\ngo 1.22\n")
+	mustWriteFile(t, root, "a/cmd/gen/main.go", "package main\n\nimport \"example.test/a/pkg/util\"\n\nfunc main() { _ = util.V }\n")
+	mustWriteFile(t, root, "a/pkg/util/util.go", "package util\n\nconst V = \"a\"\n")
+	mustWriteFile(t, root, "b/go.mod", "module example.test/b\n\ngo 1.22\n")
+	mustWriteFile(t, root, "b/cmd/gen/main.go", "package main\n\nfunc main() {}\n")
+
+	gp := lister.NewGoPackages(root)
+	bl := gp.(lister.BatchSourceLister)
+	entries := []string{"./a/cmd/gen", "./b/cmd/gen"}
+	batched, err := bl.ListBatch(context.Background(), "", entries)
+	if err != nil {
+		t.Fatalf("ListBatch: %v", err)
+	}
+	for _, e := range entries {
+		want, err := gp.List(context.Background(), "", e)
+		if err != nil {
+			t.Fatalf("List(%q): %v", e, err)
+		}
+		got, ok := batched[e]
+		if !ok {
+			t.Fatalf("ListBatch missing entry %q", e)
+		}
+		if !reflect.DeepEqual(want, got) {
+			t.Errorf("entry %q batch vs per-entry mismatch:\n batch=%+v\n  want=%+v", e, got, want)
+		}
+	}
+	// Cross-module isolation: a's internal file must not appear under b.
+	if b := batched["./b/cmd/gen"]; slices.Contains(b.InternalFiles, "a/pkg/util/util.go") {
+		t.Errorf("./b/cmd/gen leaked a's files: %v", b.InternalFiles)
 	}
 }

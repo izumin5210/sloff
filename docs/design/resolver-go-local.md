@@ -245,7 +245,10 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
    `Plan` ( Inputs のみ) の両方で温める。
 2. go-local resolver の `Prewarm` は reqs を **spec dir ごとに entry 集約**し、 各 spec dir で
    `BatchSourceLister.ListBatch` を 1 回呼ぶ。 spec dir 間は独立な `packages.Load` なので
-   並列実行し、 warm phase のコストを「最大の spec dir 1 回ぶん」に均す。
+   並列実行し、 warm phase のコストを「最大の spec dir 1 回ぶん」に均す。 ただし各 batch は
+   `go list` ( 内部で GOMAXPROCS 並列) を起動しうるため、 並列度は NumCPU で上限を設ける
+   ( runner の per-tool resolver fan-out と同方針。 spec dir が多い monorepo で file system と
+   toolchain の並列を stampede させない)。
 3. `goPackagesLister.ListBatch` は **1 回の `packages.Load(cfg, entry1, …, entryN)`** で全 entry を
    ロードし、 各 root package を **package directory で entry に対応付け**て個別 Listing を返す。
    結果は `Memoized` lister に prime されるので、 後続の per-tool `Inputs`/`Versions` は cache hit。
@@ -258,8 +261,11 @@ batch の Listing は per-entry `List` と **byte-identical** でなければな
 - `packages.Load` は同一 `PkgPath` の package を 1 インスタンスに dedup するが、 各 entry の
   Listing は **その entry の root から独立に walk** して作る ( visited セットは walk ごとにリセット)。
   → ある entry の到達可能集合は単一ロードと同じで、 他 entry の依存が混ざらない。
-- go.sum は load された全 main module から読むが、 main module 集合は **どの root から辿っても同一**
-  なので、 各 entry で同じ go.sum 母集団を共有しても単一 `List` と一致する。
+- go.sum 母集団は **各 entry の root から到達可能な main module だけ**にスコープして読む
+  ( per-entry `List` と同一の母集団)。 単一 module なら全 entry が同じ母集団を共有するので
+  読み込みは 1 回で済むが、 `go.work` で相互 import しない複数 main module が同一 spec dir に
+  混在する場合でも、 ある entry の Listing に別 module の go.sum 行が混入しない
+  ( batch 全体の母集団を共有すると `resolved_versions_hash` が prewarm の有無で変わってしまう)。
 - entry が 1 root に 1:1 対応しないもの ( `./...` wildcard、 不在 package) は batch から除外し、
   呼び出し側が per-entry `List` に fallback する。
 

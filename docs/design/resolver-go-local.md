@@ -231,6 +231,47 @@ resolver := golocal.New(lister.NewGlob([]string{"**/*.go"}, []string{"**/*_test.
 
 [Architecture > SourceLister 共通の挙動 / 利点](./architecture.md#sourcelister-共通の挙動--利点) を参照。 メモ化 / OS 非依存 / sloff バイナリ単体完結等の共通機能。
 
+## Batch prewarm ( spec dir 単位の `packages.Load` 集約)
+
+多数の内製 generator を持つ monorepo では、 同一 Go module 内に住む go-local tool が
+数十個 referenced されることがある。 resolver は tool ごとに `packages.Load` を呼ぶため、
+**module の共有依存グラフ ( `go list` コストの大半) を tool 数だけ重複ロード**してしまう。
+大きめの monorepo では go-local の解決フェーズが setup の最大項の一つになっていた。
+
+これを `toolresolver.Prewarmer` フックで解消する:
+
+1. runner は resolve のファンアウト前に 1 度だけ `Registry.Prewarm` を呼ぶ。 reqs は
+   referenced な全 tool の `(specDir, declared)`。 `Run` ( Inputs + Versions) と
+   `Plan` ( Inputs のみ) の両方で温める。
+2. go-local resolver の `Prewarm` は reqs を **spec dir ごとに entry 集約**し、 各 spec dir で
+   `BatchSourceLister.ListBatch` を 1 回呼ぶ。 spec dir 間は独立な `packages.Load` なので
+   並列実行し、 warm phase のコストを「最大の spec dir 1 回ぶん」に均す。 ただし各 batch は
+   `go list` ( 内部で GOMAXPROCS 並列) を起動しうるため、 並列度は NumCPU で上限を設ける
+   ( runner の per-tool resolver fan-out と同方針。 spec dir が多い monorepo で file system と
+   toolchain の並列を stampede させない)。
+3. `goPackagesLister.ListBatch` は **1 回の `packages.Load(cfg, entry1, …, entryN)`** で全 entry を
+   ロードし、 各 root package を **package directory で entry に対応付け**て個別 Listing を返す。
+   結果は `Memoized` lister に prime されるので、 後続の per-tool `Inputs`/`Versions` は cache hit。
+
+### soundness
+
+batch の Listing は per-entry `List` と **byte-identical** でなければならない ( 異なると
+`resolved_versions_hash` が変わり、 全 task が miss して再生成される)。 次の性質で担保する:
+
+- `packages.Load` は同一 `PkgPath` の package を 1 インスタンスに dedup するが、 各 entry の
+  Listing は **その entry の root から独立に walk** して作る ( visited セットは walk ごとにリセット)。
+  → ある entry の到達可能集合は単一ロードと同じで、 他 entry の依存が混ざらない。
+- go.sum 母集団は **各 entry の root から到達可能な main module だけ**にスコープして読む
+  ( per-entry `List` と同一の母集団)。 単一 module なら全 entry が同じ母集団を共有するので
+  読み込みは 1 回で済むが、 `go.work` で相互 import しない複数 main module が同一 spec dir に
+  混在する場合でも、 ある entry の Listing に別 module の go.sum 行が混入しない
+  ( batch 全体の母集団を共有すると `resolved_versions_hash` が prewarm の有無で変わってしまう)。
+- entry が 1 root に 1:1 対応しないもの ( `./...` wildcard、 不在 package) は batch から除外し、
+  呼び出し側が per-entry `List` に fallback する。
+
+`Prewarm` は純粋な cache 温め最適化であり、 失敗は致命ではない ( runner は warn して per-tool
+パスに委ねる)。 per-tool パスが同じ discovery を再計算し、 本物のエラーはそこで再浮上する。
+
 ## Preflight Checker は持たない ( Go の install model に由来する構造的理由)
 
 go-local には install drift / build artefact freshness いずれの Checker も置いていない。 これは「 必要なのに省略している」 のではなく、 **Go の install model が drift を構造的に作らない** ため。

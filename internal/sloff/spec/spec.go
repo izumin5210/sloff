@@ -11,10 +11,14 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
 	yaml "github.com/goccy/go-yaml"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/izumin5210/sloff/internal/sloff/glob"
 )
@@ -375,9 +379,11 @@ func ValidateDependReferences(specs []Spec) error {
 // expression like "**/sloff.yml") parsed and validated. Heavy build / VCS
 // directories listed in discoverSkipDirs are pruned without descent.
 //
-// Ordering is path-ascending and deterministic — fs.WalkDir visits siblings in
-// lexical order, so callers no longer depend on doublestar.Glob's traversal
-// order to be stable.
+// Top-level children of root are walked concurrently: a polyglot monorepo fans
+// out into a few large, ReadDir-bound subtrees (go/, web/, …) whose walks
+// otherwise run back-to-back on a single goroutine. The assembled result is
+// sorted by path so ordering stays path-ascending and deterministic regardless
+// of goroutine scheduling.
 func Discover(root, pattern string) ([]Spec, error) {
 	if _, err := doublestar.Match(pattern, ""); err != nil {
 		// doublestar.Match rejects malformed patterns up-front so we surface the
@@ -386,49 +392,90 @@ func Discover(root, pattern string) ([]Spec, error) {
 		return nil, fmt.Errorf("invalid pattern %q: %w", pattern, err)
 	}
 
-	var specs []Spec
-	walkErr := filepath.WalkDir(root, func(osPath string, d fs.DirEntry, err error) error {
+	rootEntries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", root, err)
+	}
+
+	var (
+		mu    sync.Mutex
+		specs []Spec
+	)
+	collect := func(s Spec) {
+		mu.Lock()
+		specs = append(specs, s)
+		mu.Unlock()
+	}
+
+	g := new(errgroup.Group)
+	g.SetLimit(max(runtime.GOMAXPROCS(0), 1))
+	for _, e := range rootEntries {
+		name := e.Name()
+		if e.IsDir() {
+			if _, skip := discoverSkipDirs[name]; skip {
+				continue
+			}
+			g.Go(func() error { return walkSpecs(root, name, pattern, collect) })
+		} else {
+			g.Go(func() error { return matchSpecPath(root, filepath.Join(root, name), pattern, collect) })
+		}
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Path < specs[j].Path })
+	return specs, nil
+}
+
+// walkSpecs walks the subtree rooted at root/dir and collects every file
+// matching pattern, pruning discoverSkipDirs without descent. It is the
+// per-top-level-child body Discover fans out across goroutines.
+func walkSpecs(root, dir, pattern string, collect func(Spec)) error {
+	return filepath.WalkDir(filepath.Join(root, dir), func(osPath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if osPath == root {
-				return nil
-			}
 			if _, skip := discoverSkipDirs[d.Name()]; skip {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(root, osPath)
-		if err != nil {
-			return err
-		}
-		slashRel := filepath.ToSlash(rel)
-		ok, err := doublestar.Match(pattern, slashRel)
-		if err != nil {
-			return fmt.Errorf("match %q against %q: %w", pattern, slashRel, err)
-		}
-		if !ok {
-			return nil
-		}
-		b, readErr := os.ReadFile(osPath)
-		if readErr != nil {
-			return fmt.Errorf("read %s: %w", slashRel, readErr)
-		}
-		f, parseErr := Parse(b)
-		if parseErr != nil {
-			return fmt.Errorf("parse %s: %w", slashRel, parseErr)
-		}
-		specs = append(specs, Spec{
-			Dir:  filepath.FromSlash(path.Dir(slashRel)),
-			Path: filepath.FromSlash(slashRel),
-			File: f,
-		})
-		return nil
+		return matchSpecPath(root, osPath, pattern, collect)
 	})
-	if walkErr != nil {
-		return nil, walkErr
+}
+
+// matchSpecPath matches one file (absolute osPath) against pattern and, on a
+// hit, parses and collects it as a Spec keyed by its repo-relative slash path.
+// Shared by the subtree walk and the root-level file check; the repo-relative
+// path is computed against root so the slash-form key is identical to the old
+// single-walk output.
+func matchSpecPath(root, osPath, pattern string, collect func(Spec)) error {
+	rel, err := filepath.Rel(root, osPath)
+	if err != nil {
+		return err
 	}
-	return specs, nil
+	slashRel := filepath.ToSlash(rel)
+	ok, err := doublestar.Match(pattern, slashRel)
+	if err != nil {
+		return fmt.Errorf("match %q against %q: %w", pattern, slashRel, err)
+	}
+	if !ok {
+		return nil
+	}
+	b, readErr := os.ReadFile(osPath)
+	if readErr != nil {
+		return fmt.Errorf("read %s: %w", slashRel, readErr)
+	}
+	f, parseErr := Parse(b)
+	if parseErr != nil {
+		return fmt.Errorf("parse %s: %w", slashRel, parseErr)
+	}
+	collect(Spec{
+		Dir:  filepath.FromSlash(path.Dir(slashRel)),
+		Path: filepath.FromSlash(slashRel),
+		File: f,
+	})
+	return nil
 }

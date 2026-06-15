@@ -129,6 +129,40 @@ func TestReadGoSumForMainModules_ConcatenatesGoWorkSiblings(t *testing.T) {
 	}
 }
 
+// TestMainModuleGoMods_DisjointRootsStayScoped guards the per-entry go.sum
+// scoping ListBatch depends on: a root that does not reach a sibling main
+// module must not pull that sibling's go.mod (hence go.sum) into its corpus.
+// A standalone List sees only the entry's own root, so a batch that shared one
+// corpus across disjoint main modules would diverge — scoping per root is what
+// keeps a batched Listing byte-identical to List in a go.work build.
+func TestMainModuleGoMods_DisjointRootsStayScoped(t *testing.T) {
+	repoRoot := t.TempDir()
+	aGoMod := filepath.Join(repoRoot, "a", "go.mod")
+	bGoMod := filepath.Join(repoRoot, "b", "go.mod")
+
+	a := &packages.Package{
+		ID:     "example.test/a/cmd/tool",
+		Module: &packages.Module{Main: true, Path: "example.test/a", GoMod: aGoMod},
+	}
+	b := &packages.Package{
+		ID:     "example.test/b/cmd/tool",
+		Module: &packages.Module{Main: true, Path: "example.test/b", GoMod: bGoMod},
+	}
+	// a deliberately does not import b: the two roots are disjoint.
+
+	if got := mainModuleGoMods([]*packages.Package{a}); !slices.Equal(got, []string{aGoMod}) {
+		t.Errorf("scoped to a's root = %v, want only %q (sibling b must not leak in)", got, aGoMod)
+	}
+	if got := mainModuleGoMods([]*packages.Package{b}); !slices.Equal(got, []string{bGoMod}) {
+		t.Errorf("scoped to b's root = %v, want only %q", got, bGoMod)
+	}
+	// Collecting from both roots at once yields the wider corpus that ListBatch
+	// must NOT share across entries — the regression this scoping prevents.
+	if got := mainModuleGoMods([]*packages.Package{a, b}); len(got) != 2 {
+		t.Errorf("both roots = %v, want both go.mod paths (per-batch scope)", got)
+	}
+}
+
 // TestReadGoSumForMainModules_TolerateMissingSiblingGoSum: if one main module
 // has a go.sum and the other doesn't, the result is the union of what exists.
 // Missing files must not abort the whole load.

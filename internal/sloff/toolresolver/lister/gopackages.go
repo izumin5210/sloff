@@ -35,10 +35,8 @@ type goPackagesLister struct {
 }
 
 func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Listing, error) {
-	if entry != "." && entry != ".." &&
-		!strings.HasPrefix(entry, "./") && !strings.HasPrefix(entry, "../") {
-		return Listing{}, fmt.Errorf("entry must start with %q or %q (or be %q / %q), got %q",
-			"./", "../", ".", "..", entry)
+	if err := validateEntry(entry); err != nil {
+		return Listing{}, err
 	}
 
 	cfg := &packages.Config{
@@ -86,17 +84,129 @@ func (l *goPackagesLister) List(ctx context.Context, specDir, entry string) (Lis
 	return listing, nil
 }
 
-// readGoSumForMainModules locates every main module reachable from roots and
-// concatenates each <module dir>/go.sum. Multiple main modules show up when a
-// `go.work` file pulls several repo-local modules into one build; combining
-// their go.sum files lets dependency bumps in any used module flip
-// resolved_versions_hash. Missing go.sum is tolerated (fresh module before `go mod tidy`,
-// stdlib-only deps); empty go.sum ends up as empty GoSumLine values for any
-// external modules, which is honest about the missing cryptographic anchor.
+// validateEntry rejects entries not in the `go run`-compatible spec-relative
+// form the resolver accepts. Shared by List and ListBatch.
+func validateEntry(entry string) error {
+	if entry != "." && entry != ".." &&
+		!strings.HasPrefix(entry, "./") && !strings.HasPrefix(entry, "../") {
+		return fmt.Errorf("entry must start with %q or %q (or be %q / %q), got %q",
+			"./", "../", ".", "..", entry)
+	}
+	return nil
+}
+
+// ListBatch resolves every entry sharing one spec dir with a single
+// packages.Load, so the module's shared dependency graph — the dominant cost
+// of `go list` on a large monorepo — is built once instead of once per entry.
+// Each loaded root package is matched back to its entry by package directory;
+// the result is byte-identical to calling List per entry because the listing
+// for one entry is produced by walking that entry's root exactly as List does,
+// and that entry's go.sum corpus is scoped to the main-module set its own root
+// reaches — never widened by sibling entries in the same batch.
 //
-// Module order is sorted by GoMod path so concatenation is deterministic
-// regardless of how packages.Load happened to enumerate them.
-func readGoSumForMainModules(roots []*packages.Package) ([]byte, error) {
+// Entries that can't map 1:1 to a single root — `./...`-style wildcards, a
+// malformed entry, or a package that didn't load — are omitted from the
+// result so the caller (Memoized.ListBatch) falls back to per-entry List for
+// them. A load error that affects the whole batch is returned as-is.
+func (l *goPackagesLister) ListBatch(ctx context.Context, specDir string, entries []string) (map[string]Listing, error) {
+	// Only entries that resolve to a single concrete directory are batchable;
+	// the rest are left for the caller's per-entry fallback (which also
+	// re-surfaces a malformed-entry error through List).
+	var batchable []string
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		if validateEntry(entry) != nil || strings.Contains(entry, "...") {
+			continue
+		}
+		if _, dup := seen[entry]; dup {
+			continue
+		}
+		seen[entry] = struct{}{}
+		batchable = append(batchable, entry)
+	}
+	if len(batchable) == 0 {
+		return map[string]Listing{}, nil
+	}
+
+	cfg := &packages.Config{
+		Mode: packages.NeedFiles | packages.NeedEmbedFiles |
+			packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+		Dir:     filepath.Join(l.repoRoot, specDir),
+		Context: ctx,
+	}
+	pkgs, err := packages.Load(cfg, batchable...)
+	if err != nil {
+		return nil, fmt.Errorf("packages.Load batch %v: %w", batchable, err)
+	}
+	if errs := collectPackageErrors(pkgs); len(errs) > 0 {
+		return nil, fmt.Errorf("packages.Load batch %v: %s", batchable, strings.Join(errs, "; "))
+	}
+
+	rootByDir := make(map[string]*packages.Package, len(pkgs))
+	for _, pkg := range pkgs {
+		if dir := packageDir(pkg); dir != "" {
+			rootByDir[dir] = pkg
+		}
+	}
+
+	// go.sum is scoped per entry to the main-module set its own root reaches —
+	// exactly what a standalone List(entry) reads. Sharing one corpus across
+	// the whole batch would, in a go.work build whose entries belong to disjoint
+	// main modules, leak a sibling module's go.sum lines into an entry's Listing
+	// and flip resolved_versions_hash depending on whether prewarm ran. Corpora
+	// are memoised by main-module set so the common case (every entry in one
+	// module) still reads go.sum once.
+	goSumByScope := map[string][]byte{}
+	out := make(map[string]Listing, len(batchable))
+	for _, entry := range batchable {
+		absDir := filepath.Clean(filepath.Join(l.repoRoot, specDir, entry))
+		pkg, ok := rootByDir[absDir]
+		if !ok {
+			// Unmapped (e.g. an entry pattern that matched no package or
+			// resolved to a dir we can't key on): leave for List fallback.
+			continue
+		}
+		goMods := mainModuleGoMods([]*packages.Package{pkg})
+		scope := strings.Join(goMods, "\x00")
+		goSum, ok := goSumByScope[scope]
+		if !ok {
+			goSum, err = readGoSumFiles(goMods)
+			if err != nil {
+				return nil, fmt.Errorf("read go.sum for %q: %w", entry, err)
+			}
+			goSumByScope[scope] = goSum
+		}
+		listing, err := l.walk([]*packages.Package{pkg}, goSum)
+		if err != nil {
+			return nil, fmt.Errorf("walk %q: %w", entry, err)
+		}
+		out[entry] = listing
+	}
+	return out, nil
+}
+
+// packageDir returns the on-disk directory of pkg, derived from whichever file
+// group is populated. Used to match a loaded root back to the entry that asked
+// for it. Empty when pkg owns no files (should not happen for a main package).
+func packageDir(pkg *packages.Package) string {
+	for _, group := range [][]string{pkg.GoFiles, pkg.OtherFiles, pkg.IgnoredFiles, pkg.EmbedFiles} {
+		if len(group) > 0 {
+			return filepath.Dir(group[0])
+		}
+	}
+	return ""
+}
+
+// mainModuleGoMods returns the sorted, de-duplicated go.mod paths of every main
+// module reachable from roots. Multiple paths appear when a `go.work` file pulls
+// several repo-local modules into one build. The set doubles as the scope key
+// for a listing's go.sum corpus: two roots that reach the same main-module set
+// may share one corpus, while roots reaching disjoint sets must not — otherwise
+// one entry's listing would absorb a sibling module's go.sum lines.
+//
+// Sorting makes the key (and the downstream concatenation) deterministic
+// regardless of how packages.Load happened to enumerate the modules.
+func mainModuleGoMods(roots []*packages.Package) []string {
 	seen := map[string]struct{}{}
 	var goModPaths []string
 	packages.Visit(roots, nil, func(pkg *packages.Package) {
@@ -109,11 +219,19 @@ func readGoSumForMainModules(roots []*packages.Package) ([]byte, error) {
 		seen[pkg.Module.GoMod] = struct{}{}
 		goModPaths = append(goModPaths, pkg.Module.GoMod)
 	})
+	sort.Strings(goModPaths)
+	return goModPaths
+}
+
+// readGoSumFiles concatenates <dir>/go.sum for each go.mod path in goModPaths
+// (which mainModuleGoMods already sorted, so the output is deterministic).
+// Missing go.sum is tolerated (fresh module before `go mod tidy`, stdlib-only
+// deps); an empty corpus ends up as empty GoSumLine values for any external
+// modules, which is honest about the missing cryptographic anchor.
+func readGoSumFiles(goModPaths []string) ([]byte, error) {
 	if len(goModPaths) == 0 {
 		return nil, nil
 	}
-	sort.Strings(goModPaths)
-
 	var combined []byte
 	for _, p := range goModPaths {
 		b, err := os.ReadFile(filepath.Join(filepath.Dir(p), "go.sum"))
@@ -129,6 +247,15 @@ func readGoSumForMainModules(roots []*packages.Package) ([]byte, error) {
 		combined = append(combined, b...)
 	}
 	return combined, nil
+}
+
+// readGoSumForMainModules locates every main module reachable from roots and
+// concatenates each <module dir>/go.sum. Multiple main modules show up when a
+// `go.work` file pulls several repo-local modules into one build; combining
+// their go.sum files lets dependency bumps in any used module flip
+// resolved_versions_hash.
+func readGoSumForMainModules(roots []*packages.Package) ([]byte, error) {
+	return readGoSumFiles(mainModuleGoMods(roots))
 }
 
 func (l *goPackagesLister) walk(roots []*packages.Package, goSum []byte) (Listing, error) {

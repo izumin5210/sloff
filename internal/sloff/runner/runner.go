@@ -703,7 +703,15 @@ func (r *Runner) expandDependPatterns(ctx context.Context) (err error) {
 		return err
 	}
 	r.opts.Specs = specs
-	r.patternGroups = indexPatternGroups(groups)
+	// Plan is a documented pre-Run step on the same Runner (see
+	// expandCommandProviders): the first call rewrites every pattern to literal
+	// edges, so a second call sees no patterns and ExpandDependPatterns returns
+	// empty groups. Only overwrite the provenance when this call actually
+	// expanded something, so the warning path keeps the first call's per-pattern
+	// groups instead of falling back to a per-edge warning (ADR-0016 D4).
+	if len(groups) > 0 {
+		r.patternGroups = indexPatternGroups(groups)
+	}
 	span.SetAttributes(attribute.Int("sloff.depends.pattern_count", len(groups)))
 	return nil
 }

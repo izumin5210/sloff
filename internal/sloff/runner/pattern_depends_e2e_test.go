@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -124,4 +125,80 @@ func TestRunner_PatternDepends_E2E_MatchesGeneratedTasks(t *testing.T) {
 func TestRunner_PatternDepends_E2E_UnobservedWarns(t *testing.T) {
 	requireSh(t)
 	runE2E(t, "pattern-depends-unobserved-warns", runStep(expectWarn(`pattern "copy-*"`)))
+}
+
+// patternUnobservedProducerYML matches gen-a/gen-b with "gen-*" but the consumer
+// (svc/consume) reads neither output, so warnUnobservedDepends must emit the
+// single aggregated per-pattern warning (ADR-0016 D4), never one per expanded
+// edge.
+const patternUnobservedProducerYML = `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+commands:
+  - name: gen-a
+    cmd: ["sh", "-c", "echo a > a.out"]
+    inputs: ["a.in"]
+    outputs: ["a.out"]
+    tools: [versioner]
+  - name: gen-b
+    cmd: ["sh", "-c", "echo b > b.out"]
+    inputs: ["b.in"]
+    outputs: ["b.out"]
+    tools: [versioner]
+`
+
+// TestRunner_PatternDepends_PlanThenRunKeepsPatternWarning is the regression for
+// the provenance-loss bug: calling Plan before Run on the same Runner expanded
+// the patterns to literals on the first call, so the second (Run) expansion saw
+// no patterns and used to clear r.patternGroups. With the provenance gone,
+// warnUnobservedDepends fell back to one per-edge warning per matched task
+// instead of ADR-0016 D4's single aggregated per-pattern warning. Plan is a
+// documented pre-Run step (see expandCommandProviders), so the aggregated
+// warning must survive it.
+func TestRunner_PatternDepends_PlanThenRunKeepsPatternWarning(t *testing.T) {
+	workdir, specs := setupProviderWorkdir(t, map[string]string{
+		"gen/sloff.yml": patternUnobservedProducerYML,
+		"gen/a.in":      "a",
+		"gen/b.in":      "b",
+		"svc/sloff.yml": `commands:
+  - name: consume
+    cmd: ["sh", "-c", "echo y > y.out"]
+    inputs: ["x.in"]
+    outputs: ["y.out"]
+    tools: [versioner]
+    depends:
+      - {spec: ../gen, task: "gen-*"}
+`,
+		"svc/x.in": "x",
+	})
+
+	r, logs := newProviderRunnerLogged(t, workdir, specs)
+	if _, _, err := r.Plan(context.Background()); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logs.mu.Lock()
+	warns := append([]string(nil), logs.warns...)
+	logs.mu.Unlock()
+
+	aggregated, perEdge := 0, 0
+	for _, w := range warns {
+		// "...the tasks it matched produced..." is unique to the aggregated
+		// per-pattern message; "...the files it produced..." is unique to the
+		// per-edge one (warnUnobservedDepends).
+		if strings.Contains(w, "none of the tasks it matched produced") {
+			aggregated++
+		}
+		if strings.Contains(w, "none of the files it produced") {
+			perEdge++
+		}
+	}
+	if aggregated != 1 || perEdge != 0 {
+		t.Fatalf("after Plan→Run want 1 aggregated + 0 per-edge unobserved warning, got %d aggregated / %d per-edge; warnings: %v",
+			aggregated, perEdge, warns)
+	}
 }

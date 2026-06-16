@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.0.5](https://github.com/izumin5210/sloff/compare/v0.0.4...v0.0.5) - 2026-06-16
+- perf(toolresolver): batch go-local packages.Load across tools sharing a spec dir by @izumin5210 in https://github.com/izumin5210/sloff/pull/53
+- perf(spec): walk top-level children concurrently in Discover by @izumin5210 in https://github.com/izumin5210/sloff/pull/54
+- perf(runner): overlap go-local prewarm with the eager resolver fan-out by @izumin5210 in https://github.com/izumin5210/sloff/pull/57
+- feat: dynamic tasks via command_providers (ADR-0015) by @izumin5210 in https://github.com/izumin5210/sloff/pull/55
+- feat: pattern task dependencies (ADR-0016) by @izumin5210 in https://github.com/izumin5210/sloff/pull/58
+
 ## [v0.0.4](https://github.com/izumin5210/sloff/compare/v0.0.3...v0.0.4) - 2026-06-14
 - perf(pnpmlocal): batch git ls-files across a tool's workspace dirs by @izumin5210 in https://github.com/izumin5210/sloff/pull/49
 - perf(fingerprint): warm DynamoDB credentials in the background at run start by @izumin5210 in https://github.com/izumin5210/sloff/pull/51

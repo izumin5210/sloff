@@ -74,7 +74,7 @@ ADR-0015 の `command_providers` はこの consumer 側を直接は解けない�
 
 ### D1. spec 文法: `task` フィールドの glob
 
-`depends[*].task` の値に glob メタ文字 ( `*` / `?` / `[...]`) を含められる。 メタ文字を含まない値は従来どおり literal な task 名として扱う ( 後方互換)。 ADR-0008 D4 の task 名規則 ( `^[a-z0-9][a-z0-9_-]*$`) は glob メタ文字を含まないため、 値にメタ文字が現れたら一意に「 pattern」 と判定でき、 新たな区切り規則を導入せずに済む。
+`depends[*].task` の値に glob メタ文字 ( `*` / `?` / `[...]`) を含められる。 メタ文字を含まない値は従来どおり literal な task 名として扱う ( 後方互換)。 ADR-0008 D4 の task 名規則 ( `^[a-z0-9][a-z0-9_-]*$`) は glob メタ文字を含まないため、 値にメタ文字が現れたら一意に「 pattern」 と判定でき、 新たな区切り規則を導入せずに済む。 この一意性は task 名が実際に slug に強制されていて初めて成立するため、 `ValidateCommands` が ( static / provider 生成を問わず) 全 task 名へ D4 の規則を load 時に強制する。 これがないと `gen-*` のようなメタ文字入り task 名を受理してしまい、 それを参照する literal depends が誤って pattern 判定され、 無関係なエッジ追加や cycle を生む。
 
 ```yaml
 commands:

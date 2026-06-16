@@ -13,9 +13,10 @@ import (
 )
 
 // dependPatternMeta are the glob metacharacters that distinguish a depends
-// pattern from a literal task name. Task names (ADR-0008 D4) are restricted to
-// [a-z0-9_-], so the presence of any of these is an unambiguous signal that the
-// value is a pattern (ADR-0016 D1) — no separate syntax is needed.
+// pattern from a literal task name. Task names are slug-restricted to
+// [a-z0-9_-] and that rule is enforced at load by ValidateCommands (ADR-0008
+// D4), so the presence of any of these is an unambiguous signal that the value
+// is a pattern (ADR-0016 D1) — no separate syntax is needed.
 const dependPatternMeta = "*?["
 
 // IsDependPattern reports whether a depends `task` value is a glob pattern

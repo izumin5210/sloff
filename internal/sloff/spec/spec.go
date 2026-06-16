@@ -265,6 +265,14 @@ func ValidateCommands(cmds []Command) error {
 		if c.Name == "" {
 			return fmt.Errorf("commands[%d]: name is required", i)
 		}
+		// Task names share the tool-name slug rule (ADR-0008 D4). Enforcing it here
+		// is what lets ADR-0016 treat any depends value carrying a glob
+		// metacharacter as an unambiguous pattern: a task can never be named "gen-*",
+		// so such a reference is always a pattern, never a literal target.
+		if !toolNamePattern.MatchString(c.Name) {
+			return fmt.Errorf("commands[%d] (%s): name must match %s (lower-case letters, digits, hyphen, underscore)",
+				i, c.Name, toolNamePattern)
+		}
 		if len(c.Cmd) == 0 {
 			return fmt.Errorf("commands[%d] (%s): cmd is required", i, c.Name)
 		}

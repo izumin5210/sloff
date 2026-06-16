@@ -128,6 +128,12 @@ type Runner struct {
 	tracer trace.Tracer                  // derived once in New from opts.TracerProvider
 	byKey  map[depgraph.TaskRef]taskInfo // task ref → taskInfo, filled by collectTasks
 
+	// patternGroups records, per consumer task, the depends pattern groups that
+	// expandDependPatterns resolved (ADR-0016 D2). warnUnobservedDepends reads
+	// it to aggregate the inputs-omission warning per pattern instead of per
+	// expanded edge (ADR-0016 D4); nil when no pattern depends were declared.
+	patternGroups map[depgraph.TaskRef][]patternGroup
+
 	// prefetched caches the records loaded by Storage.LoadMany at the top of
 	// Run; runTask consults this map first to avoid a per-task round-trip
 	// against remote backends. Populated once before runTasks starts and
@@ -239,6 +245,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	// indistinguishable from hand-written commands and flow through tool/depends
 	// validation, collectTasks, depgraph, and fingerprinting unchanged.
 	if err := r.expandCommandProviders(ctx); err != nil {
+		return err
+	}
+
+	// ADR-0016: expand glob depends into literal edges now that the full task
+	// set (static + provider-generated) is known. After this the command set
+	// carries only literal depends, so every later pass is unchanged.
+	if err := r.expandDependPatterns(ctx); err != nil {
 		return err
 	}
 
@@ -591,6 +604,9 @@ func (r *Runner) Plan(ctx context.Context) ([]depgraph.Task, []depgraph.MissingD
 	if err := r.expandCommandProviders(ctx); err != nil {
 		return nil, nil, err
 	}
+	if err := r.expandDependPatterns(ctx); err != nil {
+		return nil, nil, err
+	}
 	registry, referencedToolNames, err := r.prepareRegistry()
 	if err != nil {
 		return nil, nil, err
@@ -662,6 +678,61 @@ func (r *Runner) expandCommandProviders(ctx context.Context) (err error) {
 	r.opts.Specs = augmented
 	span.SetAttributes(attribute.Int("sloff.providers.generated_count", generated))
 	return nil
+}
+
+// patternGroup is one depends pattern's resolved edges for a single consumer
+// task: the original glob (for the warning message) and the literal task refs it
+// matched. warnUnobservedDepends judges the group as a whole (ADR-0016 D4).
+type patternGroup struct {
+	pattern string
+	refs    []depgraph.TaskRef
+}
+
+// expandDependPatterns rewrites glob depends into literal edges (ADR-0016 D2)
+// after command_providers have been expanded, so a pattern can match generated
+// tasks. From collectTasks onward only literal depends exist, so depgraph
+// construction and the ADR-0013 D3 overlap checks need no change. The
+// per-pattern provenance is kept on r.patternGroups for the aggregated
+// inputs-omission warning (D4).
+func (r *Runner) expandDependPatterns(ctx context.Context) (err error) {
+	_, span := r.tracer.Start(ctx, "runner.depends.expand_patterns")
+	defer endSpan(span, &err)
+
+	specs, groups, err := spec.ExpandDependPatterns(r.opts.Specs)
+	if err != nil {
+		return err
+	}
+	r.opts.Specs = specs
+	// Plan is a documented pre-Run step on the same Runner (see
+	// expandCommandProviders): the first call rewrites every pattern to literal
+	// edges, so a second call sees no patterns and ExpandDependPatterns returns
+	// empty groups. Only overwrite the provenance when this call actually
+	// expanded something, so the warning path keeps the first call's per-pattern
+	// groups instead of falling back to a per-edge warning (ADR-0016 D4).
+	if len(groups) > 0 {
+		r.patternGroups = indexPatternGroups(groups)
+	}
+	span.SetAttributes(attribute.Int("sloff.depends.pattern_count", len(groups)))
+	return nil
+}
+
+// indexPatternGroups keys each pattern's resolved edges by the consumer task
+// they belong to, converting spec.Depend into the depgraph.TaskRef form
+// warnUnobservedDepends compares against. Returns nil when no patterns were
+// expanded so the warning path can cheaply detect the common case.
+func indexPatternGroups(groups []spec.ExpandedPattern) map[depgraph.TaskRef][]patternGroup {
+	if len(groups) == 0 {
+		return nil
+	}
+	idx := map[depgraph.TaskRef][]patternGroup{}
+	for _, g := range groups {
+		consumer := depgraph.TaskRef{SpecRelpath: g.ConsumerDir, Name: g.ConsumerName}
+		idx[consumer] = append(idx[consumer], patternGroup{
+			pattern: g.Pattern,
+			refs:    resolveDepends(g.ConsumerDir, g.Edges),
+		})
+	}
+	return idx
 }
 
 // expandOneProvider wraps provider.Expand in a span so each provider's exec and
@@ -1667,25 +1738,65 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 
 	for _, t := range ordered {
 		info := r.byKey[t.Ref()]
+		groups := r.patternGroups[t.Ref()]
+
+		// Edges that came from a glob depends are judged per pattern (below), not
+		// per edge: a deliberate "depend on the whole group" should warn at most
+		// once, and only if the pattern matched nothing this task reads
+		// (ADR-0016 D4). Collect their refs so the per-edge loop skips them.
+		patternRefs := map[depgraph.TaskRef]struct{}{}
+		for _, g := range groups {
+			for _, ref := range g.refs {
+				patternRefs[ref] = struct{}{}
+			}
+		}
+
 		for _, dep := range t.DependsOn {
+			if _, fromPattern := patternRefs[dep]; fromPattern {
+				continue
+			}
 			outs, ran := producedByRef[dep]
 			if !ran {
 				continue
 			}
-			overlap := false
-			for _, p := range outs {
-				if taskReadsPath(info, p) {
-					overlap = true
-					break
-				}
-			}
-			if !overlap {
+			if !anyProducedPathRead(info, outs) {
 				warned++
 				r.logger.Warnf("%s depends on %s but none of the files it produced match this task's inputs; if the dependency is real, add the upstream outputs to inputs (the fingerprint cannot invalidate otherwise); a generator that only emits some outputs in this configuration can also legitimately cause this",
 					t.Ref().Label(), dep.Label())
 			}
 		}
+
+		for _, g := range groups {
+			anyRan, anyRead := false, false
+			for _, ref := range g.refs {
+				outs, ran := producedByRef[ref]
+				if !ran {
+					continue
+				}
+				anyRan = true
+				if anyProducedPathRead(info, outs) {
+					anyRead = true
+					break
+				}
+			}
+			if anyRan && !anyRead {
+				warned++
+				r.logger.Warnf("%s depends on pattern %q but none of the tasks it matched produced files matching this task's inputs; check the pattern targets the right group (a group whose outputs this task never reads cannot invalidate its fingerprint)",
+					t.Ref().Label(), g.pattern)
+			}
+		}
 	}
+}
+
+// anyProducedPathRead reports whether any of a producer's output paths is part
+// of the consumer's input surface (ADR-0013 D3).
+func anyProducedPathRead(info taskInfo, paths []string) bool {
+	for _, p := range paths {
+		if taskReadsPath(info, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func taskLabel(t depgraph.Task) string { return t.Ref().Label() }

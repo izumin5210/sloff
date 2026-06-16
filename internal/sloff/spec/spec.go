@@ -265,6 +265,14 @@ func ValidateCommands(cmds []Command) error {
 		if c.Name == "" {
 			return fmt.Errorf("commands[%d]: name is required", i)
 		}
+		// Task names share the tool-name slug rule (ADR-0008 D4). Enforcing it here
+		// is what lets ADR-0016 treat any depends value carrying a glob
+		// metacharacter as an unambiguous pattern: a task can never be named "gen-*",
+		// so such a reference is always a pattern, never a literal target.
+		if !toolNamePattern.MatchString(c.Name) {
+			return fmt.Errorf("commands[%d] (%s): name must match %s (lower-case letters, digits, hyphen, underscore)",
+				i, c.Name, toolNamePattern)
+		}
 		if len(c.Cmd) == 0 {
 			return fmt.Errorf("commands[%d] (%s): cmd is required", i, c.Name)
 		}
@@ -294,6 +302,12 @@ func ValidateCommands(cmds []Command) error {
 			}
 			if filepath.IsAbs(d.Spec) {
 				return fmt.Errorf("commands[%d] (%s): depends[%d]: spec must be a relative path, got %q", i, c.Name, j, d.Spec)
+			}
+			// A glob pattern (ADR-0016 D1) is expanded to literal edges later;
+			// reject a malformed glob at load time so the error points at the
+			// declaring file rather than surfacing mid-run.
+			if IsDependPattern(d.Task) && !doublestar.ValidatePattern(d.Task) {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: invalid glob pattern %q", i, c.Name, j, d.Task)
 			}
 		}
 		if _, dup := seen[c.Name]; dup {

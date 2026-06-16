@@ -1,0 +1,11 @@
+commands:
+  # consume depends on the whole copy-* group for ordering but reads none of
+  # their outputs, so the pattern is wholly unobserved: ADR-0016 D4 emits one
+  # aggregated inputs-omission warning for the pattern (not one per matched task).
+  - name: consume
+    cmd: ["cp", "x.src", "y.txt"]
+    inputs: ["x.src"]
+    outputs: ["y.txt"]
+    tools: [versioner]
+    depends:
+      - {spec: ../gen, task: "copy-*"}

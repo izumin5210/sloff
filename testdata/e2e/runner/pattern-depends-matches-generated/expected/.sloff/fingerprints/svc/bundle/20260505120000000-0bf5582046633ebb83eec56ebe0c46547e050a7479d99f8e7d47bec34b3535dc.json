@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "svc",
+    "task_id": "bundle",
+    "cmd": "sh -c cat ../gen/*.txt > bundle.txt"
+  },
+  "input": {
+    "hash": "0bf5582046633ebb83eec56ebe0c46547e050a7479d99f8e7d47bec34b3535dc",
+    "files_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cmd_hash": "e5e276949a0eb900f2495f75ba966b45313d255ab666fdda268b556cac9dcf8d",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "e03b85df90ebe085c2cac57ae9a57ed84088bcb3b15cb167c130815a8d8ce2df",
+    "files": [
+      {
+        "path": "svc/bundle.txt",
+        "hash": "e49c81e2d2f84e259d40e2fb8192f3bcd198b355184845d76d8f58807d0d78ee"
+      }
+    ]
+  }
+}

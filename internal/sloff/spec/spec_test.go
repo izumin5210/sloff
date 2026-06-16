@@ -315,6 +315,49 @@ commands:
 			wantErr: true,
 		},
 		{
+			// ADR-0008 D4 / ADR-0016 D1: task names are slug-restricted so a glob
+			// metacharacter in a depends value is an unambiguous "pattern" signal.
+			// A task literally named "gen-*" would break that invariant, so it must
+			// be rejected at load.
+			name: "task name with glob metacharacter fails",
+			yaml: `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
+  - name: gen-*
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			wantErr: true,
+		},
+		{
+			name: "task name with uppercase fails",
+			yaml: `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
+  - name: Gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			wantErr: true,
+		},
+		{
+			name: "task name starting with hyphen fails",
+			yaml: `tools:
+  foo: {exec: ["foo", "--version"]}
+commands:
+  - name: -gen
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			wantErr: true,
+		},
+		{
 			name:    "invalid yaml",
 			yaml:    `commands: [unbalanced`,
 			wantErr: true,

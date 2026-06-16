@@ -1,0 +1,8 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+command_providers:
+  - name: gen
+    exec: ["sh", "gen.sh"]

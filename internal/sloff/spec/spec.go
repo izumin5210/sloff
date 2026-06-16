@@ -295,6 +295,12 @@ func ValidateCommands(cmds []Command) error {
 			if filepath.IsAbs(d.Spec) {
 				return fmt.Errorf("commands[%d] (%s): depends[%d]: spec must be a relative path, got %q", i, c.Name, j, d.Spec)
 			}
+			// A glob pattern (ADR-0016 D1) is expanded to literal edges later;
+			// reject a malformed glob at load time so the error points at the
+			// declaring file rather than surfacing mid-run.
+			if IsDependPattern(d.Task) && !doublestar.ValidatePattern(d.Task) {
+				return fmt.Errorf("commands[%d] (%s): depends[%d]: invalid glob pattern %q", i, c.Name, j, d.Task)
+			}
 		}
 		if _, dup := seen[c.Name]; dup {
 			return fmt.Errorf("duplicate task name %q within the same sloff.yml", c.Name)

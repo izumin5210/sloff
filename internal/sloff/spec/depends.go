@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -67,13 +68,7 @@ type ExpandedPattern struct {
 // the aggregated inputs-omission warning; callers that do not need it can
 // ignore it.
 func ExpandDependPatterns(specs []Spec) ([]Spec, []ExpandedPattern, error) {
-	anyPattern := false
-	for _, sp := range specs {
-		if specHasDependPattern(sp) {
-			anyPattern = true
-			break
-		}
-	}
+	anyPattern := slices.ContainsFunc(specs, specHasDependPattern)
 	if !anyPattern {
 		return specs, nil, nil
 	}

@@ -1,4 +1,4 @@
-# ADR-0013: sloff の観測モデルとして OpenTelemetry trace を採用する
+# ADR-0018: sloff の観測モデルとして OpenTelemetry trace を採用する
 
 ## Context
 

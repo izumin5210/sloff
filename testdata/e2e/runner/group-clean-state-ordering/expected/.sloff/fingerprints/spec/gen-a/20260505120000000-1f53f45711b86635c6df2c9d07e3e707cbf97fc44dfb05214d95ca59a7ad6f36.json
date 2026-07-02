@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "spec",
+    "task_id": "gen-a",
+    "cmd": "sh -c cp seed.txt a-out.txt"
+  },
+  "input": {
+    "hash": "1f53f45711b86635c6df2c9d07e3e707cbf97fc44dfb05214d95ca59a7ad6f36",
+    "files_hash": "57d1898b820770c1168728e3f4d12c661f5f31feea8e52f6f3d9b29fd5054242",
+    "cmd_hash": "b1f90a4ecbc62139162b1be29e5be300ddd1cae9745c189e0b01af927269ba89",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "8fa5b476643a3ba79506095d597ff41ec9feee9011808fad3d3fac5d5de923dd",
+    "files": [
+      {
+        "path": "spec/a-out.txt",
+        "hash": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+      }
+    ]
+  }
+}

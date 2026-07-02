@@ -177,14 +177,34 @@ func runStep(opts ...runStepOption) step {
 				t.Fatalf("Run: no warning containing %q; warnings: %v", cfg.wantWarn, warns)
 			}
 		}
+		if cfg.wantNoWarns {
+			logs.mu.Lock()
+			warns := append([]string(nil), logs.warns...)
+			logs.mu.Unlock()
+			if len(warns) > 0 {
+				t.Fatalf("Run: expected no warnings, got: %v", warns)
+			}
+		}
+		if cfg.wantNoInfo != "" {
+			logs.mu.Lock()
+			infos := append([]string(nil), logs.infos...)
+			logs.mu.Unlock()
+			for _, in := range infos {
+				if strings.Contains(in, cfg.wantNoInfo) {
+					t.Fatalf("Run: expected no info log containing %q, got: %q", cfg.wantNoInfo, in)
+				}
+			}
+		}
 	}
 }
 
 type runStepConfig struct {
-	force    bool
-	readOnly bool
-	wantErr  string
-	wantWarn string
+	force       bool
+	readOnly    bool
+	wantErr     string
+	wantWarn    string
+	wantNoWarns bool
+	wantNoInfo  string
 }
 
 type runStepOption func(*runStepConfig)
@@ -220,15 +240,36 @@ func expectWarn(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantWarn = substr }
 }
 
-// captureLogger records warnings for expectWarn assertions while echoing all
-// runner output through t.Logf so failing tests keep their diagnostic logs.
+// expectNoWarns asserts that Run logs no warnings at all. Group fixtures use
+// it to lock ADR-0016 D3: grouping edges must never surface as
+// unobserved-depends warnings, on cold or warm (all-SKIP) runs alike.
+func expectNoWarns() runStepOption {
+	return func(c *runStepConfig) { c.wantNoWarns = true }
+}
+
+// expectNoInfoContaining asserts that no info-level log line contains substr.
+// Group fixtures pass the group's task name to lock ADR-0016 D2's "no
+// RUN/SKIP log for groups".
+func expectNoInfoContaining(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantNoInfo = substr }
+}
+
+// captureLogger records warnings and infos for the expect* assertions while
+// echoing all runner output through t.Logf so failing tests keep their
+// diagnostic logs.
 type captureLogger struct {
 	t     *testing.T
 	mu    sync.Mutex
 	warns []string
+	infos []string
 }
 
-func (c *captureLogger) Infof(format string, args ...any) { c.t.Logf("sloff INFO  "+format, args...) }
+func (c *captureLogger) Infof(format string, args ...any) {
+	c.t.Logf("sloff INFO  "+format, args...)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infos = append(c.infos, fmt.Sprintf(format, args...))
+}
 
 func (c *captureLogger) Errorf(format string, args ...any) { c.t.Logf("sloff ERROR "+format, args...) }
 
@@ -1734,5 +1775,43 @@ func TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun(t *testing.T) {
 	runE2E(
 		t, "depends-unobserved-warning-on-failure",
 		runStep(expectError("exit status 1"), expectWarn("none of the files it produced match")),
+	)
+}
+
+// TestRunner_GroupCleanStateOrdering covers the ADR-0016 barrier shape end to
+// end: two per-file generators, a group aggregating them, and a consumer that
+// only waits for "all generation done" (test -f, no data read). On a clean
+// checkout the consumer must be ordered after both members purely via the
+// group edge. Both the cold run and the warm all-SKIP run must emit zero
+// warnings — the grouping edges are the exact false-positive class the group
+// task kind exists to eliminate — and no RUN/SKIP line may mention the group
+// (it has no work, so it has no state transitions to log).
+func TestRunner_GroupCleanStateOrdering(t *testing.T) {
+	runE2E(
+		t, "group-clean-state-ordering",
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
+	)
+}
+
+// TestRunner_GroupDependsNotTransparent locks ADR-0016 D3: a consumer that
+// actually reads a group member's output cannot satisfy the missing-deps
+// check through its group edge — the direct producer edge is still required.
+// Clean checkout, so only the run-time half can catch it. ReadOnly keeps the
+// golden deterministic (no order-dependent consumer record).
+func TestRunner_GroupDependsNotTransparent(t *testing.T) {
+	runE2E(
+		t, "group-depends-not-transparent",
+		runStep(withReadOnly(), expectError("undeclared task dependencies")),
+	)
+}
+
+// TestRunner_GroupFailurePropagates locks ADR-0016 D2's failure semantics: a
+// group whose member fails is itself failed, and the group's dependents are
+// never scheduled (the golden carries no c-out.txt and no records).
+func TestRunner_GroupFailurePropagates(t *testing.T) {
+	runE2E(
+		t, "group-failure-propagates",
+		runStep(expectError("exit status 1")),
 	)
 }

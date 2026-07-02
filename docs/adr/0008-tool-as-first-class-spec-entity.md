@@ -110,9 +110,9 @@ commands:
 
 など、 cwd 依存しない方法で同じ target を参照する。 sloff は cmd 文字列の中身を validate しない方針 ( cmd_hash に乗るだけ) のため、 ここはユーザ規律で担保する。 cwd-independent な resolver ( pnpm-local、 PATH 経由 binary を呼ぶ script tool 等) ではこの問題は起きない。
 
-### D4. **slug-style な命名規約**: tool 名は `[a-z0-9_-]+` のみ許容
+### D4. **slug-style な命名規約**: tool 名 / task 名は `^[a-z0-9][a-z0-9_-]*$` のみ許容
 
-YAML 表記揺れや shell-like 解釈の事故を避けるため、 lower-case + 数字 + ハイフン / アンダースコアに限定。 violation は load 時 error。
+YAML 表記揺れや shell-like 解釈の事故を避けるため、 lower-case + 数字 + ハイフン / アンダースコアに限定し、 先頭は英数字とする。 violation は load 時 error。 tool 名 ( `tools[]` の key) も task 名 ( `commands[*].name`、 provider が emit する動的 task を含む) も同じ規則に従う。 task 名へ及ぼすのは ADR-0016 のパターン判定が「 メタ文字を含む値は一意に pattern」 という不変条件に依存するためで、 この強制 ( `ValidateCommands`) がその前提を保証する。
 
 ### D5. **未使用 tool 定義は silent OK** ( warn なし)
 

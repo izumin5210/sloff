@@ -1,0 +1,12 @@
+commands:
+  # bundle waits for the whole generated copy-* group via a glob depends
+  # (ADR-0016) and reads their outputs, so the dependency is observed and no
+  # inputs-omission warning fires. versioner is defined in ../gen (tool names
+  # are repo-wide, ADR-0008).
+  - name: bundle
+    cmd: ["sh", "-c", "cat ../gen/*.txt > bundle.txt"]
+    inputs: ["../gen/*.txt"]
+    outputs: ["bundle.txt"]
+    tools: [versioner]
+    depends:
+      - {spec: ../gen, task: "copy-*"}

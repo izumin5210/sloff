@@ -610,6 +610,20 @@ commands:
 - `depgraph.Build` は **declared エッジのみ** で DAG を構築し、 topological order で実行順を決定する。 循環依存は構築時 error
 - 実行順序は spec のみから決まり、 ファイルツリーの状態 ( clean / 生成済み) に依存しない
 
+##### depends パターン ( glob)
+
+`depends[*].task` には glob パターン ( `*` / `?` / `[...]`) を書ける ( [ADR-0016](../adr/0016-pattern-task-dependencies.md))。 task 名 ( ADR-0008 D4) は glob メタ文字を含まないため、 メタ文字の有無で literal / pattern を一意に判別する ( メタ文字なしは従来の literal と完全に同一挙動)。
+
+```yaml
+depends:
+  - {spec: ../gen, task: "gen-*"}   # ../gen の gen-* に一致する全 task に依存
+```
+
+- パターンは **`command_providers` 展開後・depgraph 構築前** に、 対象 spec ( `spec` で指す 1 つの dir) の task 名へ展開され、 literal な `{spec, task}` エッジ群に正規化される。 以降の経路 ( depgraph / overlap 検証 / fingerprint) は literal のみを見るので無改修。 provider が動的に emit した task にもマッチする ( ADR-0015 と噛み合う)
+- 展開規則: 宣言元 task 自身は除外、 1 件もマッチしなければ error、 結果はマッチ順に依存せず決定的 ( sort + dedupe)。 literal と pattern、 複数 pattern 間で同一エッジになったものは union ( 重複排除)
+- overlap 検証との関係: **depends 漏れ ( error) は無改修で継承** ( consumer が読むファイルの producer は literal / pattern を問わずいずれかのエッジで覆われる必要がある)。 **inputs 漏れ ( warning) は pattern 単位に集計**し、 パターンが展開したどの producer の出力も consumer の inputs に現れない場合に限り 1 本につき 1 回出す ( 「 グループ一括依存」 での per-edge ノイズを避けつつ的外れなパターンは検出)
+- load 時 validation: glob 構文が不正なら error
+
 #### overlap 検証 ( fingerprint 健全性の防御線)
 
 sloff の fingerprint が信頼できる前提は、 **「generator は spec で宣言された `inputs` 以外を読まず、 宣言された `outputs` 以外を書かない」** こと ( ADR-0002)。 `depends` はあくまで scheduling metadata であり、 この前提を担保するのは引き続き inputs / outputs 宣言である。 両者の整合は overlap 計算で機械的に検証する:

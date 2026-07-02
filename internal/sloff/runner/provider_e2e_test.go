@@ -211,14 +211,25 @@ func setupProviderWorkdir(t *testing.T, files map[string]string) (string, []spec
 
 func newProviderRunner(t *testing.T, workdir string, specs []spec.Spec) *runner.Runner {
 	t.Helper()
+	r, _ := newProviderRunnerLogged(t, workdir, specs)
+	return r
+}
+
+// newProviderRunnerLogged is newProviderRunner with the captureLogger exposed so
+// tests can assert on warnings (e.g. the ADR-0016 D4 unobserved-pattern warning).
+func newProviderRunnerLogged(t *testing.T, workdir string, specs []spec.Spec) (*runner.Runner, *captureLogger) {
+	t.Helper()
 	reg := toolresolver.NewRegistry()
 	reg.Register(script.New(workdir))
 	reg.Register(golocal.New(workdir, lister.NewMemoized(lister.NewGoPackages(workdir))))
-	return runner.New(runner.Options{
+	logs := &captureLogger{t: t}
+	r := runner.New(runner.Options{
 		RepoRoot:  workdir,
 		Specs:     specs,
 		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
 		Resolvers: reg,
 		Preflight: preflight.NewRegistry(),
+		Logger:    logs,
 	})
+	return r, logs
 }

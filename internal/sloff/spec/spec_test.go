@@ -193,6 +193,102 @@ commands:
 			wantErr: true,
 		},
 		{
+			name: "group task with depends only",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    depends:
+      - task: gen-foo
+      - spec: ../other
+        task: gen-bar
+  - name: gen-foo
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			want: &spec.File{
+				Commands: []spec.Command{
+					{
+						Name:  "gen-all",
+						Group: true,
+						Depends: []spec.Depend{
+							{Task: "gen-foo"},
+							{Spec: "../other", Task: "gen-bar"},
+						},
+					},
+					{
+						Name:    "gen-foo",
+						Cmd:     []string{"foo"},
+						Inputs:  []string{"a"},
+						Outputs: []string{"b"},
+						Tools:   []string{"foo"},
+					},
+				},
+			},
+		},
+		{
+			name: "group task with cmd fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    cmd: foo
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "group task with inputs fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    inputs: ["a"]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "group task with outputs fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    outputs: ["b"]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "group task with tools fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    tools: [foo]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "group task without depends fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+`,
+			wantErr: true,
+		},
+		{
+			name: "group task with empty depends fails",
+			yaml: `commands:
+  - name: gen-all
+    group: true
+    depends: []
+`,
+			wantErr: true,
+		},
+		{
 			name: "tool entry without recognized fields fails",
 			yaml: `tools:
   bad:

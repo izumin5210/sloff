@@ -9,7 +9,8 @@
 - **Output-comparison fingerprint hits.** A hit requires the recorded `input_hash` *and* the on-disk output files to match. Drifted outputs (manual edits, formatter runs, partial checkouts) are re-generated, never silently skipped.
 - **OS-portable fingerprints.** Fingerprints are deterministic protobuf binary records committed to git (inspect them with `sloff fingerprint show`). A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
 - **Reads your existing toolchain.** No replacement for aqua / mise / nix / pnpm / `go.mod`. Tool versions come from the runtime binary's `--version`, lockfiles, or repo source — whichever is the actual source of truth.
-- **Auto-derived dependencies.** Task ordering is computed from `inputs` / `outputs` glob intersections. There is no manual `depends:` field to keep in sync.
+- **Explicit, validated dependencies.** Execution order comes from declared `depends` edges, so it is deterministic even on a freshly cleaned tree. Declarations are cross-checked against observed `inputs` / `outputs` overlap — reading another task's outputs without declaring the edge is an error, so the DAG can't silently drift from reality.
+- **Dynamic task sets.** `command_providers` run at plan time and emit tasks as JSON — per-directory fan-out and import-closure inputs stay out of hand-written YAML, and generated tasks flow through the same validation and fingerprinting as static ones.
 - **Single Go binary.** No runtime dependencies, no daemon, no language ecosystem to install.
 - **Codegen-only by design.** Build / test / lint stay in your existing tooling (Make, npm scripts, etc.) — sloff does one thing.
 
@@ -45,7 +46,80 @@ Then from anywhere in the repo:
 sloff run
 ```
 
-`sloff run` discovers every `sloff.yml`, builds a DAG from `inputs` / `outputs` overlap, and either skips or re-runs each task based on fingerprint lookup.
+`sloff run` discovers every `sloff.yml`, orders tasks by their declared `depends` edges, and either skips or re-runs each task based on fingerprint lookup.
+
+## Task dependencies
+
+When a task consumes files that another task generates, declare the edge with `depends`. Each entry names a task in the same file, or in another spec dir (relative to the declaring `sloff.yml`):
+
+```yaml
+commands:
+  - name: bundle
+    cmd: ./bundle.sh
+    inputs: ["../gen/**/*.pb.ts"]
+    outputs: ["dist/bundle.ts"]
+    tools: [bundler]
+    depends:
+      - { spec: ../gen, task: codegen } # task in another spec dir
+      - { task: lint-schema }           # task in this file
+```
+
+`depends` only controls scheduling — invalidation still flows through file contents (when an upstream output listed in your `inputs` changes, your fingerprint changes). To keep the two honest, sloff validates declarations against observed `inputs` / `outputs` overlap:
+
+- Reading files another task produces **without** declaring `depends` on it → **error**, with the missing edge spelled out.
+- Declaring `depends` on a task whose outputs never appear in your `inputs` → **warning** (that dependency will never invalidate you).
+
+### Pattern dependencies
+
+`task` accepts glob patterns, expanded at plan time against the target spec's task set — including dynamically generated tasks:
+
+```yaml
+    depends:
+      - { spec: ../gen, task: "gen-*" } # every gen-* task, present and future
+```
+
+### Barrier tasks
+
+A `barrier: true` task is a pure aggregation point: it executes nothing, has no fingerprint, and completes when all of its `depends` complete (failing if any of them fails). Use it to give "these N tasks are done" a single name:
+
+```yaml
+commands:
+  - name: gen-all
+    barrier: true
+    depends:
+      - { task: "gen-*" }
+```
+
+Barriers declare only `depends` — `cmd` / `inputs` / `outputs` / `tools` are rejected. Depending on a barrier is not a substitute for data edges: a task that actually reads a member's outputs still needs a direct `depends` on that producer.
+
+## Dynamic tasks
+
+When the task set itself is derived from your tree (per-directory codegen, import-closure inputs), declare a `command_providers` entry instead of generating `sloff.yml` files out-of-band:
+
+```yaml
+command_providers:
+  - name: proto-perdir
+    exec: ["go", "run", "./tools/emit-proto-tasks"]
+```
+
+The provider runs at plan time (cwd = the spec dir) and prints the task list as JSON on stdout:
+
+```json
+{
+  "schema_version": "v1",
+  "tasks": [
+    {
+      "name": "gen-foo",
+      "cmd": ["buf", "generate", "--path", "foo"],
+      "inputs": ["foo/**/*.proto"],
+      "outputs": ["gen/foo/**/*.pb.go"],
+      "tools": ["buf"]
+    }
+  ]
+}
+```
+
+Generated tasks go through exactly the same validation, dependency checks, and fingerprinting as hand-written ones, and providers re-run on every `sloff run` — the task set can't drift from the tree.
 
 ## Tool resolvers
 
@@ -167,6 +241,24 @@ resource "aws_dynamodb_table" "sloff_fingerprints" {
 
 </details>
 
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `sloff run` | Discover specs and run / skip every task. `--force` re-executes everything while still writing records; `--root` / `--pattern` scope spec discovery. |
+| `sloff graph` | Render the declared task DAG as Mermaid (default) or DOT (`--format dot`). |
+| `sloff fingerprint show <file>` | Decode a fingerprint record to JSON — also works as a git diff textconv. |
+| `sloff fingerprint diff <a> <b>` | Semantic diff between two records (exit code 1 if they differ). |
+| `sloff fingerprint gc` | Collapse duplicate record variants left behind by branch merges. |
+| `sloff version` | Print the binary version. |
+
+Environment variables:
+
+- `SLOFF_ALLOW_STALE_DEPS=1` — degrade preflight failures (e.g. pnpm install drift) from a hard error to a warning; the run proceeds but fingerprints are **not** written for a known-suspect run.
+- `SLOFF_NO_FILE_HASH_CACHE=1` — skip the persistent per-file digest cache and rehash everything from disk.
+
+sloff also emits OpenTelemetry trace spans (per-phase and per-task timing, fingerprint hit/miss) when the standard `OTEL_*` env vars are set — nothing is exported unless you set `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_TRACES_EXPORTER`. Every `OTEL_*` key can be overridden just for sloff via a `SLOFF_OTEL_*` twin.
+
 ## When to use sloff (vs alternatives)
 
 sloff is well-suited when:
@@ -191,6 +283,7 @@ sloff is intentionally narrow — **codegen orchestration with honest fingerprin
 ## Documentation
 
 - [Architecture](./docs/design/architecture.md) — overall design
+- [Dynamic tasks](./docs/design/dynamic-tasks.md) — `command_providers` design space
 - [Resolver: script](./docs/design/resolver-script.md)
 - [Resolver: go-local](./docs/design/resolver-go-local.md)
 - [Resolver: pnpm-local](./docs/design/resolver-pnpm-local.md)

@@ -1,0 +1,28 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: gen-a
+    cmd: ["sh", "-c", "cp seed.txt a-out.txt"]
+    inputs: ["seed.txt"]
+    outputs: ["a-out.txt"]
+    tools: [versioner]
+  - name: gen-b
+    cmd: ["sh", "-c", "cp seed.txt b-out.txt"]
+    inputs: ["seed.txt"]
+    outputs: ["b-out.txt"]
+    tools: [versioner]
+  - name: gen-all
+    group: true
+    depends:
+      - task: gen-a
+      - task: gen-b
+  - name: barrier-consumer
+    cmd: ["sh", "-c", "test -f a-out.txt && test -f b-out.txt && echo ok > c-out.txt"]
+    inputs: ["seed.txt"]
+    outputs: ["c-out.txt"]
+    tools: [versioner]
+    depends:
+      - task: gen-all

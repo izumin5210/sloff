@@ -11,7 +11,9 @@ import (
 // edge ordering as RenderMermaid, so swapping --format does not reorder the
 // graph. DOT permits arbitrary characters inside double-quoted IDs (apart
 // from an unescaped double quote), so we use the human-readable task label
-// as the ID directly instead of a slugged form.
+// as the ID directly instead of a slugged form. Group tasks carry
+// shape=hexagon — the same visual distinction the Mermaid renderer draws
+// (ADR-0016 D6).
 func RenderDOT(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
 	b.WriteString("digraph sloff {\n")
@@ -19,8 +21,13 @@ func RenderDOT(tasks []depgraph.Task, edges []Edge) string {
 	b.WriteString("    node [shape=box];\n")
 
 	refs := orderedRefs(tasks)
+	groups := groupRefs(tasks)
 	for _, r := range refs {
-		fmt.Fprintf(&b, "    %s;\n", quoteDOT(r.Label()))
+		if groups[r] {
+			fmt.Fprintf(&b, "    %s [shape=hexagon];\n", quoteDOT(r.Label()))
+		} else {
+			fmt.Fprintf(&b, "    %s;\n", quoteDOT(r.Label()))
+		}
 	}
 	for _, e := range edges {
 		fmt.Fprintf(&b, "    %s -> %s [label=%s];\n",

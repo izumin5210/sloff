@@ -1,0 +1,8 @@
+flowchart TD
+    n_spec_barrier_consumer["spec:barrier-consumer"]
+    n_spec_gen_a["spec:gen-a"]
+    n_spec_gen_all{{"spec:gen-all"}}
+    n_spec_gen_b["spec:gen-b"]
+    n_spec_gen_all -->|"(declared)"| n_spec_barrier_consumer
+    n_spec_gen_a -->|"(declared)"| n_spec_gen_all
+    n_spec_gen_b -->|"(declared)"| n_spec_gen_all

@@ -78,6 +78,33 @@ func TestParse_EmptyTasks(t *testing.T) {
 	}
 }
 
+// TestParse_BarrierIsNotPartOfSchemaV1 locks ADR-0017 D5: schema v1 has no
+// barrier field, so a provider emitting one gets it dropped by the non-strict
+// decode and the resulting command fails downstream validation on the missing
+// cmd — a loud failure, never a silently degraded barrier.
+func TestParse_BarrierIsNotPartOfSchemaV1(t *testing.T) {
+	in := `{
+	  "schema_version": "v1",
+	  "tasks": [
+	    {"name": "gen-all", "barrier": true, "depends": [{"task": "gen-a"}]}
+	  ]
+	}`
+	got, err := parse("gen", []byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got) != 1 || got[0].Barrier {
+		t.Fatalf("barrier field must be ignored by schema v1, got %+v", got)
+	}
+	vErr := spec.ValidateCommands(got)
+	if vErr == nil {
+		t.Fatal("expected the degraded command to fail validation")
+	}
+	if !strings.Contains(vErr.Error(), "cmd is required") {
+		t.Errorf("expected loud cmd-is-required failure, got: %v", vErr)
+	}
+}
+
 func TestParse_MissingTasksFails(t *testing.T) {
 	// An absent or null "tasks" field must fail rather than be treated as an
 	// empty set, otherwise a malformed provider silently suppresses codegen.

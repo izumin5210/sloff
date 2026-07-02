@@ -181,6 +181,58 @@ func TestValidateDependReferences_UnknownSpecDirErrors(t *testing.T) {
 	}
 }
 
+// TestValidateDependReferences_BarrierReferencesValidated locks that barrier
+// tasks' depends entries flow through the same cross-file reference
+// validation as regular commands (ADR-0017 D1): a barrier pointing at a
+// task that doesn't exist is a load-time error.
+func TestValidateDependReferences_BarrierReferencesValidated(t *testing.T) {
+	specs := buildSpecs(t, map[string]string{
+		"proto/options": producerYAML,
+		"proto/svc": `commands:
+  - name: gen-all
+    barrier: true
+    depends:
+      - spec: ../options
+        task: missing-task
+`,
+	})
+	err := spec.ValidateDependReferences(specs)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not-found error, got %v", err)
+	}
+}
+
+// TestValidateDependReferences_BarrierAsTargetOK locks that a regular task can
+// depend on a barrier: the barrier participates in the task namespace like any
+// other command.
+func TestValidateDependReferences_BarrierAsTargetOK(t *testing.T) {
+	yml := `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "true"]
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+  - name: gen-all
+    barrier: true
+    depends:
+      - task: gen
+  - name: consume
+    cmd: ["sh", "-c", "true"]
+    inputs: ["x.txt"]
+    outputs: ["y.txt"]
+    tools: [versioner]
+    depends:
+      - task: gen-all
+`
+	specs := buildSpecs(t, map[string]string{"proto/svc": yml})
+	if err := spec.ValidateDependReferences(specs); err != nil {
+		t.Errorf("expected ok, got %v", err)
+	}
+}
+
 func TestValidateDependReferences_UnknownTaskErrors(t *testing.T) {
 	specs := buildSpecs(t, map[string]string{
 		"proto/options": producerYAML,

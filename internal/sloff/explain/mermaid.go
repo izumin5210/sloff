@@ -38,15 +38,22 @@ func nodeIDs(refs []TaskRef) map[TaskRef]string {
 // their declared dependency edges. Output is byte-stable: nodes appear in
 // (spec_relpath, name) order; edges are sorted by (To, From); each edge label
 // carries a sample of the justifying files (architecture.md §タスク間依存).
+// Barrier tasks render as hexagons ({{...}}) so aggregation points are
+// visually distinct from executing tasks (ADR-0017 D6).
 func RenderMermaid(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")
 
 	refs := orderedRefs(tasks)
 	ids := nodeIDs(refs)
+	barriers := barrierRefs(tasks)
 
 	for _, r := range refs {
-		fmt.Fprintf(&b, "    %s[\"%s\"]\n", ids[r], escapeMermaidLabel(r.Label()))
+		if barriers[r] {
+			fmt.Fprintf(&b, "    %s{{\"%s\"}}\n", ids[r], escapeMermaidLabel(r.Label()))
+		} else {
+			fmt.Fprintf(&b, "    %s[\"%s\"]\n", ids[r], escapeMermaidLabel(r.Label()))
+		}
 	}
 	for _, e := range edges {
 		fmt.Fprintf(&b, "    %s -->|\"%s\"| %s\n", ids[e.From], escapeMermaidLabel(e.LabelSample()), ids[e.To])

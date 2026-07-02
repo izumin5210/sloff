@@ -207,3 +207,60 @@ func TestRenderMermaid_EmptyTaskListEmitsHeaderOnly(t *testing.T) {
 		t.Errorf("unexpected: %q", got)
 	}
 }
+
+func barrierTask(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
+	return depgraph.Task{SpecRelpath: spec, Name: name, Barrier: true, DependsOn: deps}
+}
+
+// TestRenderMermaid_BarrierNodeRendersAsHexagon locks ADR-0017 D6: barrier nodes
+// use the {{...}} hexagon shape so an aggregation point is visually distinct
+// from an executing task, and its edges (no outputs, no inputs) render with
+// the "(declared)" caption.
+func TestRenderMermaid_BarrierNodeRendersAsHexagon(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("svc", "consumer", []string{"seed.txt"}, []string{"out.go"}, dref("svc", "gen-all")),
+		barrierTask("svc", "gen-all", dref("svc", "producer")),
+		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
+	}
+	edges := explain.Edges(tasks)
+	got := explain.RenderMermaid(tasks, edges)
+	want := strings.Join([]string{
+		"flowchart TD",
+		`    n_svc_consumer["svc:consumer"]`,
+		`    n_svc_gen_all{{"svc:gen-all"}}`,
+		`    n_svc_producer["svc:producer"]`,
+		`    n_svc_gen_all -->|"(declared)"| n_svc_consumer`,
+		`    n_svc_producer -->|"(declared)"| n_svc_gen_all`,
+		"",
+	}, "\n")
+	if got != want {
+		t.Errorf("mermaid mismatch\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+// TestRenderDOT_BarrierNodeRendersAsHexagon is the DOT counterpart: the barrier
+// node overrides the box default with shape=hexagon.
+func TestRenderDOT_BarrierNodeRendersAsHexagon(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("svc", "consumer", []string{"seed.txt"}, []string{"out.go"}, dref("svc", "gen-all")),
+		barrierTask("svc", "gen-all", dref("svc", "producer")),
+		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
+	}
+	edges := explain.Edges(tasks)
+	got := explain.RenderDOT(tasks, edges)
+	want := strings.Join([]string{
+		"digraph sloff {",
+		"    rankdir=TB;",
+		"    node [shape=box];",
+		`    "svc:consumer";`,
+		`    "svc:gen-all" [shape=hexagon];`,
+		`    "svc:producer";`,
+		`    "svc:gen-all" -> "svc:consumer" [label="(declared)"];`,
+		`    "svc:producer" -> "svc:gen-all" [label="(declared)"];`,
+		"}",
+		"",
+	}, "\n")
+	if got != want {
+		t.Errorf("dot mismatch\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}

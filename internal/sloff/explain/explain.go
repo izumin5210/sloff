@@ -105,3 +105,16 @@ func orderedRefs(tasks []depgraph.Task) []TaskRef {
 	sort.Slice(refs, func(i, j int) bool { return lessRef(refs[i], refs[j]) })
 	return refs
 }
+
+// barrierRefs collects the refs of barrier tasks (ADR-0017 D6). Both renderers
+// draw barrier nodes in a distinct shape so an aggregation point is never
+// mistaken for a task that executes something.
+func barrierRefs(tasks []depgraph.Task) map[TaskRef]bool {
+	out := map[TaskRef]bool{}
+	for _, t := range tasks {
+		if t.Barrier {
+			out[t.Ref()] = true
+		}
+	}
+	return out
+}

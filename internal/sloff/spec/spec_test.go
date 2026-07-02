@@ -193,6 +193,102 @@ commands:
 			wantErr: true,
 		},
 		{
+			name: "barrier task with depends only",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    depends:
+      - task: gen-foo
+      - spec: ../other
+        task: gen-bar
+  - name: gen-foo
+    cmd: foo
+    inputs: ["a"]
+    outputs: ["b"]
+    tools: [foo]
+`,
+			want: &spec.File{
+				Commands: []spec.Command{
+					{
+						Name:    "gen-all",
+						Barrier: true,
+						Depends: []spec.Depend{
+							{Task: "gen-foo"},
+							{Spec: "../other", Task: "gen-bar"},
+						},
+					},
+					{
+						Name:    "gen-foo",
+						Cmd:     []string{"foo"},
+						Inputs:  []string{"a"},
+						Outputs: []string{"b"},
+						Tools:   []string{"foo"},
+					},
+				},
+			},
+		},
+		{
+			name: "barrier task with cmd fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    cmd: foo
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "barrier task with inputs fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    inputs: ["a"]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "barrier task with outputs fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    outputs: ["b"]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "barrier task with tools fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    tools: [foo]
+    depends:
+      - task: gen-foo
+`,
+			wantErr: true,
+		},
+		{
+			name: "barrier task without depends fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+`,
+			wantErr: true,
+		},
+		{
+			name: "barrier task with empty depends fails",
+			yaml: `commands:
+  - name: gen-all
+    barrier: true
+    depends: []
+`,
+			wantErr: true,
+		},
+		{
 			name: "tool entry without recognized fields fails",
 			yaml: `tools:
   bad:

@@ -1,0 +1,11 @@
+digraph sloff {
+    rankdir=TB;
+    node [shape=box];
+    "spec:barrier-consumer";
+    "spec:gen-a";
+    "spec:gen-all" [shape=hexagon];
+    "spec:gen-b";
+    "spec:gen-all" -> "spec:barrier-consumer" [label="(declared)"];
+    "spec:gen-a" -> "spec:gen-all" [label="(declared)"];
+    "spec:gen-b" -> "spec:gen-all" [label="(declared)"];
+}

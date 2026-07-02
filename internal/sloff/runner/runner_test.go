@@ -177,14 +177,34 @@ func runStep(opts ...runStepOption) step {
 				t.Fatalf("Run: no warning containing %q; warnings: %v", cfg.wantWarn, warns)
 			}
 		}
+		if cfg.wantNoWarns {
+			logs.mu.Lock()
+			warns := append([]string(nil), logs.warns...)
+			logs.mu.Unlock()
+			if len(warns) > 0 {
+				t.Fatalf("Run: expected no warnings, got: %v", warns)
+			}
+		}
+		if cfg.wantNoInfo != "" {
+			logs.mu.Lock()
+			infos := append([]string(nil), logs.infos...)
+			logs.mu.Unlock()
+			for _, in := range infos {
+				if strings.Contains(in, cfg.wantNoInfo) {
+					t.Fatalf("Run: expected no info log containing %q, got: %q", cfg.wantNoInfo, in)
+				}
+			}
+		}
 	}
 }
 
 type runStepConfig struct {
-	force    bool
-	readOnly bool
-	wantErr  string
-	wantWarn string
+	force       bool
+	readOnly    bool
+	wantErr     string
+	wantWarn    string
+	wantNoWarns bool
+	wantNoInfo  string
 }
 
 type runStepOption func(*runStepConfig)
@@ -220,15 +240,36 @@ func expectWarn(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantWarn = substr }
 }
 
-// captureLogger records warnings for expectWarn assertions while echoing all
-// runner output through t.Logf so failing tests keep their diagnostic logs.
+// expectNoWarns asserts that Run logs no warnings at all. Barrier fixtures use
+// it to lock ADR-0017 D3: barrier edges must never surface as
+// unobserved-depends warnings, on cold or warm (all-SKIP) runs alike.
+func expectNoWarns() runStepOption {
+	return func(c *runStepConfig) { c.wantNoWarns = true }
+}
+
+// expectNoInfoContaining asserts that no info-level log line contains substr.
+// Barrier fixtures pass the barrier's task name to lock ADR-0017 D2's "no
+// RUN/SKIP log for barriers".
+func expectNoInfoContaining(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantNoInfo = substr }
+}
+
+// captureLogger records warnings and infos for the expect* assertions while
+// echoing all runner output through t.Logf so failing tests keep their
+// diagnostic logs.
 type captureLogger struct {
 	t     *testing.T
 	mu    sync.Mutex
 	warns []string
+	infos []string
 }
 
-func (c *captureLogger) Infof(format string, args ...any) { c.t.Logf("sloff INFO  "+format, args...) }
+func (c *captureLogger) Infof(format string, args ...any) {
+	c.t.Logf("sloff INFO  "+format, args...)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infos = append(c.infos, fmt.Sprintf(format, args...))
+}
 
 func (c *captureLogger) Errorf(format string, args ...any) { c.t.Logf("sloff ERROR "+format, args...) }
 
@@ -1734,5 +1775,57 @@ func TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun(t *testing.T) {
 	runE2E(
 		t, "depends-unobserved-warning-on-failure",
 		runStep(expectError("exit status 1"), expectWarn("none of the files it produced match")),
+	)
+}
+
+// TestRunner_BarrierCleanStateOrdering covers the ADR-0017 barrier shape end to
+// end: two per-file generators, a barrier aggregating them, and a consumer that
+// only waits for "all generation done" (test -f, no data read). On a clean
+// checkout the consumer must be ordered after both members purely via the
+// barrier edge. Both the cold run and the warm all-SKIP run must emit zero
+// warnings — the barrier edges are the exact false-positive class the barrier
+// task kind exists to eliminate — and no RUN/SKIP line may mention the barrier
+// (it has no work, so it has no state transitions to log).
+func TestRunner_BarrierCleanStateOrdering(t *testing.T) {
+	runE2E(
+		t, "barrier-clean-state-ordering",
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
+	)
+}
+
+// TestRunner_BarrierDependsNotTransparent locks ADR-0017 D3: a consumer that
+// actually reads a barrier member's output cannot satisfy the missing-deps
+// check through its barrier edge — the direct producer edge is still required.
+// Clean checkout, so only the run-time half can catch it. ReadOnly keeps the
+// golden deterministic (no order-dependent consumer record).
+func TestRunner_BarrierDependsNotTransparent(t *testing.T) {
+	runE2E(
+		t, "barrier-depends-not-transparent",
+		runStep(withReadOnly(), expectError("undeclared task dependencies")),
+	)
+}
+
+// TestRunner_BarrierFailurePropagates locks ADR-0017 D2's failure semantics: a
+// barrier whose member fails is itself failed, and the barrier's dependents are
+// never scheduled (the golden carries no c-out.txt and no records).
+func TestRunner_BarrierFailurePropagates(t *testing.T) {
+	runE2E(
+		t, "barrier-failure-propagates",
+		runStep(expectError("exit status 1")),
+	)
+}
+
+// TestRunner_BarrierPatternDepends locks the ADR-0017 × ADR-0016 composition:
+// the barrier's members are collected via a depends pattern ("gen-*", which
+// also exercises self-exclusion — the barrier itself matches the glob), and
+// the barrier consumer waits on the barrier by name. Ordering must hold on a
+// clean checkout and neither run may warn: the pattern-expanded edges belong
+// to a barrier consumer, which the unobserved-depends check skips entirely.
+func TestRunner_BarrierPatternDepends(t *testing.T) {
+	runE2E(
+		t, "barrier-pattern-depends",
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
+		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
 	)
 }

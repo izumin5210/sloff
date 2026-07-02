@@ -59,9 +59,15 @@ type Depend struct {
 
 // Command corresponds to one entry in commands[]. Tools is a list of tool
 // names that must resolve to entries in the repo-wide tool registry.
+//
+// Barrier marks a pure aggregation node (ADR-0017): a task that carries only
+// depends and exists so a set of tasks can be referenced under one name
+// (a barrier / alias, like Ninja's phony). Barrier tasks must not declare
+// cmd / inputs / outputs / tools and are never executed or fingerprinted.
 type Command struct {
 	Cmd     CmdLine  `yaml:"cmd"`
 	Depends []Depend `yaml:"depends,omitempty"`
+	Barrier bool     `yaml:"barrier,omitempty"`
 	Inputs  []string `yaml:"inputs"`
 	Name    string   `yaml:"name"`
 	Outputs []string `yaml:"outputs"`
@@ -259,6 +265,12 @@ func validateTools(tools map[string]DeclaredTool) error {
 // the runner re-runs it on the merged static+generated command set after
 // expanding command_providers (ADR-0015 D5) so dynamically emitted tasks face
 // the same validation as hand-written ones.
+//
+// Barrier commands (ADR-0017 D1) invert the required-field rules: they must
+// carry only depends. Forbidding the work-carrying fields structurally
+// enforces "a barrier is an aggregation point, not a task with work", and an
+// empty depends is rejected because a barrier that aggregates nothing is a
+// spec mistake.
 func ValidateCommands(cmds []Command) error {
 	seen := make(map[string]struct{}, len(cmds))
 	for i, c := range cmds {
@@ -273,20 +285,29 @@ func ValidateCommands(cmds []Command) error {
 			return fmt.Errorf("commands[%d] (%s): name must match %s (lower-case letters, digits, hyphen, underscore)",
 				i, c.Name, toolNamePattern)
 		}
-		if len(c.Cmd) == 0 {
-			return fmt.Errorf("commands[%d] (%s): cmd is required", i, c.Name)
-		}
-		if len(c.Inputs) == 0 {
-			return fmt.Errorf("commands[%d] (%s): inputs is required", i, c.Name)
-		}
-		if len(c.Outputs) == 0 {
-			return fmt.Errorf("commands[%d] (%s): outputs is required", i, c.Name)
-		}
-		// tools is required because sloff mixes resolved tool contributions into
-		// the fingerprint key (ADR-0004 D1). Empty tools means the task has no version
-		// signal at all and stale outputs could be served indefinitely.
-		if len(c.Tools) == 0 {
-			return fmt.Errorf("commands[%d] (%s): tools is required", i, c.Name)
+		if c.Barrier {
+			if len(c.Cmd) > 0 || len(c.Inputs) > 0 || len(c.Outputs) > 0 || len(c.Tools) > 0 {
+				return fmt.Errorf("commands[%d] (%s): barrier tasks must not declare cmd, inputs, outputs, or tools", i, c.Name)
+			}
+			if len(c.Depends) == 0 {
+				return fmt.Errorf("commands[%d] (%s): barrier tasks must declare at least one depends entry", i, c.Name)
+			}
+		} else {
+			if len(c.Cmd) == 0 {
+				return fmt.Errorf("commands[%d] (%s): cmd is required", i, c.Name)
+			}
+			if len(c.Inputs) == 0 {
+				return fmt.Errorf("commands[%d] (%s): inputs is required", i, c.Name)
+			}
+			if len(c.Outputs) == 0 {
+				return fmt.Errorf("commands[%d] (%s): outputs is required", i, c.Name)
+			}
+			// tools is required because sloff mixes resolved tool contributions into
+			// the fingerprint key (ADR-0004 D1). Empty tools means the task has no version
+			// signal at all and stale outputs could be served indefinitely.
+			if len(c.Tools) == 0 {
+				return fmt.Errorf("commands[%d] (%s): tools is required", i, c.Name)
+			}
 		}
 		// Tool-name references are validated against the repo-wide registry by
 		// ValidateToolReferences after Discover; here we just guard against empty

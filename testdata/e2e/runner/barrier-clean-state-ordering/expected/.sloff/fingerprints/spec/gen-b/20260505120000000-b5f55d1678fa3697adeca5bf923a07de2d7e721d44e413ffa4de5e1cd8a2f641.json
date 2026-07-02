@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "spec",
+    "task_id": "gen-b",
+    "cmd": "sh -c cp seed.txt b-out.txt"
+  },
+  "input": {
+    "hash": "b5f55d1678fa3697adeca5bf923a07de2d7e721d44e413ffa4de5e1cd8a2f641",
+    "files_hash": "57d1898b820770c1168728e3f4d12c661f5f31feea8e52f6f3d9b29fd5054242",
+    "cmd_hash": "cfed480a224926f7183519ccf1f49a24a4d7aab02648686402b03515210e9080",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "ac1934b6abf6e2aa099714a360e6016128ed3a0e96e8e0f104d18ee1137f0ee4",
+    "files": [
+      {
+        "path": "spec/b-out.txt",
+        "hash": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+      }
+    ]
+  }
+}

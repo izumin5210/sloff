@@ -1,5 +1,9 @@
 # ADR-0017: 集約専用の barrier task を first-class にする
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

@@ -1,5 +1,9 @@
 # ADR-0016: タスク依存をパターンで宣言する (`depends[*].task` の glob)
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

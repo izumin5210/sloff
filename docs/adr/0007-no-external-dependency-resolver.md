@@ -1,5 +1,9 @@
 # ADR-0007: sloff は外部依存専用 resolver ( go-external / pnpm-external) を持たない
 
+## Status
+
+Accepted
+
 ## Context
 
 sloff の OS 横断 invalidate 戦略 ( architecture.md の対応節) では、 ツールを **どこから version 文字列を取るか** で channel を分類している。 当初の構想では「外部公開パッケージ」を独立 channel として扱う resolver を 2 種類想定していた:

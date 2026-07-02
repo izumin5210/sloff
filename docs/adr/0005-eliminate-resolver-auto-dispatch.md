@@ -1,5 +1,9 @@
 # ADR-0005: Resolver auto-dispatch を廃止し、 すべて declared 経由に統一
 
+## Status
+
+Accepted
+
 ## Context
 
 設計初版 ([architecture.md](../design/architecture.md) の「Dispatch: 明示宣言を基本に少数の名前付き dispatch」節) では、 各 `Resolver` に `CanResolve(specDir, cmd) bool` を持たせ、 spec の `tools:` が空のとき cmd 形状から自動で resolver を選ぶ "auto-dispatch ループ" を備えていた。 例:

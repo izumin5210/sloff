@@ -1,5 +1,11 @@
 # ADR-0009: fingerprint の直列化形式 (protobuf binary)
 
+## Status
+
+Accepted
+
+- Amended by [ADR-0010](./0010-fingerprint-filename-timestamp-prefix.md): record schema が V2 → V3 になり、 `generated_at` field は schema から削除されて filename の timestamp prefix に移設された。 byte stability 規約は R5 の primary な担保から、 path uniqueness を補う二次的な防御線に位置づけが変わった
+
 ## Context
 
 ### 背景

@@ -1,5 +1,12 @@
 # ADR-0003: fingerprint のストレージ方式
 
+## Status
+
+Accepted
+
+- Amended by [ADR-0010](./0010-fingerprint-filename-timestamp-prefix.md): R5 ( コンフリクト無し) の達成手段が write-skip 規約から filename の timestamp prefix ( path uniqueness) へ格上げされた
+- Amended by [ADR-0011](./0011-dynamodb-remote-fingerprint-storage.md): 本 ADR が棄却したリモートストレージ ( Option C) を、 大規模 monorepo ( 1000+ task) 向けの opt-in DynamoDB backend として再導入した。 git per-task per-input ファイル ( local backend) が既定である点は不変
+
 ## Context
 
 ### 背景

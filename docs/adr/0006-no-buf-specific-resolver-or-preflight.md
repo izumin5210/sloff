@@ -1,5 +1,9 @@
 # ADR-0006: sloff は buf を special-case しない
 
+## Status
+
+Accepted
+
 ## Context
 
 `buf generate` は sloff が対象とする典型的な複合 generator の一つで、 buf module / codegen plugin / `.proto` 入力の組合せが fingerprint の健全性に効く。 当初は他 channel ( script / go-local / pnpm-*) と同様に **buf 専用 resolver + preflight** を導入する方向で実装し、 [PR #8](https://github.com/izumin5210/sloff/pull/8) で:

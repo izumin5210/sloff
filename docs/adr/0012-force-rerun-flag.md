@@ -1,5 +1,9 @@
 # ADR-0012: fingerprint を bypass して全 task を強制実行する `--force` flag
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

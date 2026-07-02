@@ -1,5 +1,11 @@
 # ADR-0004: Spec 検証と output 重複検出のポリシー
 
+## Status
+
+Accepted
+
+- Amended by [ADR-0017](./0017-barrier-tasks.md): `barrier: true` の task 種別が新設され、 必須フィールド ( `cmd` / `inputs` / `outputs` / `tools`) の要求は非 barrier task のみに適用される ( barrier task ではこれらの宣言が逆に load 時 error)
+
 ## Context
 
 [ADR-0002](./0002-fingerprint-hit-decision-model.md) で決まった「output-comparison」の fingerprint 判定が正しく機能するためには、 fingerprint key を構成する各 component が **意味のある値** で埋められている必要がある。 また、 同一 output path を複数 task が produce する spec は fingerprint 依存配線が壊れるため、 早期に検出して fail させたい。

@@ -1,5 +1,11 @@
 # ADR-0018: sloff の観測モデルとして OpenTelemetry trace を採用する
 
+## Status
+
+Accepted
+
+- 採番の経緯: 本 ADR は 0009 → 0013 → 0018 と 2 度改番されている ( いずれも番号衝突の解消のため。 直近は [ADR-0013](./0013-explicit-task-dependencies.md) との衝突)
+
 ## Context
 
 sloff は fingerprint-aware codegen orchestrator として、 1 run の中に多段のフェーズを走らせる:

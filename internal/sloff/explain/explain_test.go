@@ -208,18 +208,18 @@ func TestRenderMermaid_EmptyTaskListEmitsHeaderOnly(t *testing.T) {
 	}
 }
 
-func groupTask(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
-	return depgraph.Task{SpecRelpath: spec, Name: name, Group: true, DependsOn: deps}
+func barrierTask(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
+	return depgraph.Task{SpecRelpath: spec, Name: name, Barrier: true, DependsOn: deps}
 }
 
-// TestRenderMermaid_GroupNodeRendersAsHexagon locks ADR-0017 D6: group nodes
+// TestRenderMermaid_BarrierNodeRendersAsHexagon locks ADR-0017 D6: barrier nodes
 // use the {{...}} hexagon shape so an aggregation point is visually distinct
 // from an executing task, and its edges (no outputs, no inputs) render with
 // the "(declared)" caption.
-func TestRenderMermaid_GroupNodeRendersAsHexagon(t *testing.T) {
+func TestRenderMermaid_BarrierNodeRendersAsHexagon(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("svc", "consumer", []string{"seed.txt"}, []string{"out.go"}, dref("svc", "gen-all")),
-		groupTask("svc", "gen-all", dref("svc", "producer")),
+		barrierTask("svc", "gen-all", dref("svc", "producer")),
 		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	edges := explain.Edges(tasks)
@@ -238,12 +238,12 @@ func TestRenderMermaid_GroupNodeRendersAsHexagon(t *testing.T) {
 	}
 }
 
-// TestRenderDOT_GroupNodeRendersAsHexagon is the DOT counterpart: the group
+// TestRenderDOT_BarrierNodeRendersAsHexagon is the DOT counterpart: the barrier
 // node overrides the box default with shape=hexagon.
-func TestRenderDOT_GroupNodeRendersAsHexagon(t *testing.T) {
+func TestRenderDOT_BarrierNodeRendersAsHexagon(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("svc", "consumer", []string{"seed.txt"}, []string{"out.go"}, dref("svc", "gen-all")),
-		groupTask("svc", "gen-all", dref("svc", "producer")),
+		barrierTask("svc", "gen-all", dref("svc", "producer")),
 		task("svc", "producer", []string{"x.proto"}, []string{"shared.pb.go"}),
 	}
 	edges := explain.Edges(tasks)

@@ -54,16 +54,16 @@ func TestFindMissingDependencies_SelfOverlapIgnored(t *testing.T) {
 	}
 }
 
-// TestFindMissingDependencies_GroupEdgeDoesNotSuppress locks ADR-0017 D3:
-// depending on a group is not a license to read the group members' outputs.
+// TestFindMissingDependencies_BarrierEdgeDoesNotSuppress locks ADR-0017 D3:
+// depending on a barrier is not a license to read the barrier members' outputs.
 // The consumer reads the producer's file but only declares an edge to the
-// group, so the direct producer edge must still be reported missing —
-// treating the group as transparent would let "depend on a big group, read
+// barrier, so the direct producer edge must still be reported missing —
+// treating the barrier as transparent would let "depend on a big barrier, read
 // anything" bypass the check.
-func TestFindMissingDependencies_GroupEdgeDoesNotSuppress(t *testing.T) {
+func TestFindMissingDependencies_BarrierEdgeDoesNotSuppress(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("a", "gen", []string{"a/x.in"}, []string{"shared.out"}),
-		group("a", "gen-all", ref("a", "gen")),
+		barrier("a", "gen-all", ref("a", "gen")),
 		taskD("b", "consume", []string{"shared.out"}, []string{"b/y.out"}, ref("a", "gen-all")),
 	}
 	got := depgraph.FindMissingDependencies(tasks)

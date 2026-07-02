@@ -38,7 +38,7 @@ func nodeIDs(refs []TaskRef) map[TaskRef]string {
 // their declared dependency edges. Output is byte-stable: nodes appear in
 // (spec_relpath, name) order; edges are sorted by (To, From); each edge label
 // carries a sample of the justifying files (architecture.md §タスク間依存).
-// Group tasks render as hexagons ({{...}}) so aggregation points are
+// Barrier tasks render as hexagons ({{...}}) so aggregation points are
 // visually distinct from executing tasks (ADR-0017 D6).
 func RenderMermaid(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
@@ -46,10 +46,10 @@ func RenderMermaid(tasks []depgraph.Task, edges []Edge) string {
 
 	refs := orderedRefs(tasks)
 	ids := nodeIDs(refs)
-	groups := groupRefs(tasks)
+	barriers := barrierRefs(tasks)
 
 	for _, r := range refs {
-		if groups[r] {
+		if barriers[r] {
 			fmt.Fprintf(&b, "    %s{{\"%s\"}}\n", ids[r], escapeMermaidLabel(r.Label()))
 		} else {
 			fmt.Fprintf(&b, "    %s[\"%s\"]\n", ids[r], escapeMermaidLabel(r.Label()))

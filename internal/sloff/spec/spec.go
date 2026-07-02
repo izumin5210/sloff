@@ -60,14 +60,14 @@ type Depend struct {
 // Command corresponds to one entry in commands[]. Tools is a list of tool
 // names that must resolve to entries in the repo-wide tool registry.
 //
-// Group marks a pure aggregation node (ADR-0017): a task that carries only
+// Barrier marks a pure aggregation node (ADR-0017): a task that carries only
 // depends and exists so a set of tasks can be referenced under one name
-// (a barrier / alias, like Ninja's phony). Group tasks must not declare
+// (a barrier / alias, like Ninja's phony). Barrier tasks must not declare
 // cmd / inputs / outputs / tools and are never executed or fingerprinted.
 type Command struct {
 	Cmd     CmdLine  `yaml:"cmd"`
 	Depends []Depend `yaml:"depends,omitempty"`
-	Group   bool     `yaml:"group,omitempty"`
+	Barrier bool     `yaml:"barrier,omitempty"`
 	Inputs  []string `yaml:"inputs"`
 	Name    string   `yaml:"name"`
 	Outputs []string `yaml:"outputs"`
@@ -266,10 +266,10 @@ func validateTools(tools map[string]DeclaredTool) error {
 // expanding command_providers (ADR-0015 D5) so dynamically emitted tasks face
 // the same validation as hand-written ones.
 //
-// Group commands (ADR-0017 D1) invert the required-field rules: they must
+// Barrier commands (ADR-0017 D1) invert the required-field rules: they must
 // carry only depends. Forbidding the work-carrying fields structurally
-// enforces "a group is an aggregation point, not a task with work", and an
-// empty depends is rejected because a group that aggregates nothing is a
+// enforces "a barrier is an aggregation point, not a task with work", and an
+// empty depends is rejected because a barrier that aggregates nothing is a
 // spec mistake.
 func ValidateCommands(cmds []Command) error {
 	seen := make(map[string]struct{}, len(cmds))
@@ -285,12 +285,12 @@ func ValidateCommands(cmds []Command) error {
 			return fmt.Errorf("commands[%d] (%s): name must match %s (lower-case letters, digits, hyphen, underscore)",
 				i, c.Name, toolNamePattern)
 		}
-		if c.Group {
+		if c.Barrier {
 			if len(c.Cmd) > 0 || len(c.Inputs) > 0 || len(c.Outputs) > 0 || len(c.Tools) > 0 {
-				return fmt.Errorf("commands[%d] (%s): group tasks must not declare cmd, inputs, outputs, or tools", i, c.Name)
+				return fmt.Errorf("commands[%d] (%s): barrier tasks must not declare cmd, inputs, outputs, or tools", i, c.Name)
 			}
 			if len(c.Depends) == 0 {
-				return fmt.Errorf("commands[%d] (%s): group tasks must declare at least one depends entry", i, c.Name)
+				return fmt.Errorf("commands[%d] (%s): barrier tasks must declare at least one depends entry", i, c.Name)
 			}
 		} else {
 			if len(c.Cmd) == 0 {

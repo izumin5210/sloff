@@ -240,16 +240,16 @@ func expectWarn(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantWarn = substr }
 }
 
-// expectNoWarns asserts that Run logs no warnings at all. Group fixtures use
-// it to lock ADR-0017 D3: grouping edges must never surface as
+// expectNoWarns asserts that Run logs no warnings at all. Barrier fixtures use
+// it to lock ADR-0017 D3: barrier edges must never surface as
 // unobserved-depends warnings, on cold or warm (all-SKIP) runs alike.
 func expectNoWarns() runStepOption {
 	return func(c *runStepConfig) { c.wantNoWarns = true }
 }
 
 // expectNoInfoContaining asserts that no info-level log line contains substr.
-// Group fixtures pass the group's task name to lock ADR-0017 D2's "no
-// RUN/SKIP log for groups".
+// Barrier fixtures pass the barrier's task name to lock ADR-0017 D2's "no
+// RUN/SKIP log for barriers".
 func expectNoInfoContaining(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantNoInfo = substr }
 }
@@ -1778,53 +1778,53 @@ func TestRunner_DependsWithoutObservedOverlapWarnsOnFailedRun(t *testing.T) {
 	)
 }
 
-// TestRunner_GroupCleanStateOrdering covers the ADR-0017 barrier shape end to
-// end: two per-file generators, a group aggregating them, and a consumer that
+// TestRunner_BarrierCleanStateOrdering covers the ADR-0017 barrier shape end to
+// end: two per-file generators, a barrier aggregating them, and a consumer that
 // only waits for "all generation done" (test -f, no data read). On a clean
 // checkout the consumer must be ordered after both members purely via the
-// group edge. Both the cold run and the warm all-SKIP run must emit zero
-// warnings — the grouping edges are the exact false-positive class the group
-// task kind exists to eliminate — and no RUN/SKIP line may mention the group
+// barrier edge. Both the cold run and the warm all-SKIP run must emit zero
+// warnings — the barrier edges are the exact false-positive class the barrier
+// task kind exists to eliminate — and no RUN/SKIP line may mention the barrier
 // (it has no work, so it has no state transitions to log).
-func TestRunner_GroupCleanStateOrdering(t *testing.T) {
+func TestRunner_BarrierCleanStateOrdering(t *testing.T) {
 	runE2E(
-		t, "group-clean-state-ordering",
+		t, "barrier-clean-state-ordering",
 		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
 		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
 	)
 }
 
-// TestRunner_GroupDependsNotTransparent locks ADR-0017 D3: a consumer that
-// actually reads a group member's output cannot satisfy the missing-deps
-// check through its group edge — the direct producer edge is still required.
+// TestRunner_BarrierDependsNotTransparent locks ADR-0017 D3: a consumer that
+// actually reads a barrier member's output cannot satisfy the missing-deps
+// check through its barrier edge — the direct producer edge is still required.
 // Clean checkout, so only the run-time half can catch it. ReadOnly keeps the
 // golden deterministic (no order-dependent consumer record).
-func TestRunner_GroupDependsNotTransparent(t *testing.T) {
+func TestRunner_BarrierDependsNotTransparent(t *testing.T) {
 	runE2E(
-		t, "group-depends-not-transparent",
+		t, "barrier-depends-not-transparent",
 		runStep(withReadOnly(), expectError("undeclared task dependencies")),
 	)
 }
 
-// TestRunner_GroupFailurePropagates locks ADR-0017 D2's failure semantics: a
-// group whose member fails is itself failed, and the group's dependents are
+// TestRunner_BarrierFailurePropagates locks ADR-0017 D2's failure semantics: a
+// barrier whose member fails is itself failed, and the barrier's dependents are
 // never scheduled (the golden carries no c-out.txt and no records).
-func TestRunner_GroupFailurePropagates(t *testing.T) {
+func TestRunner_BarrierFailurePropagates(t *testing.T) {
 	runE2E(
-		t, "group-failure-propagates",
+		t, "barrier-failure-propagates",
 		runStep(expectError("exit status 1")),
 	)
 }
 
-// TestRunner_GroupPatternDepends locks the ADR-0017 × ADR-0016 composition:
-// the group's members are collected via a depends pattern ("gen-*", which
-// also exercises self-exclusion — the group itself matches the glob), and
-// the barrier consumer waits on the group by name. Ordering must hold on a
+// TestRunner_BarrierPatternDepends locks the ADR-0017 × ADR-0016 composition:
+// the barrier's members are collected via a depends pattern ("gen-*", which
+// also exercises self-exclusion — the barrier itself matches the glob), and
+// the barrier consumer waits on the barrier by name. Ordering must hold on a
 // clean checkout and neither run may warn: the pattern-expanded edges belong
-// to a group consumer, which the unobserved-depends check skips entirely.
-func TestRunner_GroupPatternDepends(t *testing.T) {
+// to a barrier consumer, which the unobserved-depends check skips entirely.
+func TestRunner_BarrierPatternDepends(t *testing.T) {
 	runE2E(
-		t, "group-pattern-depends",
+		t, "barrier-pattern-depends",
 		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
 		runStep(expectNoWarns(), expectNoInfoContaining("gen-all")),
 	)

@@ -120,17 +120,17 @@ func TestBuild_DiamondRespectsTopologicalOrder(t *testing.T) {
 	}
 }
 
-func group(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
-	return depgraph.Task{SpecRelpath: spec, Name: name, Group: true, DependsOn: deps}
+func barrier(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
+	return depgraph.Task{SpecRelpath: spec, Name: name, Barrier: true, DependsOn: deps}
 }
 
-// TestBuild_GroupOrdersMembersBeforeConsumer locks the ADR-0017 barrier
-// shape: a consumer depending only on the group must still be emitted after
-// every group member, with the group node itself sitting between them.
-func TestBuild_GroupOrdersMembersBeforeConsumer(t *testing.T) {
+// TestBuild_BarrierOrdersMembersBeforeConsumer locks the ADR-0017 barrier
+// shape: a consumer depending only on the barrier must still be emitted after
+// every barrier member, with the barrier node itself sitting between them.
+func TestBuild_BarrierOrdersMembersBeforeConsumer(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("", "consumer", []string{"seed.txt"}, []string{"c.out"}, ref("", "gen-all")),
-		group("", "gen-all", ref("", "gen-a"), ref("", "gen-b")),
+		barrier("", "gen-all", ref("", "gen-a"), ref("", "gen-b")),
 		taskD("", "gen-b", []string{"seed.txt"}, []string{"b.out"}),
 		taskD("", "gen-a", []string{"seed.txt"}, []string{"a.out"}),
 	}
@@ -144,12 +144,12 @@ func TestBuild_GroupOrdersMembersBeforeConsumer(t *testing.T) {
 	}
 }
 
-// TestBuild_CycleThroughGroupErrors locks that group nodes participate in
+// TestBuild_CycleThroughBarrierErrors locks that barrier nodes participate in
 // cycle detection like any other node (ADR-0017 D3).
-func TestBuild_CycleThroughGroupErrors(t *testing.T) {
+func TestBuild_CycleThroughBarrierErrors(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("", "A", []string{"a.in"}, []string{"a.out"}, ref("", "gen-all")),
-		group("", "gen-all", ref("", "A")),
+		barrier("", "gen-all", ref("", "A")),
 	}
 	_, err := depgraph.Build(tasks)
 	if err == nil {

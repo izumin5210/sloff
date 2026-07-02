@@ -181,16 +181,16 @@ func TestValidateDependReferences_UnknownSpecDirErrors(t *testing.T) {
 	}
 }
 
-// TestValidateDependReferences_GroupReferencesValidated locks that group
+// TestValidateDependReferences_BarrierReferencesValidated locks that barrier
 // tasks' depends entries flow through the same cross-file reference
-// validation as regular commands (ADR-0017 D1): a group pointing at a
+// validation as regular commands (ADR-0017 D1): a barrier pointing at a
 // task that doesn't exist is a load-time error.
-func TestValidateDependReferences_GroupReferencesValidated(t *testing.T) {
+func TestValidateDependReferences_BarrierReferencesValidated(t *testing.T) {
 	specs := buildSpecs(t, map[string]string{
 		"proto/options": producerYAML,
 		"proto/svc": `commands:
   - name: gen-all
-    group: true
+    barrier: true
     depends:
       - spec: ../options
         task: missing-task
@@ -202,10 +202,10 @@ func TestValidateDependReferences_GroupReferencesValidated(t *testing.T) {
 	}
 }
 
-// TestValidateDependReferences_GroupAsTargetOK locks that a regular task can
-// depend on a group: the group participates in the task namespace like any
+// TestValidateDependReferences_BarrierAsTargetOK locks that a regular task can
+// depend on a barrier: the barrier participates in the task namespace like any
 // other command.
-func TestValidateDependReferences_GroupAsTargetOK(t *testing.T) {
+func TestValidateDependReferences_BarrierAsTargetOK(t *testing.T) {
 	yml := `tools:
   versioner:
     exec: ["sh", "-c", "echo v1.0.0"]
@@ -216,7 +216,7 @@ commands:
     outputs: ["out.txt"]
     tools: [versioner]
   - name: gen-all
-    group: true
+    barrier: true
     depends:
       - task: gen
   - name: consume

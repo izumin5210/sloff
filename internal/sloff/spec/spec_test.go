@@ -193,10 +193,10 @@ commands:
 			wantErr: true,
 		},
 		{
-			name: "group task with depends only",
+			name: "barrier task with depends only",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     depends:
       - task: gen-foo
       - spec: ../other
@@ -210,8 +210,8 @@ commands:
 			want: &spec.File{
 				Commands: []spec.Command{
 					{
-						Name:  "gen-all",
-						Group: true,
+						Name:    "gen-all",
+						Barrier: true,
 						Depends: []spec.Depend{
 							{Task: "gen-foo"},
 							{Spec: "../other", Task: "gen-bar"},
@@ -228,10 +228,10 @@ commands:
 			},
 		},
 		{
-			name: "group task with cmd fails",
+			name: "barrier task with cmd fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     cmd: foo
     depends:
       - task: gen-foo
@@ -239,10 +239,10 @@ commands:
 			wantErr: true,
 		},
 		{
-			name: "group task with inputs fails",
+			name: "barrier task with inputs fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     inputs: ["a"]
     depends:
       - task: gen-foo
@@ -250,10 +250,10 @@ commands:
 			wantErr: true,
 		},
 		{
-			name: "group task with outputs fails",
+			name: "barrier task with outputs fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     outputs: ["b"]
     depends:
       - task: gen-foo
@@ -261,10 +261,10 @@ commands:
 			wantErr: true,
 		},
 		{
-			name: "group task with tools fails",
+			name: "barrier task with tools fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     tools: [foo]
     depends:
       - task: gen-foo
@@ -272,18 +272,18 @@ commands:
 			wantErr: true,
 		},
 		{
-			name: "group task without depends fails",
+			name: "barrier task without depends fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
 `,
 			wantErr: true,
 		},
 		{
-			name: "group task with empty depends fails",
+			name: "barrier task with empty depends fails",
 			yaml: `commands:
   - name: gen-all
-    group: true
+    barrier: true
     depends: []
 `,
 			wantErr: true,

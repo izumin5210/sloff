@@ -165,19 +165,19 @@ func TestGraph_DeclaredEdgeWithoutObservableOverlap_Mermaid(t *testing.T) {
 	assertGraphGolden(t, h, got)
 }
 
-// TestGraph_Group_Mermaid locks ADR-0017 D6 end to end: the group node
+// TestGraph_Barrier_Mermaid locks ADR-0017 D6 end to end: the barrier node
 // renders as a hexagon between its members and the barrier consumer, and its
-// edges carry the "(declared)" caption (a group never has overlap evidence).
+// edges carry the "(declared)" caption (a barrier never has overlap evidence).
 // No depends-missing warning may appear — the consumer waits without reading.
-func TestGraph_Group_Mermaid(t *testing.T) {
-	h := setupGraphHarness(t, "group-mermaid")
+func TestGraph_Barrier_Mermaid(t *testing.T) {
+	h := setupGraphHarness(t, "barrier-mermaid")
 	got := runGraphCmd(t, h, "--format", "mermaid")
 	assertGraphGolden(t, h, got)
 }
 
-// TestGraph_Group_DOT is the DOT rendering of the same barrier fixture.
-func TestGraph_Group_DOT(t *testing.T) {
-	h := setupGraphHarness(t, "group-dot")
+// TestGraph_Barrier_DOT is the DOT rendering of the same barrier fixture.
+func TestGraph_Barrier_DOT(t *testing.T) {
+	h := setupGraphHarness(t, "barrier-dot")
 	got := runGraphCmd(t, h, "--format", "dot")
 	assertGraphGolden(t, h, got)
 }

@@ -359,12 +359,12 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	))
 	defer endSpan(span, &err)
 
-	// Group tasks have no fingerprint (ADR-0017 D2): nothing to load, and an
+	// Barrier tasks have no fingerprint (ADR-0017 D2): nothing to load, and an
 	// optimistic key built from their empty command would only pollute the
 	// batch lookup with keys no backend can ever hold.
 	real := make([]depgraph.Task, 0, len(ordered))
 	for _, t := range ordered {
-		if !t.Group {
+		if !t.Barrier {
 			real = append(real, t)
 		}
 	}
@@ -538,12 +538,12 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err err
 				failed[i] = true
 				return nil
 			}
-			// ADR-0017 D2: a group carries no work — completing its declared
+			// ADR-0017 D2: a barrier carries no work — completing its declared
 			// dependencies IS its completion. No exec, no fingerprint, no
 			// producedBy registration, no RUN/SKIP log. Failure propagation is
-			// already handled above: any failed predecessor marks the group
-			// failed, which in turn blocks the group's dependents.
-			if t.Group {
+			// already handled above: any failed predecessor marks the barrier
+			// failed, which in turn blocks the barrier's dependents.
+			if t.Barrier {
 				return nil
 			}
 			if err := r.runTask(gctx, t); err != nil {
@@ -1227,7 +1227,7 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			Inputs:      mergedInputs,
 			Outputs:     ec.outputs,
 			DependsOn:   resolveDepends(ec.specDir, c.Depends),
-			Group:       c.Group,
+			Barrier:     c.Barrier,
 		}
 		tasks = append(tasks, t)
 		r.byKey[t.Ref()] = taskInfo{
@@ -1756,12 +1756,12 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 	r.producedByMu.Unlock()
 
 	for _, t := range ordered {
-		// A group has no inputs, so every one of its edges would mechanically
-		// count as unobserved — but that is the definition of a group
-		// (ADR-0017 D3), not a spec smell worth reporting. Edges *to* a group
-		// need no counterpart here: groups never produce, so the producedByRef
+		// A barrier has no inputs, so every one of its edges would mechanically
+		// count as unobserved — but that is the definition of a barrier
+		// (ADR-0017 D3), not a spec smell worth reporting. Edges *to* a barrier
+		// need no counterpart here: barriers never produce, so the producedByRef
 		// lookup below already skips them.
-		if t.Group {
+		if t.Barrier {
 			continue
 		}
 		info := r.byKey[t.Ref()]

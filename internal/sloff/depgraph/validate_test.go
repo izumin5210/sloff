@@ -54,6 +54,31 @@ func TestFindMissingDependencies_SelfOverlapIgnored(t *testing.T) {
 	}
 }
 
+// TestFindMissingDependencies_GroupEdgeDoesNotSuppress locks ADR-0016 D3:
+// depending on a group is not a license to read the group members' outputs.
+// The consumer reads the producer's file but only declares an edge to the
+// group, so the direct producer edge must still be reported missing —
+// treating the group as transparent would let "depend on a big group, read
+// anything" bypass the check.
+func TestFindMissingDependencies_GroupEdgeDoesNotSuppress(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("a", "gen", []string{"a/x.in"}, []string{"shared.out"}),
+		group("a", "gen-all", ref("a", "gen")),
+		taskD("b", "consume", []string{"shared.out"}, []string{"b/y.out"}, ref("a", "gen-all")),
+	}
+	got := depgraph.FindMissingDependencies(tasks)
+	want := []depgraph.MissingDependency{
+		{
+			Producer: ref("a", "gen"),
+			Consumer: ref("b", "consume"),
+			Files:    []string{"shared.out"},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestFindMissingDependencies_NoOverlapReturnsNil(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("a", "one", []string{"a/x.in"}, []string{"a/x.out"}),

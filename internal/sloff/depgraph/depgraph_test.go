@@ -120,6 +120,46 @@ func TestBuild_DiamondRespectsTopologicalOrder(t *testing.T) {
 	}
 }
 
+func group(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
+	return depgraph.Task{SpecRelpath: spec, Name: name, Group: true, DependsOn: deps}
+}
+
+// TestBuild_GroupOrdersMembersBeforeConsumer locks the ADR-0016 barrier
+// shape: a consumer depending only on the group must still be emitted after
+// every group member, with the group node itself sitting between them.
+func TestBuild_GroupOrdersMembersBeforeConsumer(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "consumer", []string{"seed.txt"}, []string{"c.out"}, ref("", "gen-all")),
+		group("", "gen-all", ref("", "gen-a"), ref("", "gen-b")),
+		taskD("", "gen-b", []string{"seed.txt"}, []string{"b.out"}),
+		taskD("", "gen-a", []string{"seed.txt"}, []string{"a.out"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"gen-a", "gen-b", "gen-all", "consumer"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestBuild_CycleThroughGroupErrors locks that group nodes participate in
+// cycle detection like any other node (ADR-0016 D3).
+func TestBuild_CycleThroughGroupErrors(t *testing.T) {
+	tasks := []depgraph.Task{
+		taskD("", "A", []string{"a.in"}, []string{"a.out"}, ref("", "gen-all")),
+		group("", "gen-all", ref("", "A")),
+	}
+	_, err := depgraph.Build(tasks)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error should mention cycle, got %v", err)
+	}
+}
+
 func TestBuild_CycleErrors(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("", "A", []string{"b.out"}, []string{"a.out"}, ref("", "B")),

@@ -136,6 +136,7 @@ commands:
 - tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `sloff.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
 - `inputs` / `outputs` の glob pattern は **spec dir 相対**。 `..` を含む pattern も許容され、 monorepo 典型の cross-dir codegen ( e.g. `proto/<svc>/sloff.yml` から `../../gen/go/**/*.pb.go` を出力) を spec の置き場所と関心事のスコープを揃えたまま表現できる。 ただし正規化後に repoRoot を抜ける pattern ( e.g. `../../../etc/passwd`) は load 時 error として弾く ( spec が repo 外を hash しないことを構造的に担保)
 - 他 task の生成物を入力に取る場合、 `depends` で **実行順序を明示宣言する** ( ADR-0013)。 要素は `{spec, task}` の構造体で、 `spec` は spec dir 相対 ( 省略時は同一 sloff.yml 内)。 inputs / outputs overlap の計算は順序導出ではなく **宣言の検証** に使う ( 後述「タスク間依存」)
+- `group: true` を宣言した task は **集約専用ノード ( barrier / alias)** になる ( [ADR-0016](../adr/0016-group-tasks.md))。 `depends` のみを持ち、 `cmd` / `inputs` / `outputs` / `tools` の宣言は load 時 error ( 空 `depends` も error)。 実行も fingerprint も持たず、 「 この task 集合の完了」 を 1 つの名前で下流に提供する ( 後述「タスク間依存」の group 節)
 
 ### fingerprint schema
 
@@ -629,6 +630,24 @@ flowchart LR
 run 時検証がポイントで、 plan 時に検出できない clean state での depends 漏れも「 上流が実際にファイルを生成した時点」 で必ず捕まる ( 旧設計では検出不能だった経路。 検出力は純増)。 ADR-0004 D3 の重複 output producer 検出は従来どおり変更なし。
 
 「 inputs にも outputs にも現れない論理依存」 を持つ generator ( `inputs` 外を読む / `outputs` 外を書く / 副作用が大きい / non-deterministic) が **sloff のスコープ外** であることも従来どおり。 depends はそうした generator を救済するための機構ではなく、 宣言済み inputs / outputs の上に成立するデータフローの実行順序を spec 上で確定させるための機構である。
+
+#### group task ( 集約専用ノード)
+
+fan-in の大きい task 集合 (「 全 per-dir 生成の完了」 など) を待つ consumer が、 N 本のエッジを列挙する代わりに 1 つの名前へ depends できるよう、 `group: true` の集約専用 task を提供する ( [ADR-0016](../adr/0016-group-tasks.md)。 Ninja の `phony`、 Bazel の `alias` / `test_suite` に相当):
+
+```yaml
+commands:
+  - name: gen-all
+    group: true
+    depends:
+      - {task: gen-foo}
+      - {spec: ../other, task: gen-bar}
+```
+
+- **実行モデル**: group は実行されず fingerprint も持たない。 スケジューラ上は「 全 depends の完了で即完了」 するノードで、 depends のいずれかが fail すれば group も fail する ( 下流に伝播)。 RUN / SKIP ログも record も producedBy 登録も無い
+- **検証との関係**: group は inputs を持たないため inputs 漏れ warning の判定対象にならない ( 判定を弱めるのではなく、 判定すべきものが構造的に無い)。 逆に **group への depends はデータ読み取りの免罪符にならない**: group メンバーの生成物を読む consumer には、 実 producer への直接エッジを depends 漏れ error が従来通り要求する ( group を透過扱いすると「 大きな group に depends すれば何を読んでも通る」 抜け道になるため)
+- **invalidate は group を流れない**: depends が input_hash に入らない ( ADR-0013 D4) 帰結として、 group 経由では fingerprint は invalidate されない。 データを読む consumer は直接エッジ + inputs 宣言が必要で、 それは上記 error が強制する
+- `sloff graph` では group を実 task と区別できる形 ( Mermaid: hexagon `{{...}}` / DOT: `shape=hexagon`) で表示する
 
 #### invalidate チェーン
 

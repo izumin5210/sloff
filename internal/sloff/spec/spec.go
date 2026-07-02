@@ -60,7 +60,7 @@ type Depend struct {
 // Command corresponds to one entry in commands[]. Tools is a list of tool
 // names that must resolve to entries in the repo-wide tool registry.
 //
-// Group marks a pure aggregation node (ADR-0016): a task that carries only
+// Group marks a pure aggregation node (ADR-0017): a task that carries only
 // depends and exists so a set of tasks can be referenced under one name
 // (a barrier / alias, like Ninja's phony). Group tasks must not declare
 // cmd / inputs / outputs / tools and are never executed or fingerprinted.
@@ -266,7 +266,7 @@ func validateTools(tools map[string]DeclaredTool) error {
 // expanding command_providers (ADR-0015 D5) so dynamically emitted tasks face
 // the same validation as hand-written ones.
 //
-// Group commands (ADR-0016 D1) invert the required-field rules: they must
+// Group commands (ADR-0017 D1) invert the required-field rules: they must
 // carry only depends. Forbidding the work-carrying fields structurally
 // enforces "a group is an aggregation point, not a task with work", and an
 // empty depends is rejected because a group that aggregates nothing is a

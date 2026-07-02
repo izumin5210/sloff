@@ -124,7 +124,7 @@ func group(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
 	return depgraph.Task{SpecRelpath: spec, Name: name, Group: true, DependsOn: deps}
 }
 
-// TestBuild_GroupOrdersMembersBeforeConsumer locks the ADR-0016 barrier
+// TestBuild_GroupOrdersMembersBeforeConsumer locks the ADR-0017 barrier
 // shape: a consumer depending only on the group must still be emitted after
 // every group member, with the group node itself sitting between them.
 func TestBuild_GroupOrdersMembersBeforeConsumer(t *testing.T) {
@@ -145,7 +145,7 @@ func TestBuild_GroupOrdersMembersBeforeConsumer(t *testing.T) {
 }
 
 // TestBuild_CycleThroughGroupErrors locks that group nodes participate in
-// cycle detection like any other node (ADR-0016 D3).
+// cycle detection like any other node (ADR-0017 D3).
 func TestBuild_CycleThroughGroupErrors(t *testing.T) {
 	tasks := []depgraph.Task{
 		taskD("", "A", []string{"a.in"}, []string{"a.out"}, ref("", "gen-all")),

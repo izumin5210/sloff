@@ -39,7 +39,7 @@ func nodeIDs(refs []TaskRef) map[TaskRef]string {
 // (spec_relpath, name) order; edges are sorted by (To, From); each edge label
 // carries a sample of the justifying files (architecture.md §タスク間依存).
 // Group tasks render as hexagons ({{...}}) so aggregation points are
-// visually distinct from executing tasks (ADR-0016 D6).
+// visually distinct from executing tasks (ADR-0017 D6).
 func RenderMermaid(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")

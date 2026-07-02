@@ -39,7 +39,7 @@ type Task struct {
 	// only these for ordering edges; Inputs/Outputs remain for duplicate-
 	// producer detection and overlap validation.
 	DependsOn []TaskRef
-	// Group marks a pure aggregation node (ADR-0016): no cmd, no
+	// Group marks a pure aggregation node (ADR-0017): no cmd, no
 	// inputs/outputs, only DependsOn. Group nodes participate in ordering and
 	// cycle detection like any other node; the runner completes them without
 	// executing or fingerprinting anything, and the overlap validations skip

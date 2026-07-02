@@ -359,7 +359,7 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	))
 	defer endSpan(span, &err)
 
-	// Group tasks have no fingerprint (ADR-0016 D2): nothing to load, and an
+	// Group tasks have no fingerprint (ADR-0017 D2): nothing to load, and an
 	// optimistic key built from their empty command would only pollute the
 	// batch lookup with keys no backend can ever hold.
 	real := make([]depgraph.Task, 0, len(ordered))
@@ -538,7 +538,7 @@ func (r *Runner) runTasks(ctx context.Context, ordered []depgraph.Task) (err err
 				failed[i] = true
 				return nil
 			}
-			// ADR-0016 D2: a group carries no work — completing its declared
+			// ADR-0017 D2: a group carries no work — completing its declared
 			// dependencies IS its completion. No exec, no fingerprint, no
 			// producedBy registration, no RUN/SKIP log. Failure propagation is
 			// already handled above: any failed predecessor marks the group
@@ -1758,7 +1758,7 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 	for _, t := range ordered {
 		// A group has no inputs, so every one of its edges would mechanically
 		// count as unobserved — but that is the definition of a group
-		// (ADR-0016 D3), not a spec smell worth reporting. Edges *to* a group
+		// (ADR-0017 D3), not a spec smell worth reporting. Edges *to* a group
 		// need no counterpart here: groups never produce, so the producedByRef
 		// lookup below already skips them.
 		if t.Group {

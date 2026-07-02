@@ -1,4 +1,4 @@
-# ADR-0016: 集約専用の group task を first-class にする
+# ADR-0017: 集約専用の group task を first-class にする
 
 ## Context
 
@@ -12,7 +12,7 @@
 - 同 repo で sloff 以前に使われていた codegen ツールにも、 no-op cmd ( `echo done`) の集約 task で barrier を偽装する同型の hack が存在した。 集約点の需要はツールを跨いで再発している
 - sloff spec は `cmd` / `inputs` / `outputs` / `tools` を必須とするため ( ADR-0004)、 純粋な集約点を書く正当な方法が無い。 実 task に barrier を兼務させるか、 no-op cmd + ダミー宣言で偽装するかになり、 どちらも D3 検証と衝突する
 
-なお当該ケース自体は「 barrier を廃止し、 唯一の consumer を実生成タスクへ repoint + 集約 task を plugin 別に分割」 で解消できた。 しかし fan-in の大きい下流 (「 全 per-dir 生成の完了」 を待ちたい consumer) が現れるたびに、 各 consumer が N 本のエッジを列挙するのはスケールしない。 集約点を表現する語彙が spec に必要である。
+なお当該ケース自体は「 barrier を廃止し、 唯一の consumer を実生成タスクへ repoint + 集約 task を plugin 別に分割」 で解消できた。 エッジ列挙の記述コスト自体はその後 [ADR-0016](./0016-pattern-task-dependencies.md) のパターン depends が 1 行に畳んだが、 それは「 生成物を読む consumer の fan-out」 の解であり、 **読まずに完了だけを待つ barrier** の語彙ではない ( 後述 Option E)。 集約点そのものを表現する語彙が spec に必要である。
 
 ### 評価軸
 
@@ -27,19 +27,20 @@
 - [ADR-0004: Spec 検証と output 重複検出のポリシー](./0004-spec-validation-and-output-conflict-policy.md)
 - [ADR-0013: タスク間依存を spec に明示宣言する (`depends`)](./0013-explicit-task-dependencies.md)
 - [ADR-0015: command provider による動的タスク生成](./0015-dynamic-tasks-via-command-providers.md) ( OQ2: provider 出力スキーマの wire 互換)
+- [ADR-0016: タスク依存をパターンで宣言する](./0016-pattern-task-dependencies.md) ( 読む consumer の fan-out の解 / Option C で暗黙 barrier を棄却)
 - 前例: Ninja `phony` rule / Bazel `alias`・`test_suite` / Make `.PHONY` 集約 target
 
 ## Considered Options
 
 ### Comparison Table
 
-| | A: 現状維持 | B: order-only depends flag | C: warning 抑制 flag | **D: group task (採用)** |
-|---|---|---|---|---|
-| D3 不変条件の維持 | ◎ ( 検証は無傷だが noise) | × ( エッジ単位で検証対象外を作る) | × ( 同左) | ◎ ( 実 task のエッジは全て検証対象のまま) |
-| 意味論の正確さ | × ( barrier を実 task が兼務) | △ ( 順序制約ですらないものを順序と表現) | × ( 意味論を足さない) | ◎ ( 集約点をそのまま表現) |
-| 誤用への耐性 | ◎ | × ( warning 黙らせ flag として乱用可能) | × ( 同左) | ◎ ( task 種別なので実 task の検証を逃れられない) |
-| 記述コスト | × ( 毎 run の warning noise) | ○ | ○ | ◎ |
-| 実装コスト | ◎ ( ゼロ) | ○ | ◎ | ○ ( task 種別の分岐追加) |
+| | A: 現状維持 | B: order-only depends flag | C: warning 抑制 flag | **D: group task (採用)** | E: パターン depends で代替 |
+|---|---|---|---|---|---|
+| D3 不変条件の維持 | ◎ ( 検証は無傷だが noise) | × ( エッジ単位で検証対象外を作る) | × ( 同左) | ◎ ( 実 task のエッジは全て検証対象のまま) | ◎ ( 展開後は literal エッジ) |
+| 意味論の正確さ | × ( barrier を実 task が兼務) | △ ( 順序制約ですらないものを順序と表現) | × ( 意味論を足さない) | ◎ ( 集約点をそのまま表現) | × ( barrier をデータ依存の束で表現し続ける) |
+| 誤用への耐性 | ◎ | × ( warning 黙らせ flag として乱用可能) | × ( 同左) | ◎ ( task 種別なので実 task の検証を逃れられない) | ◎ |
+| 記述コスト | × ( 毎 run の warning noise) | ○ | ○ | ◎ | ○ ( 1 行だが集合定義が consumer ごとに複製) |
+| 実装コスト | ◎ ( ゼロ) | ○ | ◎ | ○ ( task 種別の分岐追加) | ◎ ( 実装済み) |
 
 ### Option A: 現状維持 ( 実 task に barrier を兼務させる)
 
@@ -74,6 +75,16 @@
 - ◎ 実行も fingerprint も持たないため runner の意味論への影響が最小
 - △ task 種別が 2 つになり spec / depgraph / runner / explain に分岐が増える
 
+### Option E: パターン depends ( ADR-0016) で代替
+
+本 ADR の起草後に [ADR-0016](./0016-pattern-task-dependencies.md) が導入した `depends[*].task` の glob で、 barrier を欲しがる consumer が `{spec: ../gen, task: "gen-*"}` と 1 行書けば足りる、 とする案。
+
+- ◎ **生成物を読む** consumer の fan-out ( 列挙コスト / ドリフト) は実際これで解消済み
+- × barrier の意味論は表現できない。 パターンは展開後もデータ依存エッジの束であり、 上流を **読まずに完了だけを待つ** consumer には inputs 漏れ warning がパターン単位で残る ( ADR-0016 D4 の集計は「 一部でも読めば warning なし」 であり、 全く読まない barrier 用途は依然 warning 対象)
+- × 集約点に名前が付かない。 同じ集合を待つ consumer が増えるたびにパターンが spec を跨いで複製され、 「 どの task 群をもって完了とするか」 の定義が consumer 側に散る
+
+棄却 ( 単独では barrier を代替しない)。 ただし両者は直交して補完し合う: group の `depends` にもパターンを書けるため、 「 動的に生成される task 群を 1 つの名前で束ねる barrier」 は group × パターンで表現する ( D1)。
+
 ## Decision
 
 **Option D を採用する。 `group: true` を宣言した task は depends のみを持つ集約点となり、 実行・fingerprint・overlap 検証の対象外とする。**
@@ -87,6 +98,7 @@ commands:
     depends:
       - {task: gen-foo}
       - {spec: ../other, task: gen-bar}
+      - {task: "perdir-*"}    # パターン ( ADR-0016) も混在可
 ```
 
 load 時 validation ( いずれも error):
@@ -94,6 +106,7 @@ load 時 validation ( いずれも error):
 - group task が `cmd` / `inputs` / `outputs` / `tools` のいずれかを持つ ( 「 group は集約点であり仕事を持たない」 を構造で強制する)
 - group task の `depends` が空 ( 何も集約しない group は無意味であり、 書き間違いとして扱う)
 - `depends` の既存 validation ( 参照先不在 / 自己参照 / 重複 / repoRoot 逸脱、 ADR-0013 D1) は同様に適用
+- `depends` のパターン ( ADR-0016) は group でも通常 task と同一経路 ( provider 展開後・depgraph 構築前) で展開される。 0 件マッチ error ( ADR-0016 D3) が「 実質空の group」 を同様に弾く
 
 非 group task の必須フィールドは従来通り ( ADR-0004)。
 
@@ -111,6 +124,8 @@ group は実行されず fingerprint も持たない。 スケジューラ上は
 - **depends 漏れ ( error)**: group への depends は **データ読み取りの免罪符にならない**。 consumer が group メンバーの生成物を読む場合、 実 producer への直接エッジを従来通り要求する。 group を透過扱いすると「 大きな group に depends しておけば何を読んでも通る」 抜け道になり、 D3 の error 側が骨抜きになる
 - **cycle 検証**: 既存どおり ( group もノードとして参加する)
 - **output 衝突 ( ADR-0004 D3)**: outputs を持たないため対象外
+
+なお ADR-0016 Option C は暗黙 barrier を「 overlap 検証 ( 直接エッジ前提) と衝突し、 検証の barrier 透過化という大きな改修を要する」 として棄却した。 本 ADR は group を検証透過に **しない** ( depends 漏れ error は直接エッジを要求し続ける) ことでその衝突自体を回避しており、 検証意味論への変更は consumer 側 warning の明示 skip のみに留まる。
 
 ### D4. invalidation は group を流れない
 

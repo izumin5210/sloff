@@ -13,7 +13,7 @@ import (
 // from an unescaped double quote), so we use the human-readable task label
 // as the ID directly instead of a slugged form. Group tasks carry
 // shape=hexagon — the same visual distinction the Mermaid renderer draws
-// (ADR-0016 D6).
+// (ADR-0017 D6).
 func RenderDOT(tasks []depgraph.Task, edges []Edge) string {
 	var b strings.Builder
 	b.WriteString("digraph sloff {\n")

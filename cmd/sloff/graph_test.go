@@ -165,7 +165,7 @@ func TestGraph_DeclaredEdgeWithoutObservableOverlap_Mermaid(t *testing.T) {
 	assertGraphGolden(t, h, got)
 }
 
-// TestGraph_Group_Mermaid locks ADR-0016 D6 end to end: the group node
+// TestGraph_Group_Mermaid locks ADR-0017 D6 end to end: the group node
 // renders as a hexagon between its members and the barrier consumer, and its
 // edges carry the "(declared)" caption (a group never has overlap evidence).
 // No depends-missing warning may appear — the consumer waits without reading.

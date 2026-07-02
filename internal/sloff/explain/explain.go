@@ -106,7 +106,7 @@ func orderedRefs(tasks []depgraph.Task) []TaskRef {
 	return refs
 }
 
-// groupRefs collects the refs of group tasks (ADR-0016 D6). Both renderers
+// groupRefs collects the refs of group tasks (ADR-0017 D6). Both renderers
 // draw group nodes in a distinct shape so an aggregation point is never
 // mistaken for a task that executes something.
 func groupRefs(tasks []depgraph.Task) map[TaskRef]bool {

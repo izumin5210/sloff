@@ -183,7 +183,7 @@ func TestValidateDependReferences_UnknownSpecDirErrors(t *testing.T) {
 
 // TestValidateDependReferences_GroupReferencesValidated locks that group
 // tasks' depends entries flow through the same cross-file reference
-// validation as regular commands (ADR-0016 D1): a group pointing at a
+// validation as regular commands (ADR-0017 D1): a group pointing at a
 // task that doesn't exist is a load-time error.
 func TestValidateDependReferences_GroupReferencesValidated(t *testing.T) {
 	specs := buildSpecs(t, map[string]string{

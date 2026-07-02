@@ -54,7 +54,7 @@ func TestFindMissingDependencies_SelfOverlapIgnored(t *testing.T) {
 	}
 }
 
-// TestFindMissingDependencies_GroupEdgeDoesNotSuppress locks ADR-0016 D3:
+// TestFindMissingDependencies_GroupEdgeDoesNotSuppress locks ADR-0017 D3:
 // depending on a group is not a license to read the group members' outputs.
 // The consumer reads the producer's file but only declares an edge to the
 // group, so the direct producer edge must still be reported missing —

@@ -78,7 +78,7 @@ func TestParse_EmptyTasks(t *testing.T) {
 	}
 }
 
-// TestParse_GroupIsNotPartOfSchemaV1 locks ADR-0016 D5: schema v1 has no
+// TestParse_GroupIsNotPartOfSchemaV1 locks ADR-0017 D5: schema v1 has no
 // group field, so a provider emitting one gets it dropped by the non-strict
 // decode and the resulting command fails downstream validation on the missing
 // cmd — a loud failure, never a silently degraded group.

@@ -212,7 +212,7 @@ func groupTask(spec, name string, deps ...depgraph.TaskRef) depgraph.Task {
 	return depgraph.Task{SpecRelpath: spec, Name: name, Group: true, DependsOn: deps}
 }
 
-// TestRenderMermaid_GroupNodeRendersAsHexagon locks ADR-0016 D6: group nodes
+// TestRenderMermaid_GroupNodeRendersAsHexagon locks ADR-0017 D6: group nodes
 // use the {{...}} hexagon shape so an aggregation point is visually distinct
 // from an executing task, and its edges (no outputs, no inputs) render with
 // the "(declared)" caption.

@@ -185,6 +185,21 @@ func runStep(opts ...runStepOption) step {
 				t.Fatalf("Run: expected no warnings, got: %v", warns)
 			}
 		}
+		if cfg.wantInfo != "" {
+			logs.mu.Lock()
+			infos := append([]string(nil), logs.infos...)
+			logs.mu.Unlock()
+			found := false
+			for _, in := range infos {
+				if strings.Contains(in, cfg.wantInfo) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("Run: no info log containing %q; infos: %v", cfg.wantInfo, infos)
+			}
+		}
 		if cfg.wantNoInfo != "" {
 			logs.mu.Lock()
 			infos := append([]string(nil), logs.infos...)
@@ -204,6 +219,7 @@ type runStepConfig struct {
 	wantErr     string
 	wantWarn    string
 	wantNoWarns bool
+	wantInfo    string
 	wantNoInfo  string
 }
 
@@ -252,6 +268,11 @@ func expectNoWarns() runStepOption {
 // RUN/SKIP log for barriers".
 func expectNoInfoContaining(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantNoInfo = substr }
+}
+
+// expectInfo asserts that Run logs at least one info line containing substr.
+func expectInfo(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantInfo = substr }
 }
 
 // captureLogger records warnings and infos for the expect* assertions while

@@ -1,0 +1,13 @@
+tools:
+  gen-tool:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+    depends:
+      - task: gen-src
+
+commands:
+  - name: gen-src
+    cmd: ["sh", "-c", "cp in.txt out.txt"]
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    tools: [gen-tool]

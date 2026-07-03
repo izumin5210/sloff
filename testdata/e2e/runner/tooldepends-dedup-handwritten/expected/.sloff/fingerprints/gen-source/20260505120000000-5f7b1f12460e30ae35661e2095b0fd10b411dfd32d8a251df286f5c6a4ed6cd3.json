@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": ".",
+    "task_id": "gen-source",
+    "cmd": "sh -c mkdir -p gen && cp gen.go.txt gen/gen.go"
+  },
+  "input": {
+    "hash": "5f7b1f12460e30ae35661e2095b0fd10b411dfd32d8a251df286f5c6a4ed6cd3",
+    "files_hash": "b5a3eb34ff6d0799fd4d38e9161eee448b2e9f03bc7389d8e0e0c1dd1601f95e",
+    "cmd_hash": "1790baeda28c080f114daf081b8daab506ebb5d5f33180010c073968e6f7939d",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "78a3a92b13562859fe303dae5645fa06d7965757d59406d659d7c2933fadc367",
+    "files": [
+      {
+        "path": "gen/gen.go",
+        "hash": "45d94b6a7f2ec270d67c6a29ad5b6c8efbf5a83ec8bffba027b199898ec96d0f"
+      }
+    ]
+  }
+}

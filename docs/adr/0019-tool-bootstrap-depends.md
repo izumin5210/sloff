@@ -112,7 +112,7 @@ tool T を `tools[]` に列挙する全 task の `depends` に、T の `depends`
 
 - **時期**: command provider 展開 ( ADR-0015) → パターン depends 展開 ( ADR-0016) → tool registry 構築 → **注入** → depends 参照検証 → collectTasks。生成 task への参照と、生成 task への注入の両方が成立する
 - **path 変換**: tool 定義 dir 基準の参照を、注入先 consumer の spec dir 基準へ変換して合流させる ( 以降の全 pass は無変更で literal edge として扱う)
-- **dedup**: consumer が同じ edge を手書き宣言済みの場合は注入しない ( 既存 spec と共存する後方互換の要)。注入済み edge と手書き edge は以降不可分で、depgraph / D3 検証 / graph 表示は区別しない
+- **dedup**: consumer が同じ edge を手書き宣言済みの場合は注入しない ( 既存 spec と共存する後方互換の要)。注入済み edge と手書き edge は depgraph / スケジューリング / graph 表示では区別しない。ただし「未観測 depends 警告」( D3 の inputs omission check) では**注入済み edge を除外**する: tool 由来の edge の無効化は `resolved_versions` ( ADR-0013 D4 / D7) を経由するため、ファイル overlap 不在の警告は原理的に誤りになる。同じ edge を手書きした場合は注入が skip されるため手書き edge には警告が適用される
 - **自己 edge は error**: 注入先 task 自身が参照先になる場合 ( 「T の source を生成する task P が T を使っている」) は、bootstrap が構造的に不可能な spec なので tool 名を主語に error にする。silent skip にしない ( skip すると順序保証が静かに消える)。この error は「生成物を import する generator を、閉包 producer と同一 task で回している」構造矛盾の検出であり、修正は task 分割 ( 閉包 producer を tool 非依存の task に切り出す) になる
 - **barrier は免罪符にならない**: `depends` に barrier ( ADR-0017) を書くことは可能だが、ADR-0017 D3 のとおり consumer が実 producer の生成物を読む ( = tool 閉包に入る) 場合の直接 edge 要求は免除されない。go-local tool の閉包 producer は実 task を直接列挙すること
 - **`sloff graph` / Plan にも同様に注入する**。tool 由来の順序制約が graph に現れることは改善であり、Run と Plan で DAG が食い違わないことは決定性の要件

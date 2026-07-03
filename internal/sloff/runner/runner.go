@@ -159,6 +159,17 @@ type Runner struct {
 	// expanded edge (ADR-0016 D4); nil when no pattern depends were declared.
 	patternGroups map[depgraph.TaskRef][]patternGroup
 
+	// injectedDepends records, per consumer task, the set of producer task refs
+	// that were injected from a tool's bootstrap depends (ADR-0019 D2).
+	// warnUnobservedDepends skips these edges: their invalidation flows through
+	// resolved_versions (ADR-0013 D4 / ADR-0019 D7), so a "none of the files it
+	// produced match this task's inputs" warning would be wrong-by-construction.
+	// When the user also hand-wrote the same edge, injection is skipped (dedup in
+	// injectToolDepends), the edge stays hand-written, and the warning applies
+	// as before — the maps track only the edges injection actually added.
+	// Populated by injectToolDepends; nil on any run where no tool declares depends.
+	injectedDepends map[depgraph.TaskRef]map[depgraph.TaskRef]struct{}
+
 	// prefetched caches the records loaded by Storage.LoadMany at the top of
 	// Run; runTask consults this map first to avoid a per-task round-trip
 	// against remote backends. Populated once before runTasks starts and
@@ -1931,8 +1942,18 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 			}
 		}
 
+		injectedRefs := r.injectedDepends[t.Ref()]
 		for _, dep := range t.DependsOn {
 			if _, fromPattern := patternRefs[dep]; fromPattern {
+				continue
+			}
+			// Skip edges that injection added from a tool's bootstrap depends
+			// (ADR-0019 D2): their invalidation flows through resolved_versions
+			// (ADR-0013 D4 / ADR-0019 D7), not file overlap, so warning would
+			// be wrong-by-construction. Hand-written duplicates of the same edge
+			// are not injected (dedup in injectToolDepends) and are not in this
+			// set, so the warning still applies to them.
+			if _, fromInjection := injectedRefs[dep]; fromInjection {
 				continue
 			}
 			outs, ran := producedByRef[dep]

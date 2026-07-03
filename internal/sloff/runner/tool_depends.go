@@ -32,6 +32,13 @@ import (
 // Only tools some command references are processed: a broken depends on an
 // unreferenced catalog tool stays inert, mirroring how its resolver config
 // is never validated either (ADR-0008).
+//
+// Provenance is recorded on r.injectedDepends so warnUnobservedDepends can
+// skip these edges (ADR-0019 D2): their invalidation flows through
+// resolved_versions, not file overlap, so an "inputs omission" warning would
+// be wrong-by-construction. Hand-written edges that duplicate an injected one
+// are never injected (dedup), so their provenance is never recorded and the
+// warning still applies to them as before.
 func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 	type taskKey struct{ dir, name string }
 	// Same index ValidateDependReferences builds. Existence is checked here,
@@ -48,6 +55,7 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 	// Immutable-copy discipline (see expandCommandProviders): specs without an
 	// injection are passed through untouched, sharing their *File.
 	out := make([]spec.Spec, 0, len(r.opts.Specs))
+	var provenance map[depgraph.TaskRef]map[depgraph.TaskRef]struct{}
 	for _, sp := range r.opts.Specs {
 		consumerDir := filepath.ToSlash(sp.Dir)
 		var newCmds []spec.Command
@@ -103,6 +111,16 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 						return fmt.Errorf("tool %q: rebase depends %s:%s onto %s: %w", toolName, target, d.Task, consumerDir, err)
 					}
 					injected = append(injected, spec.Depend{Spec: rel, Task: d.Task})
+					// Record provenance so warnUnobservedDepends can skip this edge.
+					consumer := depgraph.TaskRef{SpecRelpath: consumerDir, Name: c.Name}
+					producer := depgraph.TaskRef{SpecRelpath: target, Name: d.Task}
+					if provenance == nil {
+						provenance = map[depgraph.TaskRef]map[depgraph.TaskRef]struct{}{}
+					}
+					if provenance[consumer] == nil {
+						provenance[consumer] = map[depgraph.TaskRef]struct{}{}
+					}
+					provenance[consumer][producer] = struct{}{}
 				}
 			}
 			if len(injected) == 0 {
@@ -125,6 +143,13 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 		out = append(out, spec.Spec{Dir: sp.Dir, Path: sp.Path, File: &newFile})
 	}
 	r.opts.Specs = out
+	// Only overwrite on the first call (Plan → Run reuses the same Runner):
+	// injectToolDepends is idempotent after the first injection because the
+	// specs no longer carry un-injected depends, so provenance would be nil
+	// on a second call and we must not clobber the first call's result.
+	if provenance != nil {
+		r.injectedDepends = provenance
+	}
 	return nil
 }
 

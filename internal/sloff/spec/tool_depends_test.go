@@ -125,6 +125,23 @@ func TestParse_ToolDependsRejectsGlobPattern(t *testing.T) {
 	}
 }
 
+// TestParse_ToolDependsRejectsGlobPatternInSpec pins the v1 scope decision
+// for the spec field too: ADR-0019 D1 rejects glob metacharacters in both
+// the task and the spec fields of a tool's bootstrap depends.
+func TestParse_ToolDependsRejectsGlobPatternInSpec(t *testing.T) {
+	yml := `tools:
+  gen-foo:
+    go-local: ./cmd/gen-foo
+    depends:
+      - spec: "services/*"
+        task: gen
+`
+	_, err := spec.Parse([]byte(yml))
+	if err == nil || !strings.Contains(err.Error(), "glob patterns are not supported") {
+		t.Errorf("expected glob-unsupported error, got %v", err)
+	}
+}
+
 func TestParse_ToolDependsRejectsDuplicateEntry(t *testing.T) {
 	yml := `tools:
   gen-foo:

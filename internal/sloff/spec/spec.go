@@ -302,6 +302,9 @@ func validateToolDepends(toolName string, depends []Depend) error {
 		if IsDependPattern(d.Task) {
 			return fmt.Errorf("tools[%q]: depends[%d]: glob patterns are not supported in tool depends, got %q", toolName, i, d.Task)
 		}
+		if strings.ContainsAny(d.Spec, dependPatternMeta) {
+			return fmt.Errorf("tools[%q]: depends[%d]: glob patterns are not supported in tool depends, got %q", toolName, i, d.Spec)
+		}
 		// path.Clean folds the "" vs "." spelling of "same dir" so the two
 		// forms count as the same entry.
 		k := key{path.Clean(d.Spec), d.Task}

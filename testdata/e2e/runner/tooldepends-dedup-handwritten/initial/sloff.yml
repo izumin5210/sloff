@@ -1,0 +1,22 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  gen-tool:
+    go-local: ./cmd/tool
+    depends:
+      - task: gen-source
+
+commands:
+  - name: gen-source
+    cmd: ["sh", "-c", "mkdir -p gen && cp gen.go.txt gen/gen.go"]
+    inputs: ["gen.go.txt"]
+    outputs: ["gen/gen.go"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "go run ./cmd/tool && printf x >> marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [gen-tool]
+    depends:
+      - task: gen-source

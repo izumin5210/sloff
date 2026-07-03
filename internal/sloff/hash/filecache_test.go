@@ -1,8 +1,11 @@
 package hash
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -152,6 +155,56 @@ func TestFileCache_MissingFile(t *testing.T) {
 	c := NewFileCache()
 	if _, err := c.Files(root, []string{"missing.txt"}); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+// TestFileCache_MissingFileErrorIsErrNotExist pins that Files surfaces the
+// missing-file condition through errors.Is(err, fs.ErrNotExist) — the
+// runner's prefetch (ADR-0019 D6) relies on this to distinguish "input not
+// generated yet" (skip the task's prefetch) from a hard I/O error (fatal).
+// A lossy wrap anywhere in the digest chain would silently turn the skip
+// back into a run-aborting failure on cold trees.
+func TestFileCache_MissingFileErrorIsErrNotExist(t *testing.T) {
+	root := t.TempDir()
+	c := NewFileCache()
+	_, err := c.Files(root, []string{"missing.txt"})
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected errors.Is(err, fs.ErrNotExist), got %v", err)
+	}
+}
+
+// TestFileCache_MixedErrors_PermissionWinsOverNotExist verifies that when input
+// files include both a missing file (fs.ErrNotExist) and an unreadable file
+// (permission error), the permission error is returned — not the ErrNotExist.
+// The runner's prefetch (ADR-0019 D6) excludes a task from prefetch only when
+// ALL its input-hashing failures are ErrNotExist; any non-ErrNotExist error
+// must win deterministically so a permission problem is never silently swallowed
+// and deferred to mid-run.
+func TestFileCache_MixedErrors_PermissionWinsOverNotExist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o000 is not enforced on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not prevent reads")
+	}
+
+	root := t.TempDir()
+	// unreadable.txt exists but cannot be read.
+	unreadable := filepath.Join(root, "unreadable.txt")
+	if err := os.WriteFile(unreadable, []byte("secret"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unreadable, 0o644) }) //nolint:errcheck
+
+	c := NewFileCache()
+	// Paths: [missing file, unreadable file]. Both will fail, but the permission
+	// error must be returned rather than the ErrNotExist.
+	_, err := c.Files(root, []string{"missing.txt", "unreadable.txt"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected a non-ErrNotExist error (permission denied), got ErrNotExist: %v", err)
 	}
 }
 

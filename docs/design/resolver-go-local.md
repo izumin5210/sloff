@@ -14,7 +14,7 @@ Go の generator は外部配布 module (`go.mod` の `tool` ディレクティ�
 
 「内製ソース ( = `local`)」 という意味では [pnpm-local](./resolver-pnpm-local.md) と対応物の関係。 両 resolver は同じ shape の Result を返す:
 
-- **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 「 main module 内の Go ファイルを生成する upstream codegen task」 がある場合、 実行順序は consumer task の `depends` で明示する ( [ADR-0013](../adr/0013-explicit-task-dependencies.md))。 宣言漏れは ExtraInputs を含む union 後の inputs に対する overlap 検証が error で検出する
+- **内製ソース** ( main module / repo-local replace の `.go` / 埋め込みアセット等) は **ExtraInputs** として task の inputs に union され、 files_hash で content invalidation される。 「 main module 内の Go ファイルを生成する upstream codegen task」 がある場合、 実行順序は consumer task の `depends` で明示する ( [ADR-0013](../adr/0013-explicit-task-dependencies.md))。 producer が **tool の import 閉包そのもの** を生成する場合は tool 定義の `depends` に一元宣言し、 runner の注入に任せる ( [ADR-0019](../adr/0019-tool-bootstrap-depends.md)、 後述「生成物を import する tool」)。 宣言漏れは ExtraInputs を含む union 後の inputs に対する overlap 検証が error で検出する
 - **外部 Go module** は `go-deps:<path>@<version>+sum:<go.sum-hash>` 形式の **ResolvedVersion** として resolved_versions_hash に流れる。 module bump / go.sum drift で必ず invalidate される
 
 外部配布 ( aqua / `go tool` 経由) の OSS ツールは [script resolver](./resolver-script.md) で `<bin> --version` を取るアプローチに統一されている ( ADR-0007)。
@@ -301,6 +301,23 @@ go-local には install drift / build artefact freshness いずれの Checker �
 ### pnpm-local との対比
 
 pnpm は対照的に **`pnpm install` を別途明示実行** する model なので、 lockfile を SSoT に取りつつ install state がそれと乖離する余地がある。 そのため pnpm-local は preflight に install drift Checker を持つ ( [resolver-pnpm-local.md の Install drift check 節](./resolver-pnpm-local.md#install-drift-check-pnpm-install-忘れ検出--preflight-経由))。 「 preflight Checker の有無」 は資質の差ではなく、 **language ecosystem の install model の差** に由来する。
+
+## 生成物を import する tool ( bootstrap パターン)
+
+内製 tool の import 閉包に **自 repo の生成物** ( 例: 生成済み `*.pb.go`) が含まれる構成では、 生成物を一括削除した cold tree で `packages.Load` が閉包を compile できず、 Inputs / Versions の解決自体が失敗する。 解決の前提となる producer task を tool 定義の `depends` に宣言することで、 cold state からの `sloff run` 一発成功が成立する ( [ADR-0019](../adr/0019-tool-bootstrap-depends.md)):
+
+```yaml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo    # ./cmd/protoc-gen-foo が ../gen/options/*.pb.go を import している
+    depends:
+      - {spec: ../gen, task: gen-options}    # その pb.go を生成する task ( tool 定義 dir 相対)
+```
+
+- runner は宣言を **当該 tool を使う全 task** へ depends エッジとして注入する。 consumer ごとに producer リストを複製する従来の回避策は不要になる
+- cold tree では解決が deferred に降格し、 宣言 depends の完了後 ( = 閉包が compile 可能になった後) に再解決される。 warm run は従来どおり run 冒頭の eager 解決で、 経路の変化はない
+- `depends` の追従は利用者の責務: tool が新しい生成 package を import し始めたら宣言を追加する。 追従漏れは cold run の遅延解決失敗 / run-time overlap 検証 error として顕在化する ( silent stale には到達しない)
+- 閉包 producer 自身がその tool を使う構成 ( 生成と利用が同一 task) は bootstrap が構造的に不可能なので注入時 error になる。 閉包 producer を tool 非依存の task に分割する
 
 ## Open Questions
 

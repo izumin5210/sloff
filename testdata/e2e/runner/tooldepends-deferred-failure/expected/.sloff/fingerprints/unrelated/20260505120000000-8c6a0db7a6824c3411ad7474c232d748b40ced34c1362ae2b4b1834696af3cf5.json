@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": ".",
+    "task_id": "unrelated",
+    "cmd": "sh -c cp note.txt unrelated-out.txt"
+  },
+  "input": {
+    "hash": "8c6a0db7a6824c3411ad7474c232d748b40ced34c1362ae2b4b1834696af3cf5",
+    "files_hash": "56cc654d0c06fa66ac8166cde71618d5f772557afa825598fc9bb892318af577",
+    "cmd_hash": "11bc89bef7afc7796c8def1af0922d1a141abb7d1a1b3182bea8d90853e1f07c",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "98223a8ddf0641a1ab570116c4cdbe9007640976c5ffae6199321d6ad05cb092",
+    "files": [
+      {
+        "path": "unrelated-out.txt",
+        "hash": "389ed6887e49a315f706f6c2b931b1dcf0d797c91437124f32eb98555c669758"
+      }
+    ]
+  }
+}

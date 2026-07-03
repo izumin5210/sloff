@@ -2,6 +2,8 @@ package hash
 
 import (
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -116,22 +118,50 @@ func (c *FileCache) FilesAndDigests(root string, paths []string) (string, []File
 // computeDigests resolves the content digest of every path (joined onto root)
 // in parallel, reusing cached digests for unchanged files. The result is
 // index-aligned with paths.
+//
+// Error selection is deterministic (ADR-0019 D6): goroutines record per-index
+// errors rather than aborting on the first one. After all goroutines finish,
+// the first non-ErrNotExist error in input order is returned if any exists;
+// otherwise the first ErrNotExist in input order is returned. Input paths are
+// already sorted by mergeInputs, so "input order" is stable. This ensures that
+// a task whose inputs include both a missing file and an unreadable file always
+// surfaces the permission error — never silently demotes it to an ErrNotExist
+// that the prefetch would swallow.
 func (c *FileCache) computeDigests(root string, paths []string) ([][]byte, error) {
 	ds := make([][]byte, len(paths))
+	errs := make([]error, len(paths))
 	g := new(errgroup.Group)
 	g.SetLimit(max(runtime.GOMAXPROCS(0), 1))
 	for i, p := range paths {
 		g.Go(func() error {
 			d, err := c.digest(filepath.Join(root, p))
 			if err != nil {
-				return err
+				errs[i] = err
+				return nil // collect, do not abort the group
 			}
 			ds[i] = d
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
+	_ = g.Wait() // never errors: goroutines above always return nil
+
+	// Pick deterministically: first non-ErrNotExist in input order wins; fall
+	// back to the first ErrNotExist if that is all there is. Errors are rare,
+	// so the two-pass scan is off the hot path.
+	var firstNotExist error
+	for _, e := range errs {
+		if e == nil {
+			continue
+		}
+		if !errors.Is(e, fs.ErrNotExist) {
+			return nil, e
+		}
+		if firstNotExist == nil {
+			firstNotExist = e
+		}
+	}
+	if firstNotExist != nil {
+		return nil, firstNotExist
 	}
 	return ds, nil
 }

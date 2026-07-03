@@ -1,0 +1,20 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  gen-tool:
+    go-local: ./cmd/tool
+    depends:
+      - task: unrelated
+
+commands:
+  - name: unrelated
+    cmd: ["sh", "-c", "cp note.txt unrelated-out.txt"]
+    inputs: ["note.txt"]
+    outputs: ["unrelated-out.txt"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "go run ./cmd/tool && printf x >> marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [gen-tool]

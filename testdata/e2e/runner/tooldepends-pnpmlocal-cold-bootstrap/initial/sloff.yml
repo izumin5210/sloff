@@ -1,0 +1,20 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  codegen:
+    pnpm-local: "@org/codegen"
+    depends:
+      - task: gen-package
+
+commands:
+  - name: gen-package
+    cmd: ["sh", "-c", "mkdir -p packages/codegen && cp pkg-template/package.json packages/codegen/package.json && cp pkg-template/index.ts packages/codegen/index.ts"]
+    inputs: ["pkg-template/package.json", "pkg-template/index.ts"]
+    outputs: ["packages/codegen/package.json", "packages/codegen/index.ts"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "cat input.txt > out.txt && printf x >> marker.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [codegen]

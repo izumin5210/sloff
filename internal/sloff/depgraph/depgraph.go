@@ -148,9 +148,26 @@ func Build(tasks []Task) ([]Task, error) {
 	}
 
 	if len(out) != len(tasks) {
-		return nil, fmt.Errorf("cycle detected involving: %s", remainingTaskKeys(tasks, out))
+		return nil, &CycleError{Tasks: remainingTasks(tasks, out)}
 	}
 	return out, nil
+}
+
+// CycleError is returned by Build when a dependency cycle is detected. Tasks
+// holds the task refs that form (or are part of) the cycle. Error() renders
+// the same human-readable message as the previous plain-fmt.Errorf form so
+// non-tool callers are unchanged; callers that need the task set can type-assert.
+type CycleError struct {
+	Tasks []TaskRef
+}
+
+func (e *CycleError) Error() string {
+	labels := make([]string, len(e.Tasks))
+	for i, r := range e.Tasks {
+		labels[i] = r.Label()
+	}
+	sort.Strings(labels)
+	return fmt.Sprintf("cycle detected involving: %s", strings.Join(labels, ", "))
 }
 
 func sortByKey(indices []int, tasks []Task) {
@@ -184,20 +201,19 @@ func conflictError(tasks []Task, conflicts map[string][]int) error {
 
 func taskLabel(t Task) string { return t.Ref().Label() }
 
-func remainingTaskKeys(all, emitted []Task) string {
+func remainingTasks(all, emitted []Task) []TaskRef {
 	emittedSet := make(map[TaskRef]struct{}, len(emitted))
 	for _, t := range emitted {
 		emittedSet[t.Ref()] = struct{}{}
 	}
-	var rest []string
+	var rest []TaskRef
 	for _, t := range all {
 		if _, ok := emittedSet[t.Ref()]; ok {
 			continue
 		}
-		rest = append(rest, t.Ref().Label())
+		rest = append(rest, t.Ref())
 	}
-	sort.Strings(rest)
-	return strings.Join(rest, ", ")
+	return rest
 }
 
 // MissingDependency is one undeclared edge surfaced by overlap validation

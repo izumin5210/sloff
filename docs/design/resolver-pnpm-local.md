@@ -105,7 +105,10 @@ type Resolver struct {
     repoRoot   string
     enumerator FileEnumerator   // 標準は GitLsFiles
     // workspace は pnpm-lock.yaml + 各 importer の package.json を index 化したもの
-    // ( 初回 Resolve で sync.Once 経由で lazy load)
+    // ( 初回 Resolve で lazy load; ErrNotWorkspacePackage miss 時に一度だけ reload —
+    //   ADR-0019 D4 の deferred retry が depends 生成 package.json を観測できるよう)
+    // per-package の計算結果は成功時のみキャッシュ ( success-only caching)。失敗は
+    // ラッチしないので D4 retry が再試行できる ( go-local の lister.Memoized と同方針)
 }
 
 func New(repoRoot string, enumerator FileEnumerator) (*Resolver, error) { /* ... */ }

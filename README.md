@@ -10,6 +10,7 @@
 - **OS-portable fingerprints.** Fingerprints are deterministic protobuf binary records committed to git (inspect them with `sloff fingerprint show`). A record built on macOS works on Linux CI without rebuilds — tool versions are captured as logical strings, never as OS-specific binary hashes.
 - **Reads your existing toolchain.** No replacement for aqua / mise / nix / pnpm / `go.mod`. Tool versions come from the runtime binary's `--version`, lockfiles, or repo source — whichever is the actual source of truth.
 - **Explicit, validated dependencies.** Execution order comes from declared `depends` edges, so it is deterministic even on a freshly cleaned tree. Declarations are cross-checked against observed `inputs` / `outputs` overlap — reading another task's outputs without declaring the edge is an error, so the DAG can't silently drift from reality.
+- **Cold-state bootstrap.** A tool whose sources import generated files declares its producers once, on the tool (`tools.<name>.depends`); resolution defers until they've run, so `sloff run` succeeds in one shot even after deleting every generated file.
 - **Dynamic task sets.** `command_providers` run at plan time and emit tasks as JSON — per-directory fan-out and import-closure inputs stay out of hand-written YAML, and generated tasks flow through the same validation and fingerprinting as static ones.
 - **Single Go binary.** No runtime dependencies, no daemon, no language ecosystem to install.
 - **Codegen-only by design.** Build / test / lint stay in your existing tooling (Make, npm scripts, etc.) — sloff does one thing.
@@ -91,6 +92,20 @@ commands:
 ```
 
 Barriers declare only `depends` — `cmd` / `inputs` / `outputs` / `tools` are rejected. Depending on a barrier is not a substitute for data edges: a task that actually reads a member's outputs still needs a direct `depends` on that producer.
+
+### Tool bootstrap dependencies
+
+When a tool's *own sources* depend on generated files (e.g. an in-repo protoc plugin that imports generated `*.pb.go`), declare that on the tool instead of repeating it on every consumer task:
+
+```yaml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo
+    depends:
+      - { task: gen-options } # the task that generates what the tool imports
+```
+
+sloff injects the edge into every task that uses the tool. On a clean tree — where the tool can't even be resolved until those files exist — resolution is deferred until its declared dependencies have run, so a single `sloff run` bootstraps from zero. Tools *without* a `depends` declaration keep failing fast at run start.
 
 ## Dynamic tasks
 

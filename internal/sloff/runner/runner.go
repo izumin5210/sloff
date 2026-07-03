@@ -304,12 +304,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	inputsByTool, versionsByTool, err := r.resolveContribs(ctx, registry, referencedToolNames)
-	if err != nil {
+	if err := r.resolveContribs(ctx, registry, referencedToolNames); err != nil {
 		return err
 	}
 
-	tasks, err := r.collectTasksTraced(ctx, inputsByTool, versionsByTool)
+	tasks, err := r.collectTasksTraced(ctx, r.inputsByTool, r.versionsByTool)
 	if err != nil {
 		return err
 	}
@@ -1092,7 +1091,12 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 // Run needs both maps before collectTasks. Plan (read-only, no
 // resolved_versions_hash) still uses resolveInputContribs to skip the Versions
 // path entirely (ADR-0008 / IZU-16).
-func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (inputs map[string][]string, versions map[string][]toolresolver.ResolvedVersion, err error) {
+//
+// Results are stored in r.inputsByTool / r.versionsByTool (Run-lifecycle
+// fields) rather than returned; callers pass those fields to collectTasksTraced
+// directly. collectTasksTraced is still parameterized so Plan can supply
+// resolveInputContribs' return + nil without populating the Run fields.
+func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistry, referenced []string) (err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.resolve", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
@@ -1113,7 +1117,7 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 
 	eager, gated, err := splitByPrewarm(registry, referenced, r.opts.Resolvers.PrewarmChannels())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	insResults := make([][]string, len(referenced))
@@ -1144,25 +1148,26 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 	// Eager channels run concurrently with the prewarm; gated channels wait for
 	// it so their per-tool resolve is a cache hit.
 	if err = resolveSet(eager); err != nil {
-		return nil, nil, err
+		return err
 	}
 	<-prewarmDone
 	if err = resolveSet(gated); err != nil {
-		return nil, nil, err
+		return err
 	}
 
-	inputs = make(map[string][]string, len(referenced))
-	versions = make(map[string][]toolresolver.ResolvedVersion, len(referenced))
+	inputs := make(map[string][]string, len(referenced))
+	versions := make(map[string][]toolresolver.ResolvedVersion, len(referenced))
 	for i, name := range referenced {
 		inputs[name] = insResults[i]
 		versions[name] = verResults[i]
 	}
-	// Retained for the deferred execution point (ADR-0019 D4): when a
-	// deferred tool resolves mid-run, ensureToolsResolved rebuilds the
-	// consumer's contribution set from these maps plus the deferred results.
+	// Stored on the Runner for two consumers: collectTasksTraced (called by Run
+	// immediately after) and ensureToolsResolved (called at deferred execution
+	// points, ADR-0019 D4). The Plan path never populates these fields; Plan
+	// calls resolveInputContribs and passes its return directly to collectTasksTraced.
 	r.inputsByTool, r.versionsByTool = inputs, versions
 	span.SetAttributes(attribute.Int("sloff.tool.deferred_count", len(r.deferredTools)))
-	return inputs, versions, nil
+	return nil
 }
 
 // deferOrFail is the ADR-0019 D3 decision point for a single resolver call

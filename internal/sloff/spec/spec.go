@@ -124,6 +124,15 @@ type DeclaredTool struct {
 	// PackageName is the pnpm-local resolver input: a workspace package name
 	// (e.g. "@org/my-codegen") that pnpm-lock.yaml registers as an importer.
 	PackageName string
+
+	// Depends declares the tool's bootstrap dependencies (ADR-0019 D1): tasks
+	// that must complete before the tool's sources can be resolved (e.g. a
+	// codegen task producing files the tool imports). Spec paths are relative
+	// to the sloff.yml that defines the tool (ADR-0008 D3). The runner injects
+	// these as depends edges into every task referencing the tool; on a
+	// resolution failure a tool with a non-empty Depends is deferred instead
+	// of failing the run. Declarable on any resolver form.
+	Depends []Depend
 }
 
 type rawDeclaredTool struct {
@@ -131,6 +140,7 @@ type rawDeclaredTool struct {
 	Extract   string   `yaml:"extract"`
 	GoLocal   string   `yaml:"go-local"`
 	PnpmLocal string   `yaml:"pnpm-local"`
+	Depends   []Depend `yaml:"depends"`
 }
 
 // UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
@@ -145,6 +155,9 @@ func (d *DeclaredTool) UnmarshalYAML(b []byte) error {
 	if moreThanOneTrue(hasExec, hasGoLocal, hasPnpmLocal) {
 		return errors.New("tool entry: exec, go-local, and pnpm-local are mutually exclusive")
 	}
+	// depends is orthogonal to the resolver shape: any form may declare
+	// bootstrap dependencies (ADR-0019 D1).
+	d.Depends = raw.Depends
 	switch {
 	case hasExec:
 		d.Resolver = "script"
@@ -250,11 +263,52 @@ func validateCommandProviders(providers []CommandProviderDecl) error {
 }
 
 func validateTools(tools map[string]DeclaredTool) error {
+	// Sorted iteration so the reported error is deterministic when several
+	// tools are invalid (map order would otherwise pick one at random).
+	names := make([]string, 0, len(tools))
 	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		if !toolNamePattern.MatchString(name) {
 			return fmt.Errorf("tools[%q]: name must match %s (lower-case letters, digits, hyphen, underscore)",
 				name, toolNamePattern)
 		}
+		if err := validateToolDepends(name, tools[name].Depends); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateToolDepends enforces the load-time rules on one tool's bootstrap
+// depends (ADR-0019 D1): task required, spec relative, no glob patterns
+// (unsupported in v1 — a tool's closure producers are a concrete task set),
+// no duplicate entries. Existence of the referenced task is deliberately NOT
+// checked here: it is validated at injection time so provider-generated
+// tasks can be referenced, and unreferenced catalog tools stay unvalidated
+// like their resolver config (ADR-0008).
+func validateToolDepends(toolName string, depends []Depend) error {
+	type key struct{ spec, task string }
+	seen := make(map[key]struct{}, len(depends))
+	for i, d := range depends {
+		if d.Task == "" {
+			return fmt.Errorf("tools[%q]: depends[%d]: task is required", toolName, i)
+		}
+		if filepath.IsAbs(d.Spec) {
+			return fmt.Errorf("tools[%q]: depends[%d]: spec must be a relative path, got %q", toolName, i, d.Spec)
+		}
+		if IsDependPattern(d.Task) {
+			return fmt.Errorf("tools[%q]: depends[%d]: glob patterns are not supported in tool depends, got %q", toolName, i, d.Task)
+		}
+		// path.Clean folds the "" vs "." spelling of "same dir" so the two
+		// forms count as the same entry.
+		k := key{path.Clean(d.Spec), d.Task}
+		if _, dup := seen[k]; dup {
+			return fmt.Errorf("tools[%q]: depends[%d]: duplicate depends entry %s:%s", toolName, i, k.spec, k.task)
+		}
+		seen[k] = struct{}{}
 	}
 	return nil
 }

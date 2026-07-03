@@ -124,9 +124,36 @@ func specHasDependPattern(sp Spec) bool {
 	return false
 }
 
-// edgeKey identifies a depends edge by its resolved target dir and task, the
-// same identity ValidateDependReferences uses to detect duplicates.
-type edgeKey struct{ dir, task string }
+// EdgeKey identifies a depends edge by its resolved target spec dir (slash form,
+// repo-relative) and the task name within that dir. This is the identity
+// ValidateDependReferences, expandCommandDepends, and injectToolDepends all
+// share for duplicate detection and task existence checks.
+type EdgeKey struct{ Dir, Task string }
+
+// edgeKey is the unexported alias kept for internal use within this file.
+type edgeKey = EdgeKey
+
+// ResolveEdge resolves one depends entry relative to its declaring spec dir
+// (slash form) into the canonical EdgeKey form: path.Join(declDirSlash, d.Spec)
+// paired with d.Task. Callers in ValidateDependReferences, expandCommandDepends,
+// and injectToolDepends all perform this same computation.
+func ResolveEdge(declDirSlash string, d Depend) EdgeKey {
+	return EdgeKey{Dir: path.Join(declDirSlash, d.Spec), Task: d.Task}
+}
+
+// DefinedTasks builds the (dir, task) → struct{} index over every command in
+// specs. ValidateDependReferences and injectToolDepends both build the same
+// index as a prerequisite for reference validation.
+func DefinedTasks(specs []Spec) map[EdgeKey]struct{} {
+	idx := make(map[EdgeKey]struct{})
+	for _, sp := range specs {
+		dir := filepath.ToSlash(sp.Dir)
+		for _, c := range sp.File.Commands {
+			idx[EdgeKey{Dir: dir, Task: c.Name}] = struct{}{}
+		}
+	}
+	return idx
+}
 
 // expandCommandDepends turns one command's mixed literal/pattern depends into a
 // purely literal list. Literal entries are kept verbatim and in order
@@ -141,7 +168,7 @@ func expandCommandDepends(declDirOS, declDir string, c Command, namesByDir map[s
 			continue
 		}
 		out = append(out, d)
-		literal[edgeKey{path.Join(declDir, d.Spec), d.Task}] = struct{}{}
+		literal[ResolveEdge(declDir, d)] = struct{}{}
 	}
 
 	added := map[edgeKey]struct{}{}
@@ -176,7 +203,7 @@ func expandCommandDepends(declDirOS, declDir string, c Command, namesByDir map[s
 				registryDefinitionPath(declDirOS), c.Name, d.Task, target)
 		}
 		for _, m := range matched {
-			k := edgeKey{path.Join(declDir, m.Spec), m.Task}
+			k := ResolveEdge(declDir, m)
 			if _, dup := literal[k]; dup {
 				continue
 			}

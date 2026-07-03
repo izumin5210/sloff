@@ -40,17 +40,11 @@ import (
 // are never injected (dedup), so their provenance is never recorded and the
 // warning still applies to them as before.
 func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
-	type taskKey struct{ dir, name string }
-	// Same index ValidateDependReferences builds. Existence is checked here,
-	// not at spec load, so the error names the tool that declared the entry —
-	// the later pass would blame the consumer task for an edge it never wrote.
-	defined := map[taskKey]struct{}{}
-	for _, sp := range r.opts.Specs {
-		dir := filepath.ToSlash(sp.Dir)
-		for _, c := range sp.File.Commands {
-			defined[taskKey{dir, c.Name}] = struct{}{}
-		}
-	}
+	// Same index ValidateDependReferences builds via DefinedTasks. Existence is
+	// checked here, not at spec load, so the error names the tool that declared
+	// the entry — the later pass would blame the consumer task for an edge it
+	// never wrote.
+	defined := spec.DefinedTasks(r.opts.Specs)
 
 	// Immutable-copy discipline (see expandCommandProviders): specs without an
 	// injection are passed through untouched, sharing their *File.
@@ -65,12 +59,12 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 			}
 			// Dedup key set seeded with the consumer's own edges, resolved to
 			// the same (target dir, task) identity ValidateDependReferences
-			// uses; injection must not re-add an edge the user already wrote
-			// (backward compatibility with pre-ADR-0019 specs), nor add the
-			// same edge twice when several of the task's tools declare it.
-			seen := make(map[taskKey]struct{}, len(c.Depends))
+			// uses via ResolveEdge; injection must not re-add an edge the user
+			// already wrote (backward compatibility with pre-ADR-0019 specs),
+			// nor add the same edge twice when several tools declare it.
+			seen := make(map[spec.EdgeKey]struct{}, len(c.Depends))
 			for _, d := range c.Depends {
-				seen[taskKey{path.Join(consumerDir, d.Spec), d.Task}] = struct{}{}
+				seen[spec.ResolveEdge(consumerDir, d)] = struct{}{}
 			}
 			var injected []spec.Depend
 			for _, toolName := range c.Tools {
@@ -97,11 +91,11 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 						return fmt.Errorf("tool %q declares depends on %s:%s, but that task itself uses the tool; a tool's bootstrap producer cannot reference the tool (split the producing task so it does not use the tool)",
 							toolName, target, d.Task)
 					}
-					if _, ok := defined[taskKey{target, d.Task}]; !ok {
+					k := spec.ResolveEdge(toolDir, d)
+					if _, ok := defined[k]; !ok {
 						return fmt.Errorf("tool %q (defined in %s): depends[%d]: task %q not found in spec dir %q",
 							toolName, providerDefinitionPath(entry.SpecDir), i, d.Task, target)
 					}
-					k := taskKey{target, d.Task}
 					if _, dup := seen[k]; dup {
 						continue
 					}

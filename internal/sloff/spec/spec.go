@@ -431,18 +431,11 @@ var discoverSkipDirs = map[string]struct{}{
 // Like ValidateToolReferences, this is a cross-file pass run on the full set
 // after Discover; per-file structural checks live in validate.
 func ValidateDependReferences(specs []Spec) error {
-	type taskKey struct{ dir, name string }
-	defined := map[taskKey]struct{}{}
+	defined := DefinedTasks(specs)
 	for _, sp := range specs {
 		dir := filepath.ToSlash(sp.Dir)
 		for _, c := range sp.File.Commands {
-			defined[taskKey{dir, c.Name}] = struct{}{}
-		}
-	}
-	for _, sp := range specs {
-		dir := filepath.ToSlash(sp.Dir)
-		for _, c := range sp.File.Commands {
-			seen := map[taskKey]struct{}{}
+			seen := map[EdgeKey]struct{}{}
 			for i, d := range c.Depends {
 				// path.Join cleans, so "../options" resolves against the
 				// declaring file's dir the same way inputs/outputs globs do.
@@ -450,7 +443,7 @@ func ValidateDependReferences(specs []Spec) error {
 				if glob.EscapesRoot(target) {
 					return fmt.Errorf("%s/%s: depends[%d]: spec %q escapes repo root", registryDefinitionPath(sp.Dir), c.Name, i, d.Spec)
 				}
-				key := taskKey{target, d.Task}
+				key := ResolveEdge(dir, d)
 				if target == dir && d.Task == c.Name {
 					return fmt.Errorf("%s/%s: depends[%d]: task depends on itself", registryDefinitionPath(sp.Dir), c.Name, i)
 				}

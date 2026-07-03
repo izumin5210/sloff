@@ -295,6 +295,25 @@ func TestRunner_ToolDepends_InjectedEdgeNoUnobservedWarn(t *testing.T) {
 	)
 }
 
+// TestRunner_ToolDepends_DeferredConsumerNoSpuriousWarn covers G6: on a failed
+// run where a deferred consumer never completed ensureToolsResolved, neither
+// warnUnobservedDepends nor validateProducedDependencies should evaluate its
+// (provably incomplete) input surface.  The hand-written depends entry on the
+// consumer (depends: [{task: unrelated}]) is what distinguishes this from the
+// G4 case: that edge is not in injectedDepends (dedup prevented injection), so
+// G4's per-edge skip does not cover it — G6's whole-task skip does.
+func TestRunner_ToolDepends_DeferredConsumerNoSpuriousWarn(t *testing.T) {
+	requireSh(t)
+	runE2E(
+		t, "tooldepends-deferred-consumer-no-spurious-warn",
+		runStep(
+			expectWarn("deferred until its declared depends complete"),
+			expectError(`tool "gen-tool" (defined in sloff.yml) could not be resolved: at run start:`),
+			expectNoWarnContaining("none of the files it produced match"),
+		),
+	)
+}
+
 // TestRunner_ToolDepends_IndirectCycleError covers ADR-0019 D2: when an
 // injected edge forms an indirect cycle (tool X depends on P; P depends on C;
 // C uses tool X), the cycle error must mention both "cycle detected" and a

@@ -266,6 +266,8 @@ func (r *Runner) ensureToolsResolved(ctx context.Context, t depgraph.Task, info 
 	info.versions = versions
 	info.inputSet = inputSet
 	info.joinedInputPatterns = joinedPatterns
+	// The surface is now complete: post-run diagnostics may evaluate it.
+	info.inputSurfaceAuthoritative = true
 	return nil
 }
 

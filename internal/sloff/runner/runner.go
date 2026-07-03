@@ -1398,6 +1398,16 @@ type taskInfo struct {
 	// validation, which probes them once per produced path.
 	inputSet            map[string]struct{}
 	joinedInputPatterns []string
+
+	// inputSurfaceAuthoritative is false when this task references a deferred
+	// tool and ensureToolsResolved has not yet completed for it. In that state
+	// the input surface is provably incomplete (tool contributions are absent),
+	// so warnUnobservedDepends and validateProducedDependencies must skip it —
+	// judging an incomplete surface produces wrong-by-construction diagnostics.
+	// Set to true at collect time for tasks without deferred tools; set false
+	// at collect time for tasks that reference a deferred tool; restored to
+	// true by ensureToolsResolved on success.
+	inputSurfaceAuthoritative bool
 }
 
 // collectTasks expands inputs/outputs for every spec command and folds each
@@ -1477,15 +1487,29 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			Barrier:     c.Barrier,
 		}
 		tasks = append(tasks, t)
+		// A task that references a deferred tool has an incomplete input surface
+		// at collect time: the tool's contributions are absent from inputPaths /
+		// inputSet until ensureToolsResolved fills them in. Mark it non-
+		// authoritative so post-run diagnostics don't evaluate the partial set.
+		authoritative := true
+		if len(r.deferredTools) > 0 {
+			for _, toolName := range c.Tools {
+				if _, ok := r.deferredTools[toolName]; ok {
+					authoritative = false
+					break
+				}
+			}
+		}
 		r.byKey[t.Ref()] = &taskInfo{
-			specRelpath:         ec.specDir,
-			command:             c,
-			inputPaths:          mergedInputs,
-			outputPatterns:      c.Outputs,
-			declaredInputs:      ec.inputs,
-			versions:            versions,
-			inputSet:            inputSet,
-			joinedInputPatterns: joinedPatterns,
+			specRelpath:               ec.specDir,
+			command:                   c,
+			inputPaths:                mergedInputs,
+			outputPatterns:            c.Outputs,
+			declaredInputs:            ec.inputs,
+			versions:                  versions,
+			inputSet:                  inputSet,
+			joinedInputPatterns:       joinedPatterns,
+			inputSurfaceAuthoritative: authoritative,
 		}
 	}
 	if err := detectOutputPatternConflicts(tasks, r.byKey); err != nil {
@@ -1931,6 +1955,12 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 	for _, t := range ordered {
 		consumer := t.Ref()
 		info := r.byKey[t.Ref()]
+		// Skip tasks whose input surface is not authoritative: a deferred tool
+		// that never completed ensureToolsResolved leaves the surface provably
+		// incomplete, so overlap findings against it are wrong-by-construction.
+		if !info.inputSurfaceAuthoritative {
+			continue
+		}
 		byProducer := map[depgraph.TaskRef][]string{}
 		for p, producer := range produced {
 			if producer == consumer {
@@ -2024,6 +2054,14 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 			continue
 		}
 		info := r.byKey[t.Ref()]
+		// A task whose input surface is not authoritative (deferred tool that
+		// never completed ensureToolsResolved) must not be warned about: its
+		// input set is provably incomplete, so any overlap judgment is wrong-
+		// by-construction. The task likely failed earlier; the caller sees the
+		// real error, not a spurious inputs-omission warning.
+		if !info.inputSurfaceAuthoritative {
+			continue
+		}
 		groups := r.patternGroups[t.Ref()]
 
 		// Edges that came from a glob depends are judged per pattern (below), not

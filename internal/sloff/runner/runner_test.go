@@ -210,6 +210,16 @@ func runStep(opts ...runStepOption) step {
 				}
 			}
 		}
+		if cfg.wantNoWarn != "" {
+			logs.mu.Lock()
+			warns := append([]string(nil), logs.warns...)
+			logs.mu.Unlock()
+			for _, w := range warns {
+				if strings.Contains(w, cfg.wantNoWarn) {
+					t.Fatalf("Run: expected no warning containing %q, got: %q", cfg.wantNoWarn, w)
+				}
+			}
+		}
 	}
 }
 
@@ -219,6 +229,7 @@ type runStepConfig struct {
 	wantErr     string
 	wantWarn    string
 	wantNoWarns bool
+	wantNoWarn  string // assert no warning containing this substr (allows other warnings)
 	wantInfo    string
 	wantNoInfo  string
 }
@@ -268,6 +279,15 @@ func expectNoWarns() runStepOption {
 // RUN/SKIP log for barriers".
 func expectNoInfoContaining(substr string) runStepOption {
 	return func(c *runStepConfig) { c.wantNoInfo = substr }
+}
+
+// expectNoWarnContaining asserts that no warning log line contains substr.
+// Unlike expectNoWarns, it permits other warnings — useful when some warnings
+// are expected (e.g. "deferred until its declared depends complete") but a
+// specific spurious warning (e.g. "none of the files it produced match") must
+// not appear.
+func expectNoWarnContaining(substr string) runStepOption {
+	return func(c *runStepConfig) { c.wantNoWarn = substr }
 }
 
 // expectInfo asserts that Run logs at least one info line containing substr.

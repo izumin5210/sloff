@@ -170,11 +170,14 @@ type Runner struct {
 	// Populated by injectToolDepends; nil on any run where no tool declares depends.
 	injectedDepends map[depgraph.TaskRef]map[depgraph.TaskRef]struct{}
 
+	// prefetchedMu guards prefetched and prefetchedKeys. Written once by
+	// prefetchFingerprints before runTasks starts, and again by
+	// reloadDeferredConsumers when a deferred tool resolves mid-run; read
+	// concurrently by every task goroutine via lookupRecord.
+	prefetchedMu sync.RWMutex
 	// prefetched caches the records loaded by Storage.LoadMany at the top of
 	// Run; runTask consults this map first to avoid a per-task round-trip
-	// against remote backends. Populated once before runTasks starts and
-	// read concurrently by every task goroutine afterwards, so it does not
-	// need a mutex on the read path.
+	// against remote backends.
 	//
 	// prefetchedKeys records *which* keys were asked about. A map miss
 	// alone cannot distinguish "asked and got nothing back" from "never
@@ -185,6 +188,19 @@ type Runner struct {
 	// Storage.Load in that case so transitive cache hits still work.
 	prefetched     map[fingerprint.Key]*fingerprintv1.Record
 	prefetchedKeys map[fingerprint.Key]struct{}
+
+	// deferredConsumersMu guards deferredConsumers and deferredConsumerTasks.
+	deferredConsumersMu sync.Mutex
+	// deferredConsumers counts, per consumer task ref, the number of deferred
+	// tools it references that have not yet resolved. When the count reaches
+	// zero the task's optimistic key can be computed and its record fetched
+	// via a single batch LoadMany (ADR-0019 D5 follow-up). Populated by
+	// prefetchFingerprints; decremented and cleared by reloadDeferredConsumers.
+	deferredConsumers map[depgraph.TaskRef]int
+	// deferredConsumerTasks holds the depgraph.Task for each entry in
+	// deferredConsumers so reloadDeferredConsumers can compute optimistic keys
+	// without scanning ordered again.
+	deferredConsumerTasks map[depgraph.TaskRef]depgraph.Task
 
 	// pending accumulates records that runTask wants to persist; the run flushes
 	// them via Storage.SaveMany at the end. Per-task Save would defeat the bulk
@@ -394,14 +410,20 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	))
 	defer endSpan(span, &err)
 
+	// Initialize the deferred-consumer tracking maps before the loop so the
+	// first deferred consumer encountered can write immediately.
+	r.deferredConsumers = map[depgraph.TaskRef]int{}
+	r.deferredConsumerTasks = map[depgraph.TaskRef]depgraph.Task{}
+
 	// Barrier tasks have no fingerprint (ADR-0017 D2): nothing to load, and an
 	// optimistic key built from their empty command would only pollute the
 	// batch lookup with keys no backend can ever hold.
 	//
 	// Tasks referencing a deferred tool (ADR-0019 D5) are excluded too: their
 	// optimistic key would miss the tool contribution, so it cannot match any
-	// stored record. Left out of prefetchedKeys, their exec-time lookup falls
-	// through to lookupRecord's live-Load path.
+	// stored record. Their optimistic keys are computed and their records are
+	// batch-loaded once their last deferred tool resolves (reloadDeferredConsumers);
+	// until then the exec-time lookup falls through to lookupRecord's live-Load path.
 	skipped := 0
 	real := make([]depgraph.Task, 0, len(ordered))
 	for _, t := range ordered {
@@ -410,6 +432,19 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 		}
 		if r.taskUsesDeferredTool(t) {
 			skipped++
+			// Track this consumer for the post-resolve batch reload (ADR-0019 D5).
+			// Count the number of deferred tools it references so we know when the
+			// last one resolves.
+			info := r.byKey[t.Ref()]
+			pending := 0
+			for _, name := range info.command.Tools {
+				if _, ok := r.deferredTools[name]; ok {
+					pending++
+				}
+			}
+			ref := t.Ref()
+			r.deferredConsumers[ref] = pending
+			r.deferredConsumerTasks[ref] = t
 			continue
 		}
 		real = append(real, t)
@@ -453,8 +488,10 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	span.SetAttributes(attribute.Int("sloff.fingerprint.prefetch_skipped", skipped))
 
 	if len(asked) == 0 {
+		r.prefetchedMu.Lock()
 		r.prefetched = map[fingerprint.Key]*fingerprintv1.Record{}
 		r.prefetchedKeys = map[fingerprint.Key]struct{}{}
+		r.prefetchedMu.Unlock()
 		return nil
 	}
 
@@ -462,11 +499,13 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	if err != nil {
 		return fmt.Errorf("prefetch: %w", err)
 	}
+	r.prefetchedMu.Lock()
 	r.prefetched = loaded
 	r.prefetchedKeys = make(map[fingerprint.Key]struct{}, len(asked))
 	for _, k := range asked {
 		r.prefetchedKeys[k] = struct{}{}
 	}
+	r.prefetchedMu.Unlock()
 	span.SetAttributes(attribute.Int("sloff.fingerprint.prefetched", len(loaded)))
 	return nil
 }
@@ -484,6 +523,103 @@ func (r *Runner) taskUsesDeferredTool(t depgraph.Task) bool {
 		}
 	}
 	return false
+}
+
+// reloadDeferredConsumers is called after the deferred tool named toolName
+// resolves successfully (ADR-0019 D5 follow-up batch). It decrements the
+// pending-tool counter for every consumer of toolName; for each consumer whose
+// counter reaches zero (all its deferred tools are now resolved) it computes
+// the optimistic fingerprint key from the rebuilt input surface and issues a
+// single Storage.LoadMany to pull back any pre-existing records.
+//
+// This avoids N individual Storage.Load round-trips (one per deferred consumer)
+// on cold-bootstrap CI runs where a backend with non-trivial per-key RTT would
+// otherwise pay N sequential-ish loads after warm runs had seeded the store.
+//
+// The reload is a best-effort optimisation: on LoadMany error this method logs
+// a WARN and leaves the consumers on the existing live-Load fallback in
+// lookupRecord. It does NOT register prefetchedKeys entries on failure (a
+// registered key with no record is treated as authoritative absence, which
+// would incorrectly skip the live-Load).
+//
+// A task referencing multiple deferred tools is reloaded exactly once — when
+// its last tool resolves — tracked via deferredConsumers under deferredConsumersMu.
+//
+// Concurrency: called from deferredTool.resolve (which holds no runner-level
+// lock). prefetchedMu guards the write into prefetched/prefetchedKeys;
+// deferredConsumersMu guards the counter updates.
+func (r *Runner) reloadDeferredConsumers(ctx context.Context, toolName string) {
+	// Find consumers of this tool whose counter hits zero under the lock, then
+	// do the I/O outside the lock.
+	var ready []depgraph.Task
+	r.deferredConsumersMu.Lock()
+	for ref, t := range r.deferredConsumerTasks {
+		info := r.byKey[ref]
+		for _, name := range info.command.Tools {
+			if name != toolName {
+				continue
+			}
+			// This consumer uses the just-resolved tool. Decrement its counter.
+			r.deferredConsumers[ref]--
+			if r.deferredConsumers[ref] == 0 {
+				ready = append(ready, t)
+				delete(r.deferredConsumers, ref)
+				delete(r.deferredConsumerTasks, ref)
+			}
+			break
+		}
+	}
+	r.deferredConsumersMu.Unlock()
+
+	if len(ready) == 0 {
+		return
+	}
+
+	// Compute the post-resolve fingerprint key for each ready consumer using the
+	// same input surface ensureToolsResolved will build at exec time (ADR-0019
+	// D7: key must match across cold and warm runs). resolvedInputSurface
+	// assembles the full merged input paths from the now-latched deferredTool
+	// results. FileCache memoises digests so this does not duplicate the per-task
+	// hashing runTask will perform later.
+	keys := make([]fingerprint.Key, 0, len(ready))
+	for _, t := range ready {
+		info := r.byKey[t.Ref()]
+		mergedPaths, versions := r.resolvedInputSurface(info)
+		filesHash, err := r.fileCache.Files(r.opts.RepoRoot, mergedPaths)
+		if err != nil {
+			// A still-missing file or I/O error: leave this task on the live-Load
+			// fallback. The same error will surface again at runTask time.
+			continue
+		}
+		cmdHash := hash.Cmd(info.command.Cmd)
+		resolvedVersionsHash := hash.ResolvedVersions(versionStrings(versions))
+		inputHash := hash.Input(filesHash, cmdHash, resolvedVersionsHash)
+		keys = append(keys, fingerprint.Key{
+			SpecRelpath: t.SpecRelpath,
+			TaskID:      t.Name,
+			InputHash:   inputHash,
+		})
+	}
+
+	if len(keys) == 0 {
+		return
+	}
+
+	loaded, err := r.opts.Storage.LoadMany(ctx, keys)
+	if err != nil {
+		r.logger.Warnf("reloadDeferredConsumers: LoadMany failed after tool %q resolved; deferred consumers fall back to live Load: %v", toolName, err)
+		return
+	}
+
+	// Merge into the prefetched maps under the write lock.
+	r.prefetchedMu.Lock()
+	for _, k := range keys {
+		r.prefetchedKeys[k] = struct{}{}
+		if rec, ok := loaded[k]; ok {
+			r.prefetched[k] = rec
+		}
+	}
+	r.prefetchedMu.Unlock()
 }
 
 // optimisticKey computes the input_hash for t using the same hash composition
@@ -1852,11 +1988,19 @@ func (r *Runner) fingerprintLookup(ctx context.Context, key fingerprint.Key) (hi
 // the absence is treated as authoritative — no live Load is issued —
 // because the backend already told us during prefetch that this key has
 // no record.
+//
+// The prefetched maps may be extended mid-run by reloadDeferredConsumers (ADR-0019 D5
+// follow-up), so access is guarded by prefetchedMu.
 func (r *Runner) lookupRecord(ctx context.Context, key fingerprint.Key, span trace.Span) (*fingerprintv1.Record, bool, error) {
-	if rec, ok := r.prefetched[key]; ok {
+	r.prefetchedMu.RLock()
+	rec, inPrefetched := r.prefetched[key]
+	_, queried := r.prefetchedKeys[key]
+	r.prefetchedMu.RUnlock()
+
+	if inPrefetched {
 		return rec, true, nil
 	}
-	if _, queried := r.prefetchedKeys[key]; queried {
+	if queried {
 		return nil, false, nil
 	}
 	rec, ok, err := r.opts.Storage.Load(ctx, key)

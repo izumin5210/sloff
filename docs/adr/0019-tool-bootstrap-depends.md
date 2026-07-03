@@ -142,6 +142,13 @@ deferred tool の再解決は **その tool を参照する task の `runTask` �
 
 deferred tool を参照する task は、tool contribution 抜きの optimistic key を計算しても保存済み record と一致し得ないため、prefetch の対象から除外する ( `prefetchedKeys` に登録しない)。当該 task の lookup は既存の live-Load fallback ( ADR-0011 で導入済みの経路) に落ちる。コストは cold run 限定で、cold は大半が RUN のため実害は小さい。
 
+**deferred 解決成功後の batch 再取得**: deferred tool が解決に成功したとき ( `deferredTool.resolve` の成功経路)、その tool を参照する consumer task 群に対して fingerprint を一括再取得する ( `reloadDeferredConsumers`)。tool の contribution を fold した完全な入力集合で key を再計算し、1 回の `Storage.LoadMany` で record を引いて `prefetched` / `prefetchedKeys` に登録する。これにより、N consumer が個別に live-Load fallback に落ちる代わりに、1 回の batch lookup でヒットを提供できる ( remote backend での RTT 削減)。
+
+- 複数の deferred tool を参照する consumer は、最後の tool が解決したときにのみ 1 回再取得する ( 残余カウンタで管理)
+- 再取得は最適化であり、`LoadMany` が失敗した場合は WARN のみ出して live-Load fallback に委ねる ( `prefetchedKeys` への登録は行わない。登録すると miss が authoritative absence として扱われ live-Load が発生しなくなる)
+- missing-file 等で key 計算が失敗した consumer は再取得の対象外とし、live-Load fallback に残す
+- 並行安全性: `prefetched` / `prefetchedKeys` への書き込みは `prefetchedMu` ( `sync.RWMutex`) で保護。`lookupRecord` の読み取りも同 mutex の RLock 下で行う。再取得は `d.cond.Broadcast()` の前に完了させることで、待機中の consumer goroutine がブロードキャスト後に `lookupRecord` へ進んだとき prefetch map が既に更新済みになることを保証する
+
 ### D6. prefetch の missing-file 耐性
 
 optimistic key 計算中の入力 file 不在 ( `fs.ErrNotExist`) は run の fatal ではなく、**当該 task の prefetch 除外**とする ( D5 と同じ fallback へ)。

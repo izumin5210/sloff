@@ -210,6 +210,29 @@ func (r *Runner) deferToolResolution(entry spec.ToolEntry, cause error, span tra
 	return true
 }
 
+// resolvedInputSurface computes the merged input paths and versions for a
+// task after all its deferred tools have resolved, without mutating info. This
+// is the pure helper that both ensureToolsResolved (which writes the result
+// back into info) and reloadDeferredConsumers (which only needs the key) call,
+// so the key computation is identical in both paths (ADR-0019 D7).
+//
+// All deferred tools referenced by info must already hold a definitive outcome
+// (d.done == true); the caller is responsible for ensuring that.
+func (r *Runner) resolvedInputSurface(info *taskInfo) (mergedPaths []string, versions []toolresolver.ResolvedVersion) {
+	var extras []string
+	for _, name := range info.command.Tools {
+		if dt, ok := r.deferredTools[name]; ok {
+			extras = append(extras, dt.inputs...)
+			versions = append(versions, dt.versions...)
+			continue
+		}
+		extras = append(extras, r.inputsByTool[name]...)
+		versions = append(versions, r.versionsByTool[name]...)
+	}
+	mergedPaths = mergeInputs(info.declaredInputs, extras)
+	return mergedPaths, versions
+}
+
 // ensureToolsResolved is the ADR-0019 D4 execution point. When any tool this
 // task references was deferred, it (a) resolves each such tool — the
 // injected edges guarantee the tool's declared depends completed before this
@@ -240,21 +263,7 @@ func (r *Runner) ensureToolsResolved(ctx context.Context, t depgraph.Task, info 
 		return nil
 	}
 
-	// Re-concatenate every tool contribution in tools[] order — the same
-	// order collectTasks used — swapping in the deferred results where the
-	// eager maps hold the empty placeholder.
-	var extras []string
-	var versions []toolresolver.ResolvedVersion
-	for _, name := range info.command.Tools {
-		if dt, ok := r.deferredTools[name]; ok {
-			extras = append(extras, dt.inputs...)
-			versions = append(versions, dt.versions...)
-			continue
-		}
-		extras = append(extras, r.inputsByTool[name]...)
-		versions = append(versions, r.versionsByTool[name]...)
-	}
-	merged := mergeInputs(info.declaredInputs, extras)
+	merged, versions := r.resolvedInputSurface(info)
 	inputSet, joinedPatterns := inputSurface(info.specRelpath, info.command.Inputs, merged)
 	info.inputPaths = merged
 	info.versions = versions
@@ -322,14 +331,36 @@ func (d *deferredTool) resolve(ctx context.Context, r *Runner) error {
 	}
 	endSpan(span, &spanErr)
 
+	// On success, store inputs/versions before broadcasting so that any goroutine
+	// unblocked by the Broadcast sees them already set. This also lets
+	// reloadDeferredConsumers (called below) read dt.inputs / dt.versions directly.
 	d.mu.Lock()
 	d.inflight = false
 	if !isCtxErr {
-		// Latch the definitive outcome (success or real error).
-		d.done = true
-		d.err = outcome
 		d.inputs = ins
 		d.versions = vs
+	}
+	d.mu.Unlock()
+
+	// On a successful definitive resolve, trigger the batch fingerprint reload
+	// for consumer tasks that were excluded from prefetch due to this deferred
+	// tool (ADR-0019 D5 follow-up). This runs BEFORE broadcasting d.done so
+	// that concurrent consumers waiting in d.cond.Wait() are held until the
+	// reload is committed to prefetchedKeys: they will observe a populated
+	// prefetch map when their own lookupRecord fires.
+	//
+	// For a context error or real failure, we skip the reload (no useful records
+	// to batch-load) and fall through to broadcast immediately.
+	if retErr == nil {
+		r.reloadDeferredConsumers(ctx, entry.Name)
+	}
+
+	d.mu.Lock()
+	if !isCtxErr {
+		// Latch the definitive outcome (success or real error) after the reload
+		// so waiters are unblocked exactly once, with the prefetch map ready.
+		d.done = true
+		d.err = outcome
 	}
 	d.cond.Broadcast()
 	d.mu.Unlock()

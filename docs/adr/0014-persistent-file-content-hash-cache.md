@@ -1,5 +1,9 @@
 # ADR-0014: ファイル内容ダイジェストの run またぎ永続キャッシュ
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

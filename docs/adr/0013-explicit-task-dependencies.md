@@ -1,5 +1,12 @@
 # ADR-0013: タスク間依存を spec に明示宣言する (`depends`)
 
+## Status
+
+Accepted
+
+- Amended by [ADR-0016](./0016-pattern-task-dependencies.md): `depends[*].task` に glob パターンが書けるようになった ( D1 の文法拡張)。 inputs 漏れ warning ( D3) はパターン由来のエッジについてパターン単位の集計に変更
+- Amended by [ADR-0017](./0017-barrier-tasks.md): 集約専用の barrier task が新設され、 barrier が consumer 側のエッジは inputs 漏れ warning ( D3) の判定対象外になった
+
 ## Context
 
 ### 背景

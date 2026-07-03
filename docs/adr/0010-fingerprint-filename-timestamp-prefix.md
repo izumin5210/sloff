@@ -1,5 +1,9 @@
 # ADR-0010: fingerprint filename への timestamp prefix
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

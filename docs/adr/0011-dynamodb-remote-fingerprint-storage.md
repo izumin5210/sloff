@@ -1,5 +1,9 @@
 # ADR-0011: 大規模 monorepo 向けの remote fingerprint backend は DynamoDB を採用
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

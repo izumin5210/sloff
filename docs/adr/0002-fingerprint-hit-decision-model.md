@@ -1,5 +1,9 @@
 # ADR-0002: fingerprint hit 判定モデル
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

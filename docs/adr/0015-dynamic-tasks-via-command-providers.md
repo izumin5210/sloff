@@ -1,5 +1,9 @@
 # ADR-0015: 動的タスクを外部 command provider で生成する (`command_providers`)
 
+## Status
+
+Accepted
+
 ## Context
 
 ### 背景

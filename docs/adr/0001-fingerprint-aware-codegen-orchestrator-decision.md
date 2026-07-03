@@ -1,5 +1,11 @@
 # ADR-0001: fingerprint ベースのコード生成オーケストレーターの選定
 
+## Status
+
+Accepted
+
+- Amended by [ADR-0013](./0013-explicit-task-dependencies.md): 比較表・Consequences が前提としていた「タスク間依存は inputs / outputs glob の交差から自動導出する ( 手動 `depends` は設けない)」 という方式は廃止され、 spec の `depends` による明示宣言に置き換えられた ( overlap 計算は宣言の検証に転用)。 本 ADR の中核 ( 自作の採用と 2 防御線) は不変
+
 ## Context
 
 ### 背景

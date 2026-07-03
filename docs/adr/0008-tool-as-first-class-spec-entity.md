@@ -1,5 +1,9 @@
 # ADR-0008: tool を first-class spec entity とする
 
+## Status
+
+Accepted
+
 ## Context
 
 [ADR-0005](./0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一して以降、 tool は task 単位で **inline 宣言** する形式を取っていた:

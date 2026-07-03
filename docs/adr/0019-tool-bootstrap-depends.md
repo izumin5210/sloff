@@ -138,6 +138,15 @@ deferred tool の再解決は **その tool を参照する task の `runTask` �
 - **DAG は run 中不変**。遅延解決の結果が edge を追加・並べ替えることはない。宣言不足 ( 閉包 producer への edge 欠落) は誤順序を「修復」せず、run-time overlap 検証 ( ADR-0013 D3) が遅延解決後の input surface で検出し、追加すべき depends を指して fail する。順序 = 宣言 / 健全性 = 検証、の分離は tool 解決でも維持される
 - 遅延解決は fingerprint hit による SKIP を妨げない ( 解決さえ成功すれば、outputs が無傷の task は cold run 中でも hit → SKIP しうる)
 
+#### D4-R. deferred 対応 resolver の要件
+
+D4 の retry が実際に成功するためには、resolver が以下の両方を満たさなければならない。どちらか一方でも欠ければ、depends が完了してもリトライは同じ失敗を返す。
+
+1. **失敗を run 全体でキャッシュしない ( success-only caching)**: per-package の計算失敗をラッチすると D4 retry が永久に初回の失敗を返す。成功した結果だけをキャッシュし、失敗は次呼び出しで再試行できるようにする。go-local の `lister.Memoized` がこの方針を採っている ( `// Errors are not cached so transient failures can be retried`)。
+2. **再解決時に workspace 等の基礎データを再読込できること**: workspace snapshot ( pnpm-local の場合は `pnpm-lock.yaml` + 各 package.json のインデックス) を初回ロード時に凍結したままだと、depends が生成した package.json は snapshot に反映されず、再解決は同じ「パッケージが見つからない」失敗を返す。**パッケージ miss ( `ErrNotWorkspacePackage`) のパスで一度だけ snapshot を reload し、depends が生成した package を発見できるようにする**こと。happy-path ( 初回 load で見つかる) への追加コストはゼロであること。
+
+go-local はコンパイル試行の成否がチェックポイントとなるためこれらの要件を自然に満たす。pnpm-local は初期実装で両方の要件を満たしていなかったが、このブランチで準拠済みに更新した。
+
 ### D5. prefetch は deferred consumer を除外する
 
 deferred tool を参照する task は、tool contribution 抜きの optimistic key を計算しても保存済み record と一致し得ないため、prefetch の対象から除外する ( `prefetchedKeys` に登録しない)。当該 task の lookup は既存の live-Load fallback ( ADR-0011 で導入済みの経路) に落ちる。コストは cold run 限定で、cold は大半が RUN のため実害は小さい。

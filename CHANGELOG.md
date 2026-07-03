@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.6](https://github.com/izumin5210/sloff/compare/v0.0.5...v0.0.6) - 2026-07-03
+- feat: first-class barrier tasks (ADR-0017) by @izumin5210 in https://github.com/izumin5210/sloff/pull/59
+- docs: repay documentation debt (README sync + ADR status convention) by @izumin5210 in https://github.com/izumin5210/sloff/pull/61
+- feat: tool bootstrap depends + declaration-gated deferred resolution (ADR-0019) by @izumin5210 in https://github.com/izumin5210/sloff/pull/62
+
 ## [v0.0.5](https://github.com/izumin5210/sloff/compare/v0.0.4...v0.0.5) - 2026-06-16
 - perf(toolresolver): batch go-local packages.Load across tools sharing a spec dir by @izumin5210 in https://github.com/izumin5210/sloff/pull/53
 - perf(spec): walk top-level children concurrently in Discover by @izumin5210 in https://github.com/izumin5210/sloff/pull/54

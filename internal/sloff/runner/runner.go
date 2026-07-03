@@ -1048,29 +1048,14 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 		g.SetLimit(resolverConcurrency(len(idxs)))
 		for _, i := range idxs {
 			entry, _ := registry.Lookup(referenced[i]) // presence validated by splitByPrewarm
-			declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 			g.Go(func() (gerr error) {
-				toolCtx, toolSpan := r.tracer.Start(gctx,
-					fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-					trace.WithAttributes(
-						attribute.String("sloff.tool.name", entry.Name),
-						attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-						attribute.String("sloff.resolver.phase", "inputs"),
-					))
+				ins, _, toolSpan, failedOn, rerr := r.resolveToolContrib(gctx, entry, "inputs", false)
 				defer endSpan(toolSpan, &gerr)
-
-				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
-				if gerr != nil {
-					// ADR-0019 D3: a tool with declared bootstrap depends is
-					// demoted to deferred instead of failing the plan; its
-					// contribution stays empty (results[i] == nil) and the
-					// injected edges still shape the DAG.
-					if r.deferToolResolution(entry, gerr, toolSpan) {
-						return nil
-					}
-					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				if rerr != nil {
+					// ADR-0019 D3: defer-or-fail via the shared helper.
+					gerr = r.deferOrFail(entry, rerr, toolSpan, failedOn)
+					return
 				}
-				toolSpan.SetAttributes(attribute.Int("sloff.tool.input.count", len(ins)))
 				results[i] = ins
 				return nil
 			})
@@ -1139,39 +1124,15 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 		g.SetLimit(resolverConcurrency(len(idxs)))
 		for _, i := range idxs {
 			entry, _ := registry.Lookup(referenced[i]) // presence validated by splitByPrewarm
-			declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
 			g.Go(func() (gerr error) {
-				toolCtx, toolSpan := r.tracer.Start(gctx,
-					fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-					trace.WithAttributes(
-						attribute.String("sloff.tool.name", entry.Name),
-						attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-					))
+				// Eager run path: phase attribute omitted for backward compatibility.
+				// Both Inputs and Versions are re-resolved at the deferred point (D4).
+				ins, vs, toolSpan, failedOn, rerr := r.resolveToolContrib(gctx, entry, "", true)
 				defer endSpan(toolSpan, &gerr)
-
-				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
-				if gerr != nil {
-					// ADR-0019 D3: a tool with declared bootstrap depends is
-					// demoted to deferred instead of failing the run; its
-					// contributions stay empty and collectTasks proceeds. Both
-					// Inputs and Versions are re-resolved at the deferred
-					// execution point (D4).
-					if r.deferToolResolution(entry, gerr, toolSpan) {
-						return nil
-					}
-					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
+				if rerr != nil {
+					gerr = r.deferOrFail(entry, rerr, toolSpan, failedOn)
+					return
 				}
-				vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
-				if gerr != nil {
-					if r.deferToolResolution(entry, gerr, toolSpan) {
-						return nil
-					}
-					return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
-				}
-				toolSpan.SetAttributes(
-					attribute.Int("sloff.tool.input.count", len(ins)),
-					attribute.Int("sloff.tool.version.count", len(vs)),
-				)
 				insResults[i] = ins
 				verResults[i] = vs
 				return nil
@@ -1202,6 +1163,66 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 	r.inputsByTool, r.versionsByTool = inputs, versions
 	span.SetAttributes(attribute.Int("sloff.tool.deferred_count", len(r.deferredTools)))
 	return inputs, versions, nil
+}
+
+// deferOrFail is the ADR-0019 D3 decision point for a single resolver call
+// failure. If the entry has declared bootstrap depends and the failure is not
+// a context error, the tool is demoted to deferred and nil is returned
+// (the caller must assign the return to its named-return error and return).
+// Otherwise the formatted error for what ("inputs" or "versions") is returned.
+func (r *Runner) deferOrFail(entry spec.ToolEntry, cause error, span trace.Span, what string) error {
+	if r.deferToolResolution(entry, cause, span) {
+		return nil
+	}
+	return fmt.Errorf("resolve %s for tool %q (defined in %s): %w", what, entry.Name, entry.SpecDir, cause)
+}
+
+// resolveToolContrib starts a resolver span and calls Inputs (and optionally
+// Versions) for entry. On success the span carries the count attributes and
+// the caller should close it via endSpan. On error the span is returned
+// open so the caller can set additional attributes (e.g. sloff.tool.deferred
+// via deferToolResolution) before closing it.
+//
+// phase is appended as sloff.resolver.phase when non-empty. The eager run
+// path passes "" to preserve the existing attribute-compatible output (the
+// eager path predates ADR-0019 and never added the phase attribute).
+//
+// failedOn is "inputs" or "versions" when err != nil (empty on success), so
+// the caller can pass the right verb to deferOrFail without re-examining
+// which resolver call failed.
+func (r *Runner) resolveToolContrib(ctx context.Context, entry spec.ToolEntry, phase string, withVersions bool) (
+	ins []string, vs []toolresolver.ResolvedVersion, span trace.Span, failedOn string, err error,
+) {
+	attrs := []attribute.KeyValue{
+		attribute.String("sloff.tool.name", entry.Name),
+		attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+	}
+	if phase != "" {
+		attrs = append(attrs, attribute.String("sloff.resolver.phase", phase))
+	}
+	ctx, span = r.tracer.Start(ctx,
+		fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+		trace.WithAttributes(attrs...))
+
+	declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+	ins, err = r.opts.Resolvers.Inputs(ctx, entry.SpecDir, declared)
+	if err != nil {
+		failedOn = "inputs"
+		return // span open for caller to annotate before closing
+	}
+	if withVersions {
+		vs, err = r.opts.Resolvers.Versions(ctx, entry.SpecDir, declared)
+		if err != nil {
+			failedOn = "versions"
+			return // span open for caller to annotate before closing
+		}
+	}
+	countAttrs := []attribute.KeyValue{attribute.Int("sloff.tool.input.count", len(ins))}
+	if withVersions {
+		countAttrs = append(countAttrs, attribute.Int("sloff.tool.version.count", len(vs)))
+	}
+	span.SetAttributes(countAttrs...)
+	return
 }
 
 // resolverConcurrency caps how many resolver goroutines run in parallel.

@@ -276,35 +276,16 @@ func (d *deferredTool) resolve(ctx context.Context, r *Runner) error {
 	d.mu.Unlock()
 
 	entry := d.entry
-	var spanErr error
-	retryCtx, span := r.tracer.Start(ctx,
-		fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-		trace.WithAttributes(
-			attribute.String("sloff.tool.name", entry.Name),
-			attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-			attribute.String("sloff.resolver.phase", "deferred"),
-		))
-
-	var (
-		ins    []string
-		vs     []toolresolver.ResolvedVersion
-		retErr error
-	)
-	declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-	ins, retErr = r.opts.Resolvers.Inputs(retryCtx, entry.SpecDir, declared)
-	if retErr == nil {
-		vs, retErr = r.opts.Resolvers.Versions(retryCtx, entry.SpecDir, declared)
-	}
+	// resolveToolContrib handles span creation, resolver calls, and success
+	// count attributes; the span is returned open so we can record the error
+	// status before closing.
+	ins, vs, span, _, retErr := r.resolveToolContrib(ctx, entry, "deferred", true)
 
 	// Determine whether the outcome is definitive.
 	isCtxErr := errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded)
 
-	var outcome error
+	var outcome, spanErr error
 	if retErr == nil {
-		span.SetAttributes(
-			attribute.Int("sloff.tool.input.count", len(ins)),
-			attribute.Int("sloff.tool.version.count", len(vs)),
-		)
 		r.logger.Infof("resolved tool %q after its declared depends completed", entry.Name)
 	} else if !isCtxErr {
 		// Real failure: compose the attributed error and latch it.

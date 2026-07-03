@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"os"
@@ -386,26 +387,41 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 	// Barrier tasks have no fingerprint (ADR-0017 D2): nothing to load, and an
 	// optimistic key built from their empty command would only pollute the
 	// batch lookup with keys no backend can ever hold.
+	//
+	// Tasks referencing a deferred tool (ADR-0019 D5) are excluded too: their
+	// optimistic key would miss the tool contribution, so it cannot match any
+	// stored record. Left out of prefetchedKeys, their exec-time lookup falls
+	// through to lookupRecord's live-Load path.
+	skipped := 0
 	real := make([]depgraph.Task, 0, len(ordered))
 	for _, t := range ordered {
-		if !t.Barrier {
-			real = append(real, t)
+		if t.Barrier {
+			continue
 		}
-	}
-
-	if len(real) == 0 {
-		r.prefetched = map[fingerprint.Key]*fingerprintv1.Record{}
-		r.prefetchedKeys = map[fingerprint.Key]struct{}{}
-		return nil
+		if r.taskUsesDeferredTool(t) {
+			skipped++
+			continue
+		}
+		real = append(real, t)
 	}
 
 	keys := make([]fingerprint.Key, len(real))
+	missing := make([]bool, len(real))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(taskConcurrency(len(real)))
 	for i, t := range real {
 		g.Go(func() error {
 			key, err := r.optimisticKey(gctx, t)
 			if err != nil {
+				// ADR-0019 D6: an input file absent at prefetch time (e.g. a
+				// pnpm-local ExtraInput that git tracks but the worktree lost)
+				// excludes this task from the prefetch instead of failing the
+				// run — the file's producer runs before the consumer hashes
+				// its inputs for real. Any other error stays fatal.
+				if errors.Is(err, fs.ErrNotExist) {
+					missing[i] = true
+					return nil
+				}
 				return fmt.Errorf("prefetch %s/%s: %w", t.SpecRelpath, t.Name, err)
 			}
 			keys[i] = key
@@ -416,17 +432,48 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 		return err
 	}
 
-	loaded, err := r.opts.Storage.LoadMany(ctx, keys)
+	asked := make([]fingerprint.Key, 0, len(keys))
+	for i, k := range keys {
+		if missing[i] {
+			skipped++
+			continue
+		}
+		asked = append(asked, k)
+	}
+	span.SetAttributes(attribute.Int("sloff.fingerprint.prefetch_skipped", skipped))
+
+	if len(asked) == 0 {
+		r.prefetched = map[fingerprint.Key]*fingerprintv1.Record{}
+		r.prefetchedKeys = map[fingerprint.Key]struct{}{}
+		return nil
+	}
+
+	loaded, err := r.opts.Storage.LoadMany(ctx, asked)
 	if err != nil {
 		return fmt.Errorf("prefetch: %w", err)
 	}
 	r.prefetched = loaded
-	r.prefetchedKeys = make(map[fingerprint.Key]struct{}, len(keys))
-	for _, k := range keys {
+	r.prefetchedKeys = make(map[fingerprint.Key]struct{}, len(asked))
+	for _, k := range asked {
 		r.prefetchedKeys[k] = struct{}{}
 	}
 	span.SetAttributes(attribute.Int("sloff.fingerprint.prefetched", len(loaded)))
 	return nil
+}
+
+// taskUsesDeferredTool reports whether any tools[] entry of t was demoted to
+// deferred resolution this run (ADR-0019 D3).
+func (r *Runner) taskUsesDeferredTool(t depgraph.Task) bool {
+	if len(r.deferredTools) == 0 {
+		return false
+	}
+	info := r.byKey[t.Ref()]
+	for _, name := range info.command.Tools {
+		if _, ok := r.deferredTools[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // optimisticKey computes the input_hash for t using the same hash composition

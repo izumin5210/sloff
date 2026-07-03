@@ -1,6 +1,8 @@
 package hash
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -152,6 +154,21 @@ func TestFileCache_MissingFile(t *testing.T) {
 	c := NewFileCache()
 	if _, err := c.Files(root, []string{"missing.txt"}); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+// TestFileCache_MissingFileErrorIsErrNotExist pins that Files surfaces the
+// missing-file condition through errors.Is(err, fs.ErrNotExist) — the
+// runner's prefetch (ADR-0019 D6) relies on this to distinguish "input not
+// generated yet" (skip the task's prefetch) from a hard I/O error (fatal).
+// A lossy wrap anywhere in the digest chain would silently turn the skip
+// back into a run-aborting failure on cold trees.
+func TestFileCache_MissingFileErrorIsErrNotExist(t *testing.T) {
+	root := t.TempDir()
+	c := NewFileCache()
+	_, err := c.Files(root, []string{"missing.txt"})
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected errors.Is(err, fs.ErrNotExist), got %v", err)
 	}
 }
 

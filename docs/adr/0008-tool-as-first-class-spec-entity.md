@@ -4,6 +4,8 @@
 
 Accepted
 
+- Amended by [ADR-0019](./0019-tool-bootstrap-depends.md): tool 定義の shape に `depends` ( bootstrap 依存の task 参照リスト) が追加された。 また「参照される全 tool を Run 冒頭で一括解決し、 失敗は fatal」 という解決モデルは、 `depends` を宣言した tool に限り「宣言 depends 完了後の遅延解決」 へ降格するようになった ( 未宣言 tool の失敗は従来どおり fatal)
+
 ## Context
 
 [ADR-0005](./0005-eliminate-resolver-auto-dispatch.md) で declared-only に統一して以降、 tool は task 単位で **inline 宣言** する形式を取っていた:

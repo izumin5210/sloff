@@ -133,7 +133,7 @@ run 冒頭の一括解決 ( `resolveContribs`) は維持する。per-tool の解
 deferred tool の再解決は **その tool を参照する task の `runTask` 冒頭**で行う ( tool 単位の singleflight。複数 consumer が並行到達しても解決は 1 回)。
 
 - D2 の注入 edge により、consumer task の開始時点で tool の宣言 depends は完了済みであることが scheduler により保証されている
-- 再解決成功 → その task の input set / versions に contribution を fold し、**exec 時の完全な入力集合から input hash を計算**する。この hash は warm run と同一 key に収束するため、cold で書いた record は warm で hit する ( cache の連続性)
+- 再解決成功 → その task の input set / versions に contribution を fold し、**exec 時の完全な入力集合から input hash を計算**する。この hash は warm run と同一 key に収束するため、cold で書いた record は warm で hit する ( cache の連続性 — ただし適用範囲は tool contribution の等価性に限られる; D7 参照)
 - 再解決失敗 → その task を fail にする。error は tool を主語に、plan 時と exec 時双方の原因を併記する。SKIP 判定にも input hash ( = 解決結果) が必要なため、遅延解決が silent に握り潰される経路は存在しない — 同一 run 内で必ず顕在化する
 - **DAG は run 中不変**。遅延解決の結果が edge を追加・並べ替えることはない。宣言不足 ( 閉包 producer への edge 欠落) は誤順序を「修復」せず、run-time overlap 検証 ( ADR-0013 D3) が遅延解決後の input surface で検出し、追加すべき depends を指して fail する。順序 = 宣言 / 健全性 = 検証、の分離は tool 解決でも維持される
 - 遅延解決は fingerprint hit による SKIP を妨げない ( 解決さえ成功すれば、outputs が無傷の task は cold run 中でも hit → SKIP しうる)
@@ -164,6 +164,8 @@ optimistic key 計算中の入力 file 不在 ( `fs.ErrNotExist`) は run の fa
 - 注入 edge にも ADR-0013 D4 ( depends は input_hash に不参加) がそのまま適用される
 - record schema・hit 判定 ( ADR-0002)・write-skip ( ADR-0009) に変更なし
 - deferred → resolved で計算される hash は、warm run で eager に解決した場合と bit 単位で一致する ( 同じ resolver が同じ結果を返すため)。cold / warm で cache が連続することの根拠
+
+**cache 連続性の適用範囲**: 上記の「cold で書いた record は warm で hit する」は、**tool contribution の等価性が成立する範囲**での保証である。consumer 自身の `inputs` glob が bootstrap 生成物にマッチする形状 ( 例: `outputs: ["gen/*.go"]` と `inputs: ["gen/**"]` が重なる) では、手書き depends と同様に **cold record が warm で一度 miss しうる**: glob は collect 時に展開されるため、cold run では生成物が存在せず consumer の `inputs` から除外され、warm run では存在するため含まれる — この差が key の不一致を生む。閉包外の生成物を consumer の inputs として取り込む場合は、明示列挙 ( glob ではなく具体 path) を推奨する。
 
 ### D8. 互換性
 

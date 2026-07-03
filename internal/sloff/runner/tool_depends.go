@@ -331,36 +331,40 @@ func (d *deferredTool) resolve(ctx context.Context, r *Runner) error {
 	}
 	endSpan(span, &spanErr)
 
-	// On success, store inputs/versions before broadcasting so that any goroutine
-	// unblocked by the Broadcast sees them already set. This also lets
-	// reloadDeferredConsumers (called below) read dt.inputs / dt.versions directly.
-	d.mu.Lock()
-	d.inflight = false
-	if !isCtxErr {
-		d.inputs = ins
-		d.versions = vs
-	}
-	d.mu.Unlock()
-
 	// On a successful definitive resolve, trigger the batch fingerprint reload
 	// for consumer tasks that were excluded from prefetch due to this deferred
-	// tool (ADR-0019 D5 follow-up). This runs BEFORE broadcasting d.done so
-	// that concurrent consumers waiting in d.cond.Wait() are held until the
-	// reload is committed to prefetchedKeys: they will observe a populated
-	// prefetch map when their own lookupRecord fires.
+	// tool (ADR-0019 D5 follow-up). This runs BEFORE setting d.done and
+	// broadcasting so that concurrent consumers waiting in d.cond.Wait() see
+	// the prefetch map populated when their lookupRecord fires.
 	//
-	// For a context error or real failure, we skip the reload (no useful records
-	// to batch-load) and fall through to broadcast immediately.
+	// d.inflight stays true during the reload to prevent a concurrent goroutine
+	// from seeing d.inflight=false AND d.done=false and starting its own resolution
+	// attempt in the gap. inputs/versions are stored first under d.mu so that
+	// reloadDeferredConsumers can read dt.inputs/dt.versions directly.
+	//
+	// For a real failure or context error, we skip the reload and fall through to
+	// the broadcast (setting d.done and clearing d.inflight) immediately.
 	if retErr == nil {
+		d.mu.Lock()
+		d.inputs = ins
+		d.versions = vs
+		d.mu.Unlock()
 		r.reloadDeferredConsumers(ctx, entry.Name)
 	}
 
 	d.mu.Lock()
+	d.inflight = false
 	if !isCtxErr {
-		// Latch the definitive outcome (success or real error) after the reload
-		// so waiters are unblocked exactly once, with the prefetch map ready.
+		// Latch the definitive outcome together with the inflight-clear so no
+		// goroutine can slip through a re-attempt window.
 		d.done = true
 		d.err = outcome
+		if retErr != nil {
+			// Real failure: inputs/versions were not pre-stored above; record them
+			// now (they are empty/nil from the failed resolver call).
+			d.inputs = ins
+			d.versions = vs
+		}
 	}
 	d.cond.Broadcast()
 	d.mu.Unlock()

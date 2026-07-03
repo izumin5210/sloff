@@ -41,7 +41,7 @@ func TestResolveDepends_EmptyReturnsNil(t *testing.T) {
 
 func TestTaskReadsPath_LiteralPatternMatchesCleanStatePath(t *testing.T) {
 	set, joined := inputSurface("spec", []string{"a-out.txt"}, nil)
-	info := taskInfo{inputSet: set, joinedInputPatterns: joined}
+	info := &taskInfo{inputSet: set, joinedInputPatterns: joined}
 	if !taskReadsPath(info, "spec/a-out.txt") {
 		t.Error("expected literal pattern to match the produced path")
 	}
@@ -49,7 +49,7 @@ func TestTaskReadsPath_LiteralPatternMatchesCleanStatePath(t *testing.T) {
 
 func TestTaskReadsPath_GlobPatternMatches(t *testing.T) {
 	set, joined := inputSurface("proto/svc", []string{"../../gen/**/*.pb.go"}, nil)
-	info := taskInfo{inputSet: set, joinedInputPatterns: joined}
+	info := &taskInfo{inputSet: set, joinedInputPatterns: joined}
 	if !taskReadsPath(info, "gen/foo/bar.pb.go") {
 		t.Error("expected glob pattern to match")
 	}
@@ -60,7 +60,7 @@ func TestTaskReadsPath_GlobPatternMatches(t *testing.T) {
 
 func TestTaskReadsPath_ExpandedInputSetMatches(t *testing.T) {
 	set, joined := inputSurface("spec", []string{"unrelated.txt"}, []string{"spec/extra-input.go"})
-	info := taskInfo{inputSet: set, joinedInputPatterns: joined}
+	info := &taskInfo{inputSet: set, joinedInputPatterns: joined}
 	if !taskReadsPath(info, "spec/extra-input.go") {
 		t.Error("expected expanded input set to match")
 	}

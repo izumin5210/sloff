@@ -125,8 +125,32 @@ type Runner struct {
 	logger Logger
 	stdout io.Writer
 	stderr io.Writer
-	tracer trace.Tracer                  // derived once in New from opts.TracerProvider
-	byKey  map[depgraph.TaskRef]taskInfo // task ref → taskInfo, filled by collectTasks
+	tracer trace.Tracer // derived once in New from opts.TracerProvider
+
+	// byKey maps task ref → taskInfo, filled by collectTasks. Values are
+	// pointers so the ADR-0019 deferred-resolution path can rebuild one
+	// task's info in place at exec time without mutating the map: the map
+	// itself is read-only after collectTasks, and each *taskInfo is written
+	// only by the goroutine running that task (see ensureToolsResolved).
+	byKey map[depgraph.TaskRef]*taskInfo
+
+	// deferredTools tracks referenced tools whose eager resolution failed but
+	// which declared bootstrap depends (ADR-0019 D3): instead of failing the
+	// run, their contribution is left empty at plan time and resolved just
+	// before the first consumer task executes (D4). Registered under
+	// deferredMu during the resolve fan-out; read-only once resolveContribs /
+	// resolveInputContribs returns (their errgroup join is the barrier). Empty
+	// on every run whose eager resolution fully succeeds, keeping the warm
+	// path on the exact pre-ADR-0019 code path.
+	deferredMu    sync.Mutex
+	deferredTools map[string]*deferredTool
+
+	// inputsByTool / versionsByTool retain the eager per-tool contributions
+	// resolveContribs produced, so ensureToolsResolved can re-concatenate a
+	// consumer task's full contribution set in tools[] order once a deferred
+	// tool resolves. nil outside Run (Plan never execs).
+	inputsByTool   map[string][]string
+	versionsByTool map[string][]toolresolver.ResolvedVersion
 
 	// patternGroups records, per consumer task, the depends pattern groups that
 	// expandDependPatterns resolved (ADR-0016 D2). warnUnobservedDepends reads
@@ -958,6 +982,10 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 	))
 	defer endSpan(span, &err)
 
+	// Reset per resolve pass: Plan followed by Run re-attempts every tool
+	// eagerly, so demotions from a previous pass must not leak in.
+	r.deferredTools = map[string]*deferredTool{}
+
 	prewarmDone := r.startPrewarm(ctx, registry, referenced)
 	defer func() { <-prewarmDone }()
 
@@ -986,6 +1014,13 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 
 				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
 				if gerr != nil {
+					// ADR-0019 D3: a tool with declared bootstrap depends is
+					// demoted to deferred instead of failing the plan; its
+					// contribution stays empty (results[i] == nil) and the
+					// injected edges still shape the DAG.
+					if r.deferToolResolution(entry, gerr, toolSpan) {
+						return nil
+					}
 					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
 				}
 				toolSpan.SetAttributes(attribute.Int("sloff.tool.input.count", len(ins)))
@@ -1008,6 +1043,7 @@ func (r *Runner) resolveInputContribs(ctx context.Context, registry *spec.ToolRe
 	for i, name := range referenced {
 		out[name] = results[i]
 	}
+	span.SetAttributes(attribute.Int("sloff.tool.deferred_count", len(r.deferredTools)))
 	return out, nil
 }
 
@@ -1029,6 +1065,10 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 		attribute.Int("sloff.tool.referenced_count", len(referenced)),
 	))
 	defer endSpan(span, &err)
+
+	// Reset per resolve pass: Plan followed by Run re-attempts every tool
+	// eagerly, so demotions from a previous pass must not leak in.
+	r.deferredTools = map[string]*deferredTool{}
 
 	// Start the batch prewarm (go-local packages.Load) in the background and
 	// resolve the eager channels (script / pnpm-local) while it runs; only the
@@ -1064,10 +1104,21 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 
 				ins, gerr := r.opts.Resolvers.Inputs(toolCtx, entry.SpecDir, declared)
 				if gerr != nil {
+					// ADR-0019 D3: a tool with declared bootstrap depends is
+					// demoted to deferred instead of failing the run; its
+					// contributions stay empty and collectTasks proceeds. Both
+					// Inputs and Versions are re-resolved at the deferred
+					// execution point (D4).
+					if r.deferToolResolution(entry, gerr, toolSpan) {
+						return nil
+					}
 					return fmt.Errorf("resolve inputs for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
 				}
 				vs, gerr := r.opts.Resolvers.Versions(toolCtx, entry.SpecDir, declared)
 				if gerr != nil {
+					if r.deferToolResolution(entry, gerr, toolSpan) {
+						return nil
+					}
 					return fmt.Errorf("resolve versions for tool %q (defined in %s): %w", entry.Name, entry.SpecDir, gerr)
 				}
 				toolSpan.SetAttributes(
@@ -1098,6 +1149,11 @@ func (r *Runner) resolveContribs(ctx context.Context, registry *spec.ToolRegistr
 		inputs[name] = insResults[i]
 		versions[name] = verResults[i]
 	}
+	// Retained for the deferred execution point (ADR-0019 D4): when a
+	// deferred tool resolves mid-run, ensureToolsResolved rebuilds the
+	// consumer's contribution set from these maps plus the deferred results.
+	r.inputsByTool, r.versionsByTool = inputs, versions
+	span.SetAttributes(attribute.Int("sloff.tool.deferred_count", len(r.deferredTools)))
 	return inputs, versions, nil
 }
 
@@ -1146,6 +1202,11 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
+	// declaredInputs is the glob expansion of command.Inputs alone, before
+	// tool contributions were merged in. Kept so the deferred-resolution path
+	// (ADR-0019 D4) can rebuild the merged input set at exec time; inputPaths
+	// only carries the merged result, which cannot be un-merged.
+	declaredInputs []string
 	// versions holds the per-task ResolvedVersion concatenation in tools[] order,
 	// pre-computed during collectTasks so runTask can hash without revisiting
 	// the resolver registry. nil when collectTasks ran without versions
@@ -1169,7 +1230,7 @@ type taskInfo struct {
 // style consumers); inputsByTool must always be present so depgraph sees the
 // same inputs the runner would.
 func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool map[string][]toolresolver.ResolvedVersion) ([]depgraph.Task, error) {
-	r.byKey = map[depgraph.TaskRef]taskInfo{}
+	r.byKey = map[depgraph.TaskRef]*taskInfo{}
 	tasks := make([]depgraph.Task, 0)
 	// Plan-phase expander: many specs declare patterns that join to the same
 	// repo-relative glob; memoising avoids re-walking the same large subtrees.
@@ -1237,11 +1298,12 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			Barrier:     c.Barrier,
 		}
 		tasks = append(tasks, t)
-		r.byKey[t.Ref()] = taskInfo{
+		r.byKey[t.Ref()] = &taskInfo{
 			specRelpath:         ec.specDir,
 			command:             c,
 			inputPaths:          mergedInputs,
 			outputPatterns:      c.Outputs,
+			declaredInputs:      ec.inputs,
 			versions:            versions,
 			inputSet:            inputSet,
 			joinedInputPatterns: joinedPatterns,
@@ -1274,7 +1336,7 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 // Glob overlaps that aren't string-equal (e.g. `**/*.go` vs `pkg/foo.go`) are not
 // detected here; they still surface via the runtime recordProducedPaths check after
 // both cmds finish writing.
-func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[depgraph.TaskRef]taskInfo) error {
+func detectOutputPatternConflicts(tasks []depgraph.Task, byKey map[depgraph.TaskRef]*taskInfo) error {
 	patternProducers := map[string][]string{}
 	for _, t := range tasks {
 		info := byKey[t.Ref()]
@@ -1407,12 +1469,11 @@ func mergeInputs(declared, extra []string) []string {
 
 func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	info := r.byKey[t.Ref()]
-	versions := info.versions
 
 	ctx, span := r.tracer.Start(ctx, "runner.task.run", trace.WithAttributes(
 		attribute.String("sloff.spec", t.SpecRelpath),
 		attribute.String("sloff.task.name", t.Name),
-		attribute.Int("sloff.tool.count", len(versions)),
+		attribute.Int("sloff.tool.count", len(info.versions)),
 		// Stamp every task span regardless of whether the lookup is a hit, a
 		// stale record, or a clean miss — without this, a forced rerun of a
 		// task that already had no cached record would be indistinguishable
@@ -1420,6 +1481,18 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 		attribute.Bool("sloff.force", r.opts.Force),
 	))
 	defer endSpan(span, &err)
+
+	// ADR-0019 D4: if any of this task's tools was deferred at run start,
+	// resolve it now and rebuild info's input surface / versions before
+	// hashing. On a run whose eager resolution fully succeeded this is a
+	// single length check — the warm path is untouched.
+	if len(r.deferredTools) > 0 {
+		if err = r.ensureToolsResolved(ctx, t, info); err != nil {
+			return err
+		}
+		span.SetAttributes(attribute.Int("sloff.tool.count", len(info.versions)))
+	}
+	versions := info.versions
 
 	filesHash, err := r.fileCache.Files(r.opts.RepoRoot, info.inputPaths)
 	if err != nil {
@@ -1721,7 +1794,7 @@ func (r *Runner) validateProducedDependencies(ctx context.Context, ordered []dep
 // the file did not exist when globs were expanded and only the pattern can
 // see it. Pattern-vs-path matching is exact and cheap (unlike the
 // glob-vs-glob intersection ADR-0004 D3 rejected).
-func taskReadsPath(info taskInfo, p string) bool {
+func taskReadsPath(info *taskInfo, p string) bool {
 	if _, ok := info.inputSet[p]; ok {
 		return true
 	}
@@ -1824,7 +1897,7 @@ func (r *Runner) warnUnobservedDepends(ctx context.Context, ordered []depgraph.T
 
 // anyProducedPathRead reports whether any of a producer's output paths is part
 // of the consumer's input surface (ADR-0013 D3).
-func anyProducedPathRead(info taskInfo, paths []string) bool {
+func anyProducedPathRead(info *taskInfo, paths []string) bool {
 	for _, p := range paths {
 		if taskReadsPath(info, p) {
 			return true
@@ -1840,7 +1913,7 @@ func taskLabel(t depgraph.Task) string { return t.Ref().Label() }
 // otherwise be persisted as a fingerprint with an empty file set, letting subsequent
 // fingerprint hits permanently mask the broken generator. Individual patterns are allowed to
 // resolve to zero files (conditional artifacts), so long as some pattern produced output.
-func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
+func (r *Runner) resolveOutputs(info *taskInfo) ([]string, error) {
 	outputs, err := glob.Expand(r.opts.RepoRoot, info.specRelpath, info.outputPatterns)
 	if err != nil {
 		return nil, fmt.Errorf("re-expand outputs: %w", err)
@@ -1851,7 +1924,7 @@ func (r *Runner) resolveOutputs(info taskInfo) ([]string, error) {
 	return outputs, nil
 }
 
-func (r *Runner) execCmd(ctx context.Context, info taskInfo) (err error) {
+func (r *Runner) execCmd(ctx context.Context, info *taskInfo) (err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.task.exec")
 	defer endSpan(span, &err)
 

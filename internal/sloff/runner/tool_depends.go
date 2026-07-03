@@ -1,12 +1,19 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"path/filepath"
+	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/izumin5210/sloff/internal/sloff/depgraph"
 	"github.com/izumin5210/sloff/internal/sloff/glob"
 	"github.com/izumin5210/sloff/internal/sloff/spec"
+	"github.com/izumin5210/sloff/internal/sloff/toolresolver"
 )
 
 // injectToolDepends folds every referenced tool's bootstrap depends (ADR-0019
@@ -126,4 +133,135 @@ func relSpecDir(fromDirSlash, toDirSlash string) (string, error) {
 		return "", err
 	}
 	return filepath.ToSlash(rel), nil
+}
+
+// deferredTool is one referenced tool demoted from eager resolution
+// (ADR-0019 D3): its Inputs/Versions failed at run start, but the tool
+// declared bootstrap depends, so the failure may just mean its sources have
+// not been generated yet. The retry runs at most once (the once field is the
+// tool-level singleflight of D4), triggered by the first consumer task to
+// reach ensureToolsResolved; concurrent consumers block on the once and
+// observe the same outcome.
+type deferredTool struct {
+	entry   spec.ToolEntry
+	planErr error // the eager failure, kept for error attribution on retry failure
+
+	once     sync.Once
+	inputs   []string
+	versions []toolresolver.ResolvedVersion
+	err      error
+}
+
+// deferToolResolution demotes a failed eager resolution to deferred when the
+// tool declared bootstrap depends (ADR-0019 D3). Returns false — leaving the
+// caller to fail the run as before — for tools without a declaration, so
+// typos and environment breakage keep dying at run start.
+func (r *Runner) deferToolResolution(entry spec.ToolEntry, cause error, span trace.Span) bool {
+	if len(entry.Declared.Depends) == 0 {
+		return false
+	}
+	r.deferredMu.Lock()
+	r.deferredTools[entry.Name] = &deferredTool{entry: entry, planErr: cause}
+	r.deferredMu.Unlock()
+	span.SetAttributes(attribute.Bool("sloff.tool.deferred", true))
+	r.logger.Warnf("tool %q: resolution failed; deferred until its declared depends complete: %v", entry.Name, cause)
+	return true
+}
+
+// ensureToolsResolved is the ADR-0019 D4 execution point. When any tool this
+// task references was deferred, it (a) resolves each such tool — the
+// injected edges guarantee the tool's declared depends completed before this
+// task was scheduled — and (b) rebuilds this task's input surface and
+// version set from the now-complete contribution set, so the input hash
+// runTask computes next is identical to what an eager (warm) run produces
+// (ADR-0019 D7: cold-written records must hit on warm runs).
+//
+// Concurrency: r.deferredTools is read-only after resolveContribs returns;
+// each deferredTool resolves under its once. The rebuild writes only through
+// this task's own *taskInfo — the byKey map is never mutated during the run,
+// no other goroutine reads another task's info while runTasks is in flight,
+// and the post-run validation passes read after the errgroup join, which
+// establishes the happens-before. Hence no lock here.
+func (r *Runner) ensureToolsResolved(ctx context.Context, t depgraph.Task, info *taskInfo) error {
+	deferredUsed := false
+	for _, name := range info.command.Tools {
+		dt, ok := r.deferredTools[name]
+		if !ok {
+			continue
+		}
+		deferredUsed = true
+		if err := dt.resolve(ctx, r); err != nil {
+			return fmt.Errorf("%s: %w", t.Name, err)
+		}
+	}
+	if !deferredUsed {
+		return nil
+	}
+
+	// Re-concatenate every tool contribution in tools[] order — the same
+	// order collectTasks used — swapping in the deferred results where the
+	// eager maps hold the empty placeholder.
+	var extras []string
+	var versions []toolresolver.ResolvedVersion
+	for _, name := range info.command.Tools {
+		if dt, ok := r.deferredTools[name]; ok {
+			extras = append(extras, dt.inputs...)
+			versions = append(versions, dt.versions...)
+			continue
+		}
+		extras = append(extras, r.inputsByTool[name]...)
+		versions = append(versions, r.versionsByTool[name]...)
+	}
+	merged := mergeInputs(info.declaredInputs, extras)
+	inputSet, joinedPatterns := inputSurface(info.specRelpath, info.command.Inputs, merged)
+	info.inputPaths = merged
+	info.versions = versions
+	info.inputSet = inputSet
+	info.joinedInputPatterns = joinedPatterns
+	return nil
+}
+
+// resolve retries the deferred tool's Inputs/Versions exactly once. On
+// failure the error names the tool and carries both the eager and the
+// deferred cause: the pair is what distinguishes "depends didn't generate
+// what the tool needs" (both causes alike) from an environment problem that
+// appeared mid-run.
+func (d *deferredTool) resolve(ctx context.Context, r *Runner) error {
+	d.once.Do(func() {
+		entry := d.entry
+		ctx, span := r.tracer.Start(ctx,
+			fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+			trace.WithAttributes(
+				attribute.String("sloff.tool.name", entry.Name),
+				attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+				attribute.String("sloff.resolver.phase", "deferred"),
+			))
+		defer endSpan(span, &d.err)
+
+		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+		ins, insErr := r.opts.Resolvers.Inputs(ctx, entry.SpecDir, declared)
+		if insErr != nil {
+			d.err = d.attributedErr(insErr)
+			return
+		}
+		vs, vsErr := r.opts.Resolvers.Versions(ctx, entry.SpecDir, declared)
+		if vsErr != nil {
+			d.err = d.attributedErr(vsErr)
+			return
+		}
+		d.inputs, d.versions = ins, vs
+		span.SetAttributes(
+			attribute.Int("sloff.tool.input.count", len(ins)),
+			attribute.Int("sloff.tool.version.count", len(vs)),
+		)
+		r.logger.Infof("resolved tool %q after its declared depends completed", entry.Name)
+	})
+	return d.err
+}
+
+// attributedErr composes the D4 failure message: tool as subject, both the
+// run-start and the post-depends causes, and the most likely spec fix.
+func (d *deferredTool) attributedErr(retryErr error) error {
+	return fmt.Errorf("tool %q (defined in %s) could not be resolved: at run start: %v; retried after its declared depends completed: %v; a task generating the tool's sources may be missing from the tool's depends",
+		d.entry.Name, providerDefinitionPath(d.entry.SpecDir), d.planErr, retryErr)
 }

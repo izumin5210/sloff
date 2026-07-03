@@ -11,9 +11,9 @@ import (
 // makeTaskInfo builds a taskInfo with only the fields detectOutputPatternConflicts reads
 // (specRelpath / outputPatterns). The other fields stay zero so the test stays focused on
 // the conflict-detection contract.
-func makeTaskInfo(specRelpath, name string, outputs []string) (depgraph.Task, taskInfo) {
+func makeTaskInfo(specRelpath, name string, outputs []string) (depgraph.Task, *taskInfo) {
 	t := depgraph.Task{SpecRelpath: specRelpath, Name: name, Outputs: outputs}
-	info := taskInfo{
+	info := &taskInfo{
 		specRelpath:    specRelpath,
 		command:        spec.Command{Name: name, Outputs: outputs},
 		outputPatterns: outputs,
@@ -28,7 +28,7 @@ func makeTaskInfo(specRelpath, name string, outputs []string) (depgraph.Task, ta
 // error and prevented the run from starting at all.
 func TestDetectOutputPatternConflicts_DistinctSpecDirsSameRelpath(t *testing.T) {
 	tasks := make([]depgraph.Task, 0, 2)
-	byKey := map[depgraph.TaskRef]taskInfo{}
+	byKey := map[depgraph.TaskRef]*taskInfo{}
 	for _, dir := range []string{"services/a", "services/b"} {
 		task, info := makeTaskInfo(dir, "gen-db", []string{"internal/db/db.gen.go"})
 		tasks = append(tasks, task)
@@ -48,7 +48,7 @@ func TestDetectOutputPatternConflicts_SameSpecDirSamePattern(t *testing.T) {
 	t1, i1 := makeTaskInfo("spec", "first", []string{"shared.txt"})
 	t2, i2 := makeTaskInfo("spec", "second", []string{"shared.txt"})
 	tasks := []depgraph.Task{t1, t2}
-	byKey := map[depgraph.TaskRef]taskInfo{
+	byKey := map[depgraph.TaskRef]*taskInfo{
 		t1.Ref(): i1,
 		t2.Ref(): i2,
 	}
@@ -74,7 +74,7 @@ func TestDetectOutputPatternConflicts_DotDotResolvesAcrossSpecs(t *testing.T) {
 		t1, i1 := makeTaskInfo("services/a/spec", "gen", []string{"../../shared/out.go"})
 		t2, i2 := makeTaskInfo("services/b/spec", "gen", []string{"../../shared/out.go"})
 		tasks := []depgraph.Task{t1, t2}
-		byKey := map[depgraph.TaskRef]taskInfo{
+		byKey := map[depgraph.TaskRef]*taskInfo{
 			t1.Ref(): i1,
 			t2.Ref(): i2,
 		}
@@ -92,7 +92,7 @@ func TestDetectOutputPatternConflicts_DotDotResolvesAcrossSpecs(t *testing.T) {
 		t1, i1 := makeTaskInfo("services/a/spec", "gen", []string{"../out/a.go"})
 		t2, i2 := makeTaskInfo("services/b/spec", "gen", []string{"../out/b.go"})
 		tasks := []depgraph.Task{t1, t2}
-		byKey := map[depgraph.TaskRef]taskInfo{
+		byKey := map[depgraph.TaskRef]*taskInfo{
 			t1.Ref(): i1,
 			t2.Ref(): i2,
 		}

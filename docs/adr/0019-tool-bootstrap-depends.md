@@ -150,6 +150,8 @@ optimistic key 計算中の入力 file 不在 ( `fs.ErrNotExist`) は run の fa
 - 「absent を hash に織り込む」案は採らない: record は常に exec 時 ( 全 file 存在) に書かれるため、absent 込みの key はいかなる record とも一致せず、無意味な lookup を増やすだけである
 - `runTask` の exec 時 hash は従来どおり **strict** ( file 不在は error)。健全性の防衛線は動かさない
 
+**除外判定の決定性**: task の入力 hash 計算が複数 file で失敗する場合、除外は「**全ての失敗が ErrNotExist のときのみ**」とする。非 ErrNotExist エラー ( 例: permission denied) が 1 つでも混在する場合は、そのエラーを入力順で最初のものを決定的に返し、prefetch を fatal にする。これにより、missing file と unreadable file を同時に入力に持つ task が scheduling 順によって「除外 (silent) → mid-run fatal」と「prefetch fatal」の間で揺れる非決定的挙動を排除する。
+
 ### D7. fingerprint 意味論は不変
 
 - 注入 edge にも ADR-0013 D4 ( depends は input_hash に不参加) がそのまま適用される

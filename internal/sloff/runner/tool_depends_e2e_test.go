@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -327,4 +329,82 @@ func TestRunner_ToolDepends_IndirectCycleError(t *testing.T) {
 			expectError(`was injected from tool "gen-tool"`),
 		),
 	)
+}
+
+// TestRunner_ToolDepends_MixedInputErrors_PrefetchFatal covers ADR-0019 D6
+// determinism: a task whose inputs include both a missing file (ErrNotExist)
+// and an unreadable file (permission error) must fail at prefetch — not be
+// silently excluded and fail later mid-run. The permission error must dominate
+// the ErrNotExist that the prefetch skip would have swallowed.
+func TestRunner_ToolDepends_MixedInputErrors_PrefetchFatal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o000 is not enforced on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not prevent reads")
+	}
+
+	workdir := t.TempDir()
+	write := func(rel, contents string) {
+		t.Helper()
+		full := filepath.Join(workdir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("input.txt", "hello\n")
+	write("sloff.yml", `tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  extra:
+    pnpm-local: "@org/extra"
+
+commands:
+  - name: consume
+    cmd: ["sh", "-c", "cat input.txt > out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [extra]
+`)
+
+	// Create an unreadable file that the stub extra-inputs resolver will
+	// declare as one of the task's input paths. "missing.txt" is not on disk.
+	unreadable := filepath.Join(workdir, "secret.txt")
+	if err := os.WriteFile(unreadable, []byte("secret"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unreadable, 0o644) }) //nolint:errcheck
+
+	specs, err := spec.Discover(workdir, "**/sloff.yml")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	reg := toolresolver.NewRegistry()
+	reg.Register(script.New(workdir))
+	// The stub lists both an absent file and the unreadable file as ExtraInputs
+	// so the consumer's optimistic-key computation encounters both error kinds.
+	reg.Register(&stubExtraInputsResolver{inputs: []string{"missing.txt", "secret.txt"}})
+
+	r := runner.New(runner.Options{
+		RepoRoot:  workdir,
+		Specs:     specs,
+		Storage:   local.New(workdir, local.WithClock(func() time.Time { return fixedClock })),
+		Resolvers: reg,
+		Preflight: preflight.NewRegistry(),
+	})
+
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run: expected error, got nil")
+	}
+	// The error must mention "prefetch" (fail at prefetch, not mid-run).
+	if !strings.Contains(err.Error(), "prefetch") {
+		t.Fatalf("Run: expected error to contain %q (prefetch-phase failure), got: %v", "prefetch", err)
+	}
 }

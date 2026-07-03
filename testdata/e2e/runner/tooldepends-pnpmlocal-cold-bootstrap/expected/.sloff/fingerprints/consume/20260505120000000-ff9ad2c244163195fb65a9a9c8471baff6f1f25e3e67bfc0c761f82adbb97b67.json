@@ -1,0 +1,23 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": ".",
+    "task_id": "consume",
+    "cmd": "sh -c cat input.txt > out.txt && printf x >> marker.txt"
+  },
+  "input": {
+    "hash": "ff9ad2c244163195fb65a9a9c8471baff6f1f25e3e67bfc0c761f82adbb97b67",
+    "files_hash": "59440118a57e0be09c8f37894db5f8683ec6a5f3e94caa323f46ded4dc7759d7",
+    "cmd_hash": "ab17eaf2cc9f1bd5ce00d0969142abf9a6bcc820a5869611063f1ceec189f725",
+    "resolved_versions_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "output": {
+    "hash": "893e22565a8097cb28aa1e767cd11b4f2ddd4115ac234fd9487e0ae7735d01b4",
+    "files": [
+      {
+        "path": "out.txt",
+        "hash": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+      }
+    ]
+  }
+}

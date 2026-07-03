@@ -291,7 +291,7 @@ commands:
 func TestRunner_ToolDepends_InjectedEdgeNoUnobservedWarn(t *testing.T) {
 	requireSh(t)
 	runE2E(
-		t, "zz-verify-script-tooldep",
+		t, "tooldepends-injected-edge-no-unobserved-warn",
 		runStep(expectNoWarns()),
 		runStep(expectNoWarns(), expectNoInfoContaining("RUN ")),
 	)

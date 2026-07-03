@@ -1,0 +1,19 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v9.9.9"]
+  mytool:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    depends:
+      - task: build-tool
+
+commands:
+  - name: build-tool
+    cmd: ["sh", "-c", "mkdir -p bin && cp tool.src bin/mytool"]
+    inputs: ["tool.src"]
+    outputs: ["bin/mytool"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "cp input.txt output.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [mytool]

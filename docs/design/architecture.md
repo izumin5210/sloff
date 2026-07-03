@@ -134,6 +134,7 @@ commands:
 - `tools` ブロックは **任意**。 同じ `sloff.yml` 内で `commands:` と共存可、 別 `sloff.yml` で定義された tool を参照することも可 ( namespace は repo-wide で flat、 ADR-0008)
 - `commands[*].tools` は **tool 名の文字列リスト** ( inline 宣言は不可)。 prebuilt binary は script resolver、 内製ソースは専用 resolver に振り分ける ( 後述の dispatch table 参照)
 - tool 定義の path 系フィールド ( `go-local: ./cmd/foo` 等) は **その tool が定義された `sloff.yml` の dir 相対** で解釈される ( 参照元 task の dir ではない、 ADR-0008 D3)
+- tool 定義には `depends` で **bootstrap 依存** ( その tool のソース解決が前提とする task) を宣言できる ( [ADR-0019](../adr/0019-tool-bootstrap-depends.md))。 entry は task depends と同形の `{spec, task}` で、 `spec` は tool を定義した `sloff.yml` の dir 相対。 runner がこれを当該 tool を使う全 task の depends へ注入する ( 後述「タスク間依存」の tool bootstrap 節)
 - `inputs` / `outputs` の glob pattern は **spec dir 相対**。 `..` を含む pattern も許容され、 monorepo 典型の cross-dir codegen ( e.g. `proto/<svc>/sloff.yml` から `../../gen/go/**/*.pb.go` を出力) を spec の置き場所と関心事のスコープを揃えたまま表現できる。 ただし正規化後に repoRoot を抜ける pattern ( e.g. `../../../etc/passwd`) は load 時 error として弾く ( spec が repo 外を hash しないことを構造的に担保)
 - 他 task の生成物を入力に取る場合、 `depends` で **実行順序を明示宣言する** ( ADR-0013)。 要素は `{spec, task}` の構造体で、 `spec` は spec dir 相対 ( 省略時は同一 sloff.yml 内)。 inputs / outputs overlap の計算は順序導出ではなく **宣言の検証** に使う ( 後述「タスク間依存」)
 - `barrier: true` を宣言した task は **集約専用ノード ( fan-in barrier / alias)** になる ( [ADR-0017](../adr/0017-barrier-tasks.md))。 `depends` のみを持ち、 `cmd` / `inputs` / `outputs` / `tools` の宣言は load 時 error ( 空 `depends` も error)。 実行も fingerprint も持たず、 「 この task 集合の完了」 を 1 つの名前で下流に提供する ( 後述「タスク間依存」の barrier 節)
@@ -386,7 +387,7 @@ flowchart LR
 
 - `commands[*].tools: [name1, name2]` は string list、 各 name は `spec.ToolRegistry` ( 全 sloff.yml の tools[] を merge した repo-wide flat namespace) に対する lookup key
 - 同名 tool が 2 ファイル以上で定義されたら load 時 error。 未定義 name を参照した task も load 時 error
-- runner は `Run` 冒頭で全 tool を 1 回ずつ resolve し、 結果を name 別 cache に保持 ( N task が同じ tool を参照しても Resolver 呼び出しは 1 回、 ADR-0008 D6)
+- runner は `Run` 冒頭で全 tool を 1 回ずつ resolve し、 結果を name 別 cache に保持 ( N task が同じ tool を参照しても Resolver 呼び出しは 1 回、 ADR-0008 D6)。 解決失敗は原則 run 冒頭で fatal だが、 `depends` を宣言した tool に限り **deferred** に降格して run を続行し、 最初の consumer task の実行直前に再解決する ( [ADR-0019](../adr/0019-tool-bootstrap-depends.md)、 後述「タスク間依存」の tool bootstrap 節)
 - 一つの task で複数 resolver / tool を組み合わせたい場合 ( 例: `tools: [go-toolchain, my-codegen]`) は名前を並べる
 - prebuilt binary 全般を覆う script resolver も declared-only ( 「とりあえず `cmd[0] --version` を呼ぶ」推定は、 build timestamp や OS-arch を含む `--version` 出力で OS 横断 fingerprint を壊しうるため avoid)
 - 複合 generator ( `buf generate` 等) を扱うときも専用 resolver は導入せず、 関連設定ファイルを spec.inputs に含める形で files_hash 経路に乗せる ( [ADR-0006](../adr/0006-no-buf-specific-resolver-or-preflight.md))
@@ -664,6 +665,23 @@ commands:
 - **検証との関係**: barrier は inputs を持たないため inputs 漏れ warning の判定対象にならない ( 判定を弱めるのではなく、 判定すべきものが構造的に無い)。 逆に **barrier への depends はデータ読み取りの免罪符にならない**: barrier メンバーの生成物を読む consumer には、 実 producer への直接エッジを depends 漏れ error が従来通り要求する ( barrier を透過扱いすると「 大きな barrier に depends すれば何を読んでも通る」 抜け道になるため)
 - **invalidate は barrier を流れない**: depends が input_hash に入らない ( ADR-0013 D4) 帰結として、 barrier 経由では fingerprint は invalidate されない。 データを読む consumer は直接エッジ + inputs 宣言が必要で、 それは上記 error が強制する
 - `sloff graph` では barrier を実 task と区別できる形 ( Mermaid: hexagon `{{...}}` / DOT: `shape=hexagon`) で表示する
+
+#### tool bootstrap depends ( tool 由来のエッジ注入 + 遅延解決)
+
+tool のソース閉包に他 task の生成物が含まれる場合 ( 例: 内製 protoc plugin が自 repo の生成 pb.go を import)、 「その task が先」 という依存の持ち主は consumer task ではなく **tool 自身** である。 tool 定義の `depends` にこれを一元宣言する ( [ADR-0019](../adr/0019-tool-bootstrap-depends.md)):
+
+```yaml
+tools:
+  protoc-gen-foo:
+    go-local: ./cmd/protoc-gen-foo
+    depends:
+      - {task: gen-options}       # 解釈基準は tool 定義 spec の dir ( ADR-0008 D3)
+```
+
+- **エッジ注入**: runner は tool registry 構築後・depends 参照検証前に、 tool の `depends` を **その tool を使う全 task** の depends へ ( consumer dir 基準へ path 変換して) 注入する。 以降は手書きエッジと不可分で、 depgraph / overlap 検証 / `sloff graph` / Plan すべてに現れる。 consumer が同じエッジを手書き済みなら注入しない ( 後方互換)。 注入先 task 自身が参照先になる spec ( tool の閉包 producer がその tool を使っている) は bootstrap が構造的に不可能なので error
+- **遅延解決 ( 宣言 gated)**: run 冒頭の一括解決に失敗した tool のうち **`depends` を宣言したものだけ** が deferred に降格し ( WARN)、 最初の consumer task の実行直前に 1 回だけ再解決される ( tool 単位の singleflight。 注入エッジにより宣言 depends の完了は scheduler が保証済み)。 成功すればその task の入力集合 / versions を完全な contribution で再構成してから input_hash を計算するため、 cold run が書いた record は warm run と同一 key に収束する ( cache の連続性、 ADR-0019 D7)。 失敗すれば当該 task が fail し、 error は tool 主語で plan 時 / exec 時双方の原因を併記する。 未宣言 tool の解決失敗は従来どおり run 冒頭 fatal ( typo の早期検出は不変)
+- **prefetch との関係**: deferred tool を参照する task と、 optimistic key 計算中に入力 file 不在 ( `fs.ErrNotExist`) に当たった task は prefetch から除外され、 既存の live-Load fallback ( ADR-0011 経路) に落ちる。 コストは cold run 限定で、 全 tool の解決が成功する warm run の経路は完全に不変
+- glob パターンは tool depends では非対応 ( load 時 error、 ADR-0019 D1)。 barrier への depends は書けるが、 閉包 producer への直接エッジ要求 ( ADR-0017 D3) は免除されない
 
 #### invalidate チェーン
 

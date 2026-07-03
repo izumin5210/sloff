@@ -778,16 +778,23 @@ func providerDefinitionPath(specDir string) string {
 }
 
 // prepareRegistry builds the repo-wide tool registry, validates command tool
-// references against it, validates cross-spec depends references, and
-// collects the deduplicated set of names some command actually pulls in.
-// Both Run and Plan need this same triple, so the helper keeps the two flows
-// from diverging on the validation rules.
+// references against it, injects tool bootstrap depends into consumer tasks
+// (ADR-0019 D2), validates cross-spec depends references, and collects the
+// deduplicated set of names some command actually pulls in. Both Run and
+// Plan need this same triple, so the helper keeps the two flows from
+// diverging on the validation rules — and gives both the same injected DAG.
 func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 	registry, err := spec.BuildToolRegistry(r.opts.Specs)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := spec.ValidateToolReferences(r.opts.Specs, registry); err != nil {
+		return nil, nil, err
+	}
+	// Injection sits between the two validations: it needs every tools[] name
+	// resolved, and it must dedup against hand-written edges before
+	// ValidateDependReferences would reject them as duplicates.
+	if err := r.injectToolDepends(registry); err != nil {
 		return nil, nil, err
 	}
 	if err := spec.ValidateDependReferences(r.opts.Specs); err != nil {

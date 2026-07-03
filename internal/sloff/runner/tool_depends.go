@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -138,15 +139,23 @@ func relSpecDir(fromDirSlash, toDirSlash string) (string, error) {
 // deferredTool is one referenced tool demoted from eager resolution
 // (ADR-0019 D3): its Inputs/Versions failed at run start, but the tool
 // declared bootstrap depends, so the failure may just mean its sources have
-// not been generated yet. The retry runs at most once (the once field is the
-// tool-level singleflight of D4), triggered by the first consumer task to
-// reach ensureToolsResolved; concurrent consumers block on the once and
+// not been generated yet. The retry runs at most once per definitive outcome
+// (ADR-0019 D4), triggered by the first consumer task to reach
+// ensureToolsResolved; concurrent consumers wait on the in-flight attempt and
 // observe the same outcome.
+//
+// Concurrency model: mu guards done/inflight/inputs/versions/err. A definitive
+// outcome (success or real non-context error) sets done=true and is latched
+// forever. A context error is not latched — the run is already shutting down
+// and a later consumer with a live ctx should not observe a stale result.
 type deferredTool struct {
 	entry   spec.ToolEntry
 	planErr error // the eager failure, kept for error attribution on retry failure
 
-	once     sync.Once
+	mu       sync.Mutex
+	cond     *sync.Cond // signals when the in-flight attempt finishes
+	inflight bool       // true while one goroutine is executing the resolver calls
+	done     bool       // true once a definitive (non-context) outcome is latched
 	inputs   []string
 	versions []toolresolver.ResolvedVersion
 	err      error
@@ -156,12 +165,23 @@ type deferredTool struct {
 // tool declared bootstrap depends (ADR-0019 D3). Returns false — leaving the
 // caller to fail the run as before — for tools without a declaration, so
 // typos and environment breakage keep dying at run start.
+//
+// Context cancellation is never a reason to demote: it is unrelated to whether
+// the tool's declared depends have generated the sources it needs. A canceled
+// context means the run is already shutting down; let the caller propagate the
+// error immediately instead of hiding it behind a deferred retry that will also
+// fail (or, worse, succeed with a stale context).
 func (r *Runner) deferToolResolution(entry spec.ToolEntry, cause error, span trace.Span) bool {
 	if len(entry.Declared.Depends) == 0 {
 		return false
 	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return false
+	}
+	dt := &deferredTool{entry: entry, planErr: cause}
+	dt.cond = sync.NewCond(&dt.mu)
 	r.deferredMu.Lock()
-	r.deferredTools[entry.Name] = &deferredTool{entry: entry, planErr: cause}
+	r.deferredTools[entry.Name] = dt
 	r.deferredMu.Unlock()
 	span.SetAttributes(attribute.Bool("sloff.tool.deferred", true))
 	r.logger.Warnf("tool %q: resolution failed; deferred until its declared depends complete: %v", entry.Name, cause)
@@ -221,47 +241,100 @@ func (r *Runner) ensureToolsResolved(ctx context.Context, t depgraph.Task, info 
 	return nil
 }
 
-// resolve retries the deferred tool's Inputs/Versions exactly once. On
-// failure the error names the tool and carries both the eager and the
-// deferred cause: the pair is what distinguishes "depends didn't generate
-// what the tool needs" (both causes alike) from an environment problem that
-// appeared mid-run.
+// resolve retries the deferred tool's Inputs/Versions. On a definitive failure
+// the error names the tool and carries both the eager and the deferred cause:
+// the pair is what distinguishes "depends didn't generate what the tool needs"
+// (both causes alike) from an environment problem that appeared mid-run.
+//
+// Context errors (Canceled/DeadlineExceeded) are never latched as the
+// definitive outcome. A context error means the run is shutting down due to an
+// unrelated failure; wrapping it in attributedErr would misattribute a
+// scheduling side-effect as a spec defect. The caller receives the raw context
+// error (wrapped with the tool name) so errors.Is remains navigable, and a
+// later consumer with a live ctx is not blocked by a frozen cancellation.
 func (d *deferredTool) resolve(ctx context.Context, r *Runner) error {
-	d.once.Do(func() {
-		entry := d.entry
-		ctx, span := r.tracer.Start(ctx,
-			fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
-			trace.WithAttributes(
-				attribute.String("sloff.tool.name", entry.Name),
-				attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
-				attribute.String("sloff.resolver.phase", "deferred"),
-			))
-		defer endSpan(span, &d.err)
+	d.mu.Lock()
+	// Fast-path: a definitive outcome (success or real failure) was already latched.
+	if d.done {
+		err := d.err
+		d.mu.Unlock()
+		return err
+	}
+	// If another goroutine is in flight, wait for it to finish. We may then
+	// take the fast-path above (definitive outcome) or re-attempt ourselves if
+	// the in-flight attempt ended with a context error.
+	for d.inflight {
+		d.cond.Wait()
+	}
+	if d.done {
+		err := d.err
+		d.mu.Unlock()
+		return err
+	}
+	// We are the goroutine that will execute the resolver calls.
+	d.inflight = true
+	d.mu.Unlock()
 
-		declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
-		ins, insErr := r.opts.Resolvers.Inputs(ctx, entry.SpecDir, declared)
-		if insErr != nil {
-			d.err = d.attributedErr(insErr)
-			return
-		}
-		vs, vsErr := r.opts.Resolvers.Versions(ctx, entry.SpecDir, declared)
-		if vsErr != nil {
-			d.err = d.attributedErr(vsErr)
-			return
-		}
-		d.inputs, d.versions = ins, vs
+	entry := d.entry
+	var spanErr error
+	retryCtx, span := r.tracer.Start(ctx,
+		fmt.Sprintf("resolver.%s[%s]", entry.Declared.Resolver, entry.Name),
+		trace.WithAttributes(
+			attribute.String("sloff.tool.name", entry.Name),
+			attribute.String("sloff.resolver.channel", entry.Declared.Resolver),
+			attribute.String("sloff.resolver.phase", "deferred"),
+		))
+
+	var (
+		ins    []string
+		vs     []toolresolver.ResolvedVersion
+		retErr error
+	)
+	declared := []toolresolver.DeclaredTool{toolresolverDeclared(entry.Declared)}
+	ins, retErr = r.opts.Resolvers.Inputs(retryCtx, entry.SpecDir, declared)
+	if retErr == nil {
+		vs, retErr = r.opts.Resolvers.Versions(retryCtx, entry.SpecDir, declared)
+	}
+
+	// Determine whether the outcome is definitive.
+	isCtxErr := errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded)
+
+	var outcome error
+	if retErr == nil {
 		span.SetAttributes(
 			attribute.Int("sloff.tool.input.count", len(ins)),
 			attribute.Int("sloff.tool.version.count", len(vs)),
 		)
 		r.logger.Infof("resolved tool %q after its declared depends completed", entry.Name)
-	})
-	return d.err
+	} else if !isCtxErr {
+		// Real failure: compose the attributed error and latch it.
+		outcome = d.attributedErr(retErr)
+		spanErr = outcome
+	} else {
+		// Context error: return it transparently without latching.
+		outcome = fmt.Errorf("tool %q: %w", entry.Name, retErr)
+		spanErr = outcome
+	}
+	endSpan(span, &spanErr)
+
+	d.mu.Lock()
+	d.inflight = false
+	if !isCtxErr {
+		// Latch the definitive outcome (success or real error).
+		d.done = true
+		d.err = outcome
+		d.inputs = ins
+		d.versions = vs
+	}
+	d.cond.Broadcast()
+	d.mu.Unlock()
+
+	return outcome
 }
 
 // attributedErr composes the D4 failure message: tool as subject, both the
 // run-start and the post-depends causes, and the most likely spec fix.
 func (d *deferredTool) attributedErr(retryErr error) error {
-	return fmt.Errorf("tool %q (defined in %s) could not be resolved: at run start: %v; retried after its declared depends completed: %v; a task generating the tool's sources may be missing from the tool's depends",
+	return fmt.Errorf("tool %q (defined in %s) could not be resolved: at run start: %v; retried after its declared depends completed: %w; a task generating the tool's sources may be missing from the tool's depends",
 		d.entry.Name, providerDefinitionPath(d.entry.SpecDir), d.planErr, retryErr)
 }

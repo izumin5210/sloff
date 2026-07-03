@@ -124,6 +124,8 @@ run 冒頭の一括解決 ( `resolveContribs`) は維持する。per-tool の解
 - **`depends` を宣言していない tool**: 従来どおり run 全体を fatal ( 挙動変化なし。typo・環境不備は即死のまま)
 - **`depends` を宣言した tool**: WARN を出して **deferred** 状態に降格し、run を続行する。当該 tool の Inputs / Versions の contribution は暫定的に空として collectTasks を通す
 
+ただし、`context.Canceled` / `context.DeadlineExceeded` による失敗は **宣言の有無によらず demote しない**。context キャンセルは「tool のソースがまだ生成されていない」ことと無関係であり、run は既にシャットダウン中である。demote して retry させても同じ context error で再失敗するだけなので、従来どおり即時失敗として伝播させる。
+
 解決成功時は deferred への降格が発生せず、**現行コードパスと完全同一**である ( warm-path 無劣化)。
 
 ### D4. 遅延解決の実行点と失敗の帰属

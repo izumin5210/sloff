@@ -68,8 +68,11 @@ func (r *Runner) injectToolDepends(registry *spec.ToolRegistry) error {
 			for _, toolName := range c.Tools {
 				entry, ok := registry.Lookup(toolName)
 				if !ok {
-					// ValidateToolReferences ran first; unreachable.
-					continue
+					// ValidateToolReferences ran first; this path is unreachable in
+					// practice. Fail loudly rather than silently dropping the tool's
+					// injected edges — a silent continue would violate the ordering
+					// guarantee that makes ADR-0019 D2 correct.
+					return fmt.Errorf("runner: referenced tool %q missing from registry; ValidateToolReferences should have caught this", toolName)
 				}
 				toolDir := filepath.ToSlash(entry.SpecDir)
 				for i, d := range entry.Declared.Depends {

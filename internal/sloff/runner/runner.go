@@ -543,12 +543,107 @@ func (r *Runner) collectTasksTraced(ctx context.Context, inputsByTool map[string
 // depgraphBuildTraced wraps depgraph.Build with a span. depgraph.Build is a
 // pure function that doesn't take ctx; the wrapper exists only so the phase
 // shows up in the trace tree alongside the others.
+//
+// When Build fails with a *depgraph.CycleError, any injected edge (from
+// r.injectedDepends) whose consumer and producer are both in the cycle task
+// set is annotated in the error so the user can find the closing edge that
+// does not appear in any sloff.yml (ADR-0019 D2).
 func (r *Runner) depgraphBuildTraced(ctx context.Context, tasks []depgraph.Task) (ordered []depgraph.Task, err error) {
 	_, span := r.tracer.Start(ctx, "runner.depgraph.build", trace.WithAttributes(
 		attribute.Int("sloff.task.count", len(tasks)),
 	))
 	defer endSpan(span, &err)
-	return depgraph.Build(tasks)
+	ordered, err = depgraph.Build(tasks)
+	if err != nil {
+		err = r.annotateCycleError(err)
+	}
+	return ordered, err
+}
+
+// annotateCycleError appends a note for every injected edge whose consumer
+// and producer are both in the cycle task set (ADR-0019 D2). The note names
+// the declaring tool so the user can trace which tool's depends closed the
+// cycle. For non-cycle errors or when no injected edge overlaps the cycle,
+// the original error is returned unchanged.
+func (r *Runner) annotateCycleError(err error) error {
+	var cyc *depgraph.CycleError
+	if !errors.As(err, &cyc) || len(r.injectedDepends) == 0 {
+		return err
+	}
+	cycleSet := make(map[depgraph.TaskRef]struct{}, len(cyc.Tasks))
+	for _, ref := range cyc.Tasks {
+		cycleSet[ref] = struct{}{}
+	}
+	// Walk the full injectedDepends to find edges entirely within the cycle.
+	// The tool name is not stored in injectedDepends (it only needs to suppress
+	// warnings); we recover it by scanning the spec set, which is cheap here.
+	toolOwner := r.injectedEdgeToolOwners()
+	var notes []string
+	// Collect in a deterministic order: sort consumers then producers.
+	consumers := make([]depgraph.TaskRef, 0, len(r.injectedDepends))
+	for consumer := range r.injectedDepends {
+		consumers = append(consumers, consumer)
+	}
+	sort.Slice(consumers, func(i, j int) bool { return consumers[i].Label() < consumers[j].Label() })
+	for _, consumer := range consumers {
+		if _, inCycle := cycleSet[consumer]; !inCycle {
+			continue
+		}
+		producers := make([]depgraph.TaskRef, 0, len(r.injectedDepends[consumer]))
+		for producer := range r.injectedDepends[consumer] {
+			producers = append(producers, producer)
+		}
+		sort.Slice(producers, func(i, j int) bool { return producers[i].Label() < producers[j].Label() })
+		for _, producer := range producers {
+			if _, inCycle := cycleSet[producer]; !inCycle {
+				continue
+			}
+			owner := toolOwner[depgraph.TaskRef{SpecRelpath: consumer.SpecRelpath, Name: consumer.Name}][producer]
+			note := fmt.Sprintf("note: depends edge %s -> %s was injected from tool %q (%s)",
+				consumer.Label(), producer.Label(), owner.toolName, providerDefinitionPath(owner.specDir))
+			notes = append(notes, note)
+		}
+	}
+	if len(notes) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, strings.Join(notes, "\n"))
+}
+
+// injectedEdgeToolOwner is the (toolName, specDir) that declared a given
+// injected edge. Keyed by (consumer TaskRef) → (producer TaskRef) → (toolName, specDir).
+type injectedEdgeOwner struct {
+	toolName string
+	specDir  string
+}
+
+// injectedEdgeToolOwners builds a reverse-lookup from injected edge to the
+// tool that declared it, by scanning the spec set. Called only when a cycle
+// error needs annotation — never on the hot path.
+func (r *Runner) injectedEdgeToolOwners() map[depgraph.TaskRef]map[depgraph.TaskRef]injectedEdgeOwner {
+	out := map[depgraph.TaskRef]map[depgraph.TaskRef]injectedEdgeOwner{}
+	for _, sp := range r.opts.Specs {
+		toolDir := filepath.ToSlash(sp.Dir)
+		for toolName, tool := range sp.File.Tools {
+			for _, d := range tool.Depends {
+				producerRef := depgraph.TaskRef{
+					SpecRelpath: path.Join(toolDir, d.Spec),
+					Name:        d.Task,
+				}
+				// Find all consumers in injectedDepends that have this producer.
+				for consumer, producers := range r.injectedDepends {
+					if _, ok := producers[producerRef]; !ok {
+						continue
+					}
+					if out[consumer] == nil {
+						out[consumer] = map[depgraph.TaskRef]injectedEdgeOwner{}
+					}
+					out[consumer][producerRef] = injectedEdgeOwner{toolName: toolName, specDir: sp.Dir}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // findMissingDependenciesTraced wraps depgraph.FindMissingDependencies with a

@@ -1,0 +1,22 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  gen-tool:
+    exec: ["sh", "-c", "echo v2.0.0"]
+    depends:
+      - task: producer
+
+commands:
+  - name: producer
+    cmd: ["sh", "-c", "cp input.txt producer-out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["producer-out.txt"]
+    tools: [versioner]
+    depends:
+      - task: consumer
+  - name: consumer
+    cmd: ["sh", "-c", "cp producer-out.txt output.txt"]
+    inputs: ["producer-out.txt"]
+    outputs: ["output.txt"]
+    tools: [gen-tool]

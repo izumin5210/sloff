@@ -279,3 +279,33 @@ commands:
 		t.Errorf("injected edge missing from cold Plan (-want +got):\n%s", diff)
 	}
 }
+
+// TestRunner_ToolDepends_InjectedEdgeNoUnobservedWarn covers ADR-0019 D2:
+// injected edges must not trigger the "none of the files it produced match"
+// warning. A script tool with zero input contributions is the clearest case:
+// the producer's outputs (the tool binary) never appear in the consumer's
+// inputs, but the edge exists for scheduling, not data-flow, so warning would
+// be wrong-by-construction. Both cold and warm runs must emit no warning.
+func TestRunner_ToolDepends_InjectedEdgeNoUnobservedWarn(t *testing.T) {
+	requireSh(t)
+	runE2E(
+		t, "zz-verify-script-tooldep",
+		runStep(expectNoWarns()),
+		runStep(expectNoWarns(), expectNoInfoContaining("RUN ")),
+	)
+}
+
+// TestRunner_ToolDepends_IndirectCycleError covers ADR-0019 D2: when an
+// injected edge forms an indirect cycle (tool X depends on P; P depends on C;
+// C uses tool X), the cycle error must mention both "cycle detected" and a
+// note attributing the closing edge to the tool.
+func TestRunner_ToolDepends_IndirectCycleError(t *testing.T) {
+	requireSh(t)
+	runE2E(
+		t, "tooldepends-indirect-cycle-error",
+		runStep(
+			expectError("cycle detected"),
+			expectError(`was injected from tool "gen-tool"`),
+		),
+	)
+}

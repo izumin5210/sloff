@@ -22,6 +22,11 @@ func clearOTelEnv(t *testing.T) {
 		t.Setenv(sloffKey, "")
 		os.Unsetenv(sloffKey)
 	}
+	// Isolate the debug-timing gate too: a developer shell with SLOFF_DEBUG_TIMING
+	// set would otherwise flip setupTracing off its disabled/noop path and break
+	// the zero-cost assertions.
+	t.Setenv(debugTimingEnv, "")
+	os.Unsetenv(debugTimingEnv)
 }
 
 func TestEffectiveEnv(t *testing.T) {

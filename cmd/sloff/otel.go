@@ -19,6 +19,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/izumin5210/sloff/internal/sloff/timing"
 )
 
 // cmdTracerName is the InstrumentationScope name for spans emitted by cmd/sloff
@@ -342,24 +344,37 @@ func grpcSpanExporterOpts() []otlptracegrpc.Option {
 //
 // The returned shutdown is always non-nil and safe to call once.
 func setupTracing(ctx context.Context) (trace.TracerProvider, func(context.Context) error, error) {
-	if !envOTelEnabled() {
-		// Both the explicit-disable and passive-disable paths land here.
-		// Return a noop sloff-local provider; tracers derived from it emit
-		// nothing, so sloff is silent regardless of any host TracerProvider.
-		return noop.NewTracerProvider(), func(context.Context) error { return nil }, nil
+	noopShutdown := func(context.Context) error { return nil }
+
+	// SLOFF_DEBUG_TIMING renders the runner's ADR-0018 spans as a local stderr
+	// summary; it needs no exporter, so it can enable a real TracerProvider on
+	// its own even when no OTLP/console export is configured.
+	timingEnabled, err := debugTimingEnabled()
+	if err != nil {
+		return nil, nil, err
 	}
+	exportEnabled := envOTelEnabled()
 
 	// Spec compliance: OTEL_TRACES_EXPORTER values sloff doesn't implement
 	// (zipkin, jaeger, comma-separated multi-export, ...) MUST warn and fall
-	// back to noop, not fail. Otherwise a shell that exports a non-OTLP
-	// exporter for other tools would brick `sloff run` / `graph` for the same
-	// user. SLOFF_OTEL_TRACES_EXPORTER is the escape hatch when the user
-	// wants sloff to export OTLP regardless of the shell-wide value.
-	if exp := effectiveEnv("OTEL_TRACES_EXPORTER"); !sloffSupportsTracesExporter(exp) {
-		fmt.Fprintf(os.Stderr,
-			"sloff: OTEL_TRACES_EXPORTER=%q is not implemented by sloff (supported: otlp, console); sloff tracing disabled. Set SLOFF_OTEL_TRACES_EXPORTER=otlp (or =console) to override.\n",
-			exp)
-		return noop.NewTracerProvider(), func(context.Context) error { return nil }, nil
+	// back to noop *export*, not fail — a shell that exports a non-OTLP exporter
+	// for other tools must not brick `sloff run` / `graph`. This disables only
+	// export; a requested timing summary still renders (it uses no exporter).
+	// SLOFF_OTEL_TRACES_EXPORTER is the escape hatch to force OTLP regardless.
+	if exportEnabled {
+		if exp := effectiveEnv("OTEL_TRACES_EXPORTER"); !sloffSupportsTracesExporter(exp) {
+			fmt.Fprintf(os.Stderr,
+				"sloff: OTEL_TRACES_EXPORTER=%q is not implemented by sloff (supported: otlp, console); sloff tracing disabled. Set SLOFF_OTEL_TRACES_EXPORTER=otlp (or =console) to override.\n",
+				exp)
+			exportEnabled = false
+		}
+	}
+
+	if !exportEnabled && !timingEnabled {
+		// Both the explicit-disable and passive-disable paths land here.
+		// Return a noop sloff-local provider; tracers derived from it emit
+		// nothing, so sloff is silent regardless of any host TracerProvider.
+		return noop.NewTracerProvider(), noopShutdown, nil
 	}
 
 	res, err := buildResource(ctx)
@@ -370,14 +385,20 @@ func setupTracing(ctx context.Context) (trace.TracerProvider, func(context.Conte
 		return nil, nil, fmt.Errorf("otel: build resource: %w", err)
 	}
 
-	exp, err := buildSpanExporter(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("otel: build span exporter: %w", err)
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
+	if exportEnabled {
+		exp, err := buildSpanExporter(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("otel: build span exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exp))
 	}
-
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithBatcher(exp),
-	)
+	if timingEnabled {
+		// Synchronous span processor: it accumulates finished spans and prints
+		// the phase/task wall-time summary to stderr from its Shutdown, which
+		// tp.Shutdown invokes after the root span has ended.
+		opts = append(opts, sdktrace.WithSpanProcessor(timing.NewCollector(os.Stderr)))
+	}
+	tp := sdktrace.NewTracerProvider(opts...)
 	return tp, tp.Shutdown, nil
 }

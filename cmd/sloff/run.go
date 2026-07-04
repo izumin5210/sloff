@@ -70,6 +70,27 @@ func fileHashCacheDisabled() (bool, error) {
 	return v, nil
 }
 
+const debugTimingEnv = "SLOFF_DEBUG_TIMING"
+
+// debugTimingEnabled interprets SLOFF_DEBUG_TIMING as a boolean, with the same
+// strict parsing as allowStaleDepsEnabled (unset/empty = off, a typo fails
+// loudly, "0"/"false" behave like unset). When on, setupTracing attaches a
+// span-collecting processor that prints a phase/task wall-time summary to stderr
+// at run end. It renders the ADR-0018 spans the runner already emits, so it
+// needs no OTLP collector; off, the runner keeps its noop TracerProvider and
+// records nothing. Profiling knob only — it never changes SKIP/RUN decisions.
+func debugTimingEnabled() (bool, error) {
+	raw, ok := os.LookupEnv(debugTimingEnv)
+	if !ok || raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a valid boolean: use 1/true to print the run-end timing summary, 0/false (or leave it unset) to disable", debugTimingEnv, raw)
+	}
+	return v, nil
+}
+
 func newRunCmd() *cobra.Command {
 	var (
 		root    string

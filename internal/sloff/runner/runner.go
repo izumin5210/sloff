@@ -495,10 +495,19 @@ func (r *Runner) prefetchFingerprints(ctx context.Context, ordered []depgraph.Ta
 		return nil
 	}
 
-	loaded, err := r.opts.Storage.LoadMany(ctx, asked)
-	if err != nil {
-		return fmt.Errorf("prefetch: %w", err)
+	// Wrap the single batch round-trip in its own span so SLOFF_DEBUG_TIMING can
+	// split the prefetch phase into optimistic-key compute (local hashing) vs
+	// LoadMany (backend RTT) — the two have entirely different remedies.
+	loadCtx, loadSpan := r.tracer.Start(ctx, "runner.fingerprint.prefetch.load", trace.WithAttributes(
+		attribute.Int("sloff.fingerprint.asked", len(asked)),
+	))
+	loaded, loadErr := r.opts.Storage.LoadMany(loadCtx, asked)
+	if loadErr != nil {
+		endSpan(loadSpan, &loadErr)
+		return fmt.Errorf("prefetch: %w", loadErr)
 	}
+	loadSpan.SetAttributes(attribute.Int("sloff.fingerprint.loaded", len(loaded)))
+	loadSpan.End()
 	r.prefetchedMu.Lock()
 	r.prefetched = loaded
 	r.prefetchedKeys = make(map[fingerprint.Key]struct{}, len(asked))
@@ -1833,9 +1842,17 @@ func (r *Runner) runTask(ctx context.Context, t depgraph.Task) (err error) {
 	}
 	versions := info.versions
 
-	filesHash, err := r.fileCache.Files(r.opts.RepoRoot, info.inputPaths)
-	if err != nil {
-		return fmt.Errorf("%s: hash inputs: %w", t.Name, err)
+	// Wrap the exec-time input re-hash in its own span: it repeats the digest
+	// work prefetch already did (FileCache serves unchanged files, but the stat +
+	// fold still runs per task), so SLOFF_DEBUG_TIMING can size exactly what a
+	// "skip re-verify when inputs are untouched" optimisation would save.
+	_, hashSpan := r.tracer.Start(ctx, "runner.task.hash_inputs", trace.WithAttributes(
+		attribute.Int("sloff.input.file_count", len(info.inputPaths)),
+	))
+	filesHash, hashErr := r.fileCache.Files(r.opts.RepoRoot, info.inputPaths)
+	endSpan(hashSpan, &hashErr)
+	if hashErr != nil {
+		return fmt.Errorf("%s: hash inputs: %w", t.Name, hashErr)
 	}
 	cmdHash := hash.Cmd(info.command.Cmd)
 	resolvedVersionsHash := hash.ResolvedVersions(versionStrings(versions))

@@ -609,6 +609,7 @@ commands:
 - `depends` 要素は `{spec, task}` の構造体。 `spec` は spec dir 相対 ( inputs / outputs glob や tool の path 系フィールドと同じ基準、 ADR-0008 D3)、 省略時は同一 sloff.yml 内の task を指す。 文字列 shorthand は提供しない
 - load 時 validation: 参照先の spec / task が存在しない / 自己参照 / 同一エッジの重複宣言 / `spec` の正規化結果が repoRoot を抜ける、 はすべて error
 - `depgraph.Build` は **declared エッジのみ** で DAG を構築し、 topological order で実行順を決定する。 循環依存は構築時 error
+- 独立 task 間の tie-break は **downstream 高さ ( そのタスクに推移的に依存する task の最長 chain 長) 降順 → (SpecRelpath, Name) 昇順** ( [ADR-0020](../adr/0020-scheduling-priority-downstream-height.md))。 slot 制限下で深い依存 chain が幅広い shallow task に飢餓するのを防ぐ scheduling 優先度であり、 グラフ構造のみから決まる決定的な派生量で、 fingerprint には不参加
 - 実行順序は spec のみから決まり、 ファイルツリーの状態 ( clean / 生成済み) に依存しない
 
 ##### depends パターン ( glob)

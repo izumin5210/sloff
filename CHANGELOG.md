@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.7](https://github.com/izumin5210/sloff/compare/v0.0.6...v0.0.7) - 2026-07-04
+- feat(timing): off-by-default SLOFF_DEBUG_TIMING run summary by @izumin5210 in https://github.com/izumin5210/sloff/pull/63
+- perf(depgraph): schedule deep chains first via downstream height (ADR-0020) by @izumin5210 in https://github.com/izumin5210/sloff/pull/64
+
 ## [v0.0.6](https://github.com/izumin5210/sloff/compare/v0.0.5...v0.0.6) - 2026-07-03
 - feat: first-class barrier tasks (ADR-0017) by @izumin5210 in https://github.com/izumin5210/sloff/pull/59
 - docs: repay documentation debt (README sync + ADR status convention) by @izumin5210 in https://github.com/izumin5210/sloff/pull/61

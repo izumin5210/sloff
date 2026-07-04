@@ -113,14 +113,27 @@ func Build(tasks []Task) ([]Task, error) {
 		}
 	}
 
-	// Kahn's algorithm with deterministic tie-breaking.
+	// Scheduling priority (ADR-0020): among tasks that are ready at the same
+	// time, emit the one that gates the longest chain of dependents first, so a
+	// deep chain isn't starved behind a wide fan of shallow tasks in the same
+	// ready wave. consumers[j] is the reverse of the dependency edges (the tasks
+	// that depend on j); downstreamHeights folds it into a per-task height.
+	consumers := make([][]idx, len(tasks))
+	for i := range edges {
+		for j := range edges[i] {
+			consumers[j] = append(consumers[j], i)
+		}
+	}
+	heights := downstreamHeights(consumers)
+
+	// Kahn's algorithm with deterministic, priority-aware tie-breaking.
 	ready := make([]idx, 0, len(tasks))
 	for i := range tasks {
 		if inDegree[i] == 0 {
 			ready = append(ready, i)
 		}
 	}
-	sortByKey(ready, tasks)
+	sortByPriority(ready, tasks, heights)
 
 	out := make([]Task, 0, len(tasks))
 	for len(ready) > 0 {
@@ -141,9 +154,8 @@ func Build(tasks []Task) ([]Task, error) {
 			}
 		}
 		if len(unblocked) > 0 {
-			sortByKey(unblocked, tasks)
 			ready = append(ready, unblocked...)
-			sortByKey(ready, tasks)
+			sortByPriority(ready, tasks, heights)
 		}
 	}
 
@@ -170,14 +182,69 @@ func (e *CycleError) Error() string {
 	return fmt.Sprintf("cycle detected involving: %s", strings.Join(labels, ", "))
 }
 
-func sortByKey(indices []int, tasks []Task) {
+// sortByPriority orders ready tasks by scheduling priority (ADR-0020): higher
+// downstream height first — emit the task that gates the longest chain of
+// dependents before shallower siblings that are ready in the same wave — and
+// break equal-height ties by the stable (SpecRelpath, Name) key so the emitted
+// order stays deterministic for a given task set.
+func sortByPriority(indices []int, tasks []Task, heights []int) {
 	sort.SliceStable(indices, func(i, j int) bool {
-		a, b := tasks[indices[i]].Ref(), tasks[indices[j]].Ref()
+		ii, jj := indices[i], indices[j]
+		if heights[ii] != heights[jj] {
+			return heights[ii] > heights[jj]
+		}
+		a, b := tasks[ii].Ref(), tasks[jj].Ref()
 		if a.SpecRelpath != b.SpecRelpath {
 			return a.SpecRelpath < b.SpecRelpath
 		}
 		return a.Name < b.Name
 	})
+}
+
+// downstreamHeights returns, for each task, the length of the longest chain of
+// tasks that transitively depend on it — its "downstream height". A sink
+// (nothing depends on it) has height 1; every dependent adds one. consumers[j]
+// is the reverse of the dependency edges: the tasks that declared a dependency
+// on j. The height biases scheduling priority only; it never changes which
+// edges exist.
+//
+// The walk is cycle-safe: a node already on the recursion stack contributes 0
+// instead of recursing forever, so a cyclic task set (which Build rejects
+// immediately after) still yields finite, deterministic heights rather than
+// hanging. Depth is bounded by the longest dependency chain, far below any
+// stack limit for real graphs.
+func downstreamHeights(consumers [][]int) []int {
+	const (
+		unvisited int8 = iota
+		onStack
+		resolved
+	)
+	n := len(consumers)
+	height := make([]int, n)
+	state := make([]int8, n)
+	var visit func(i int) int
+	visit = func(i int) int {
+		switch state[i] {
+		case resolved:
+			return height[i]
+		case onStack:
+			return 0 // back-edge; Build reports the cycle right after
+		}
+		state[i] = onStack
+		best := 0
+		for _, c := range consumers[i] {
+			if h := visit(c); h > best {
+				best = h
+			}
+		}
+		height[i] = best + 1
+		state[i] = resolved
+		return height[i]
+	}
+	for i := range n {
+		visit(i)
+	}
+	return height
 }
 
 func conflictError(tasks []Task, conflicts map[string][]int) error {

@@ -199,6 +199,125 @@ func TestBuild_UnknownDependencyErrors(t *testing.T) {
 	}
 }
 
+// TestBuild_PrioritisesDeepChainOverShallowSibling locks ADR-0020: when two
+// independent tasks are ready in the same wave, the one that gates a longer
+// chain of dependents is emitted first — even when it sorts LATER by
+// (SpecRelpath, Name) — so a slot-limited runner starts the long pole early
+// instead of starving it behind the shallow sibling.
+func TestBuild_PrioritisesDeepChainOverShallowSibling(t *testing.T) {
+	tasks := []depgraph.Task{
+		// "a-shallow" is a sink (height 1) and sorts FIRST lexically.
+		taskD("", "a-shallow", []string{"seed"}, []string{"shallow.out"}),
+		// "z-es" gates z-es -> z-plugins -> z-node (height 3) and sorts LAST.
+		taskD("", "z-es", []string{"seed"}, []string{"es.out"}),
+		taskD("", "z-plugins", []string{"es.out"}, []string{"plugins.out"}, ref("", "z-es")),
+		taskD("", "z-node", []string{"plugins.out"}, []string{"node.out"}, ref("", "z-plugins")),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// z-es (height 3) is emitted before a-shallow (height 1) despite sorting
+	// later; the chain then drains in dependency order.
+	want := []string{"z-es", "z-plugins", "a-shallow", "z-node"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestBuild_WideFanDoesNotStarveDeepChain models the real regression ADR-0020
+// targets: a wide fan of shallow tasks (the buf-pothos-* wave, each a direct
+// input to `generate`) alongside the start of a deep chain
+// (buf-protoc-plugins-es -> build-protoc-plugins -> buf-custom-node -> generate).
+// The chain start must precede every shallow sibling even though it sorts last
+// lexically, so the runner schedules the long pole first.
+func TestBuild_WideFanDoesNotStarveDeepChain(t *testing.T) {
+	shallow := []string{"aaa", "bbb", "ccc", "ddd", "eee"}
+	var tasks []depgraph.Task
+	sinkDeps := make([]depgraph.TaskRef, 0, len(shallow)+1)
+	for _, s := range shallow {
+		tasks = append(tasks, taskD("", s, []string{"seed"}, []string{s + ".out"}))
+		sinkDeps = append(sinkDeps, ref("", s))
+	}
+	tasks = append(
+		tasks,
+		taskD("", "zes", []string{"seed"}, []string{"zes.out"}),
+		taskD("", "zplugins", []string{"zes.out"}, []string{"zplugins.out"}, ref("", "zes")),
+		taskD("", "znode", []string{"zplugins.out"}, []string{"znode.out"}, ref("", "zplugins")),
+	)
+	sinkDeps = append(sinkDeps, ref("", "znode"))
+	tasks = append(tasks, taskD("", "sink", []string{"znode.out"}, []string{"sink.out"}, sinkDeps...))
+
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := names(got)
+	pos := map[string]int{}
+	for i, n := range order {
+		pos[n] = i
+	}
+	for _, s := range shallow {
+		if pos["zes"] > pos[s] {
+			t.Errorf("deep-chain start zes (pos %d) should precede shallow %q (pos %d)\norder: %v",
+				pos["zes"], s, pos[s], order)
+		}
+	}
+	// Topological sanity: producers still precede consumers.
+	for _, pair := range [][2]string{{"zes", "zplugins"}, {"zplugins", "znode"}, {"znode", "sink"}} {
+		if pos[pair[0]] > pos[pair[1]] {
+			t.Errorf("%s must precede %s\norder: %v", pair[0], pair[1], order)
+		}
+	}
+}
+
+// TestBuild_EqualHeightFallsBackToKeyOrder locks that equal-height ready tasks
+// keep the deterministic (SpecRelpath, Name) order — the priority tie-break must
+// not perturb the stable order the old scheduler guaranteed.
+func TestBuild_EqualHeightFallsBackToKeyOrder(t *testing.T) {
+	// All four are sinks (height 1); order must be pure (spec, name).
+	tasks := []depgraph.Task{
+		task("z", "t", []string{"a"}, []string{"z.out"}),
+		task("a", "t", []string{"b"}, []string{"a.out"}),
+		task("m", "b", []string{"c"}, []string{"m2.out"}),
+		task("m", "a", []string{"d"}, []string{"m1.out"}),
+	}
+	got, err := depgraph.Build(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a:t", "m:a", "m:b", "z:t"}
+	if diff := cmp.Diff(want, names(got)); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestBuild_PriorityDeterministic guards R2 (deterministic): the same task set
+// yields byte-identical order across repeated builds regardless of the input
+// slice order the priority sort receives.
+func TestBuild_PriorityDeterministic(t *testing.T) {
+	build := func() []string {
+		tasks := []depgraph.Task{
+			taskD("", "sink", []string{"n.out"}, []string{"s.out"}, ref("", "node"), ref("", "wide1"), ref("", "wide2")),
+			taskD("", "wide2", []string{"seed"}, []string{"w2.out"}),
+			taskD("", "wide1", []string{"seed"}, []string{"w1.out"}),
+			taskD("", "node", []string{"e.out"}, []string{"n.out"}, ref("", "edge")),
+			taskD("", "edge", []string{"seed"}, []string{"e.out"}),
+		}
+		got, err := depgraph.Build(tasks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return names(got)
+	}
+	first := build()
+	for i := range 5 {
+		if diff := cmp.Diff(first, build()); diff != "" {
+			t.Fatalf("non-deterministic order on run %d (-first +got):\n%s", i, diff)
+		}
+	}
+}
+
 func TestBuild_DuplicateOutputProducersErrors(t *testing.T) {
 	tasks := []depgraph.Task{
 		task("svcA", "first", []string{"a.in"}, []string{"shared.out", "a.out"}),

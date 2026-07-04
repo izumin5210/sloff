@@ -241,7 +241,7 @@ func downstreamHeights(consumers [][]int) []int {
 		state[i] = resolved
 		return height[i]
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		visit(i)
 	}
 	return height

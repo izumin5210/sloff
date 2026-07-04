@@ -311,7 +311,7 @@ func TestBuild_PriorityDeterministic(t *testing.T) {
 		return names(got)
 	}
 	first := build()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if diff := cmp.Diff(first, build()); diff != "" {
 			t.Fatalf("non-deterministic order on run %d (-first +got):\n%s", i, diff)
 		}

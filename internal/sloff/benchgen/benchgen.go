@@ -1,7 +1,7 @@
 // Package benchgen generates a synthetic sloff monorepo for macro-benchmarks.
 //
 // The generated shape mirrors the production pathology ADR-0020 was written
-// against (the "layerone" deployment): a wide fan of shallow independent
+// against (a ~500-task production deployment): a wide fan of shallow independent
 // codegen tasks, several deep dependency chains, and a single sink task that
 // depends on all of them. Generator commands are trivial (`cat` into the
 // output file) so a benchmark over the repo measures sloff's own

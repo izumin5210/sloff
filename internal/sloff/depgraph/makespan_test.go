@@ -211,8 +211,8 @@ func TestSimulateMakespan_AllSlotsHeldByWaitersPanics(t *testing.T) {
 	simulateMakespan(ordered, 1, unitDur)
 }
 
-// layeroneGraph reproduces the pathology shape ADR-0020 was written for (the
-// layerone monorepo, ~500 tasks): `wide` shallow codegen tasks (gen:buf-NNNN,
+// starvationGraph reproduces the pathology shape ADR-0020 was written for
+// (a ~500-task production monorepo): `wide` shallow codegen tasks (gen:buf-NNNN,
 // each a direct input of the sink → downstream height 2), `chains` deep
 // toolchain chains of length `depth` (toolchain:build-cCC-dD; the head has
 // height depth+1) whose tails also feed the sink, and one sink (gen:generate)
@@ -220,9 +220,9 @@ func TestSimulateMakespan_AllSlotsHeldByWaitersPanics(t *testing.T) {
 // lexicographically BEFORE every chain task ("gen" < "toolchain"), so a plain
 // (SpecRelpath, Name) tie-break admits the whole shallow fan first and starves
 // the chains — the ~12s starvation the ADR measured.
-func layeroneGraph(wide, chains, depth int) []depgraph.Task {
+func starvationGraph(wide, chains, depth int) []depgraph.Task {
 	if wide < 1 || chains < 1 || depth < 1 {
-		panic("layeroneGraph: wide, chains, and depth must be >= 1")
+		panic("starvationGraph: wide, chains, and depth must be >= 1")
 	}
 	tasks := make([]depgraph.Task, 0, wide+chains*depth+1)
 	sinkDeps := make([]depgraph.TaskRef, 0, wide+chains)
@@ -268,7 +268,7 @@ func layeroneGraph(wide, chains, depth int) []depgraph.Task {
 // lexicographicTopoOrder reproduces the pre-ADR-0020 emit order: Kahn's
 // algorithm with a plain (SpecRelpath, Name) ascending tie-break and no
 // height bias. It exists only as the baseline side of the makespan
-// comparison; production Build must beat it on the layerone shape.
+// comparison; production Build must beat it on the starvation shape.
 func lexicographicTopoOrder(tb testing.TB, tasks []depgraph.Task) []depgraph.Task {
 	tb.Helper()
 	idxOf := make(map[depgraph.TaskRef]int, len(tasks))
@@ -319,7 +319,7 @@ func lexicographicTopoOrder(tb testing.TB, tasks []depgraph.Task) []depgraph.Tas
 }
 
 // TestBuildOrderBeatsLexicographicMakespan is the ADR-0020 regression guard.
-// On the layerone-shaped graph, Build's downstream-height tie-break must
+// On the starvation-shaped graph, Build's downstream-height tie-break must
 // yield a strictly smaller simulated makespan than the pre-ADR-0020 plain
 // (SpecRelpath, Name) topological order: lexicographically the wide gen:buf-*
 // fan sorts before every toolchain:build-* chain task, so the old order fills
@@ -327,7 +327,7 @@ func lexicographicTopoOrder(tb testing.TB, tasks []depgraph.Task) []depgraph.Tas
 // if someone reverts the height tie-break in sortByPriority — that is its
 // purpose.
 func TestBuildOrderBeatsLexicographicMakespan(t *testing.T) {
-	tasks := layeroneGraph(400, 4, 5)
+	tasks := starvationGraph(400, 4, 5)
 	ordered, err := depgraph.Build(tasks)
 	if err != nil {
 		t.Fatal(err)
@@ -342,12 +342,12 @@ func TestBuildOrderBeatsLexicographicMakespan(t *testing.T) {
 	}
 }
 
-// TestBuildOrderDeterministicOnLayeroneGraph guards ADR-0020 D5 at scale: the
+// TestBuildOrderDeterministicOnStarvationGraph guards ADR-0020 D5 at scale: the
 // same task set must yield a byte-identical emit order across repeated Build
 // calls even on the ~500-task pathology graph.
-func TestBuildOrderDeterministicOnLayeroneGraph(t *testing.T) {
+func TestBuildOrderDeterministicOnStarvationGraph(t *testing.T) {
 	build := func() []string {
-		got, err := depgraph.Build(layeroneGraph(400, 4, 5))
+		got, err := depgraph.Build(starvationGraph(400, 4, 5))
 		if err != nil {
 			t.Fatal(err)
 		}

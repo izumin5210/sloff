@@ -17,11 +17,11 @@ const (
 )
 
 // BenchmarkBuild tracks the pure CPU/alloc cost of depgraph.Build (Kahn +
-// downstream-height priority) on the layerone-scale graph. Note this metric
+// downstream-height priority) on the production-scale graph. Note this metric
 // alone cannot detect an ADR-0020 scheduling regression — the tie-break costs
 // roughly the same either way; BenchmarkScheduleMakespan carries that signal.
 func BenchmarkBuild(b *testing.B) {
-	tasks := layeroneGraph(benchWide, benchChains, benchDepth)
+	tasks := starvationGraph(benchWide, benchChains, benchDepth)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -38,7 +38,7 @@ func BenchmarkBuild(b *testing.B) {
 // the height tie-break is dropped) the tick count jumps immediately and
 // reproducibly, independent of machine speed.
 func BenchmarkScheduleMakespan(b *testing.B) {
-	tasks := layeroneGraph(benchWide, benchChains, benchDepth)
+	tasks := starvationGraph(benchWide, benchChains, benchDepth)
 	var lastMakespan int
 	b.ReportAllocs()
 	b.ResetTimer()

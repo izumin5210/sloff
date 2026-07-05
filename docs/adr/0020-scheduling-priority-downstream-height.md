@@ -10,7 +10,7 @@ Accepted
 
 runner は [depgraph](../design/architecture.md) が返す topological order を `runTasks` の goroutine submit 順として使う。同時実行は `errgroup.SetLimit(NumCPU)` で slot 数に制限され、**predecessor 待ちの goroutine も slot を保持したまま待つ** ( slot は submit 順に付与される)。ゆえに **emit 順 ≒ 実行優先度** である。
 
-[ADR-0013](./0013-explicit-task-dependencies.md) D2 は実行順序を declared `depends` のみで決定し、独立 task 間の tie-break を `(SpecRelpath, Name)` の辞書順に固定した。順序の *決定性* はこれで担保されるが、tie-break が **依存構造の深さを一切見ない**ため、導入先 monorepo ( layerone、約 500 task) で深い依存 chain が飢餓する病理が顕在化した:
+[ADR-0013](./0013-explicit-task-dependencies.md) D2 は実行順序を declared `depends` のみで決定し、独立 task 間の tie-break を `(SpecRelpath, Name)` の辞書順に固定した。順序の *決定性* はこれで担保されるが、tie-break が **依存構造の深さを一切見ない**ため、導入先 monorepo ( 約 500 task) で深い依存 chain が飢餓する病理が顕在化した:
 
 - sink である `graphql-gateway:generate` は `buf-pothos-*` ( 42 個) / `buf-es-*` / `buf-custom-node` / `build-protoc-plugins` 等に依存する
 - critical path は `buf-protoc-plugins-es → build-protoc-plugins → buf-custom-node → generate` ( chain 長 4)

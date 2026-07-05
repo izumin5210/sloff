@@ -138,7 +138,8 @@ func TestGate_BenchmarkOnlyInHeadIsNotGated(t *testing.T) {
 	oldPath := writeBench(t, "old.txt", benchLines("BenchmarkX", 6, 1000, "")...)
 	newPath := writeBench(t, "new.txt", append(
 		benchLines("BenchmarkX", 6, 1000, ""),
-		benchLines("BenchmarkNew", 6, 500, "")...)...)
+		benchLines("BenchmarkNew", 6, 500, "")...,
+	)...)
 	res := mustGate(t, oldPath, newPath)
 	if res.failed() {
 		t.Error("gate failed because head has an extra benchmark")

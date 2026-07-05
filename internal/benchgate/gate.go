@@ -192,7 +192,8 @@ func compareOne(k metricKey, oldVals, newVals []float64, cfg gateConfig, res *ga
 			// anything and the gate would silently wave regressions through.
 			// That is a CI configuration error, not a pass.
 			res.errs = append(res.errs, fmt.Sprintf(
-				"%s: %d/%d samples, need >= %d per side for the timing gate", k, len(oldVals), len(newVals), cfg.minCount))
+				"%s: %d/%d samples, need >= %d per side for the timing gate", k, len(oldVals), len(newVals), cfg.minCount,
+			))
 			c.note = "insufficient samples"
 			return c
 		}

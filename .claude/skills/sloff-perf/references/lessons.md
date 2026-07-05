@@ -1,7 +1,8 @@
 # Benchmark suite — lessons & evidence log
 
-ベンチマークスイート構築時に確認した各最適化のメカニズム、 sensitivity 検証の
-生データ、 CI ランナーの分散キャリブレーション記録。 [ADR-0021](../adr/0021-benchmark-suite-and-regression-gate.md)
+sloff-perf skill に同梱される実測記録 ( evidence log)。 ベンチマークスイート構築時に
+確認した各最適化のメカニズム、 sensitivity 検証の生データ、 CI ランナーの分散
+キャリブレーション記録。 [ADR-0021](../../../../docs/adr/0021-benchmark-suite-and-regression-gate.md)
 D5 により、 ガードの追加・変更時はここに実測を追記する。 数値はすべて実測
 ( 捏造・推定は書かない)。
 

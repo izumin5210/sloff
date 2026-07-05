@@ -134,7 +134,8 @@ type gateConfig struct {
 }
 
 // msAbsFloor is the minimum absolute worsening (in ms) before a *-ms/op
-// phase metric can fail the gate. Runner-noise calibration (LESSONS.md)
+// phase metric can fail the gate. Runner-noise calibration (the sloff-perf
+// skill's references/lessons.md)
 // showed the small-denominator phases (resolve ≈ 1–7ms, fpload ≈ 5–15ms)
 // breach both the significance and the relative threshold on ~1ms drift and
 // timer quantisation alone; a millisecond-scale floor removes that class of

@@ -1,7 +1,9 @@
 # Benchmarks 運用ガイド
 
 方針・設計判断は [ADR-0021](../adr/0021-benchmark-suite-and-regression-gate.md)、
-感度実験とキャリブレーションの生データは [LESSONS.md](./LESSONS.md) を参照。
+感度実験とキャリブレーションの生データは
+[.claude/skills/sloff-perf/references/lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) を参照。
+perf 改善・ガード設計の作業手順は同 skill ( `.claude/skills/sloff-perf/SKILL.md`) にまとまっている。
 
 ## ローカルで回す
 
@@ -54,5 +56,5 @@ Option B 棄却理由を参照。
 
 - 新しいガードは「守りたい最適化を無効化したら数値 / テストが実際に動く」ことを
   実証してから入れる ( toggle があれば toggle、 なければ scratch branch で revert 実験)
-- 観測値 ( before / after の生数値) を [LESSONS.md](./LESSONS.md) に追記する
+- 観測値 ( before / after の生数値) を [lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) に追記する
 - 決定的メトリクスの期待値を変える場合は ADR-0021 D2 の表も更新する

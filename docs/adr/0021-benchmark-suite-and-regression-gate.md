@@ -34,7 +34,7 @@ sloff は「大規模 monorepo でコード生成を速く回す」こと自体�
 
 - [ADR-0014](./0014-persistent-file-content-hash-cache.md) / [ADR-0018](./0018-otel-tracing.md) / [ADR-0020](./0020-scheduling-priority-downstream-height.md)
 - perf PR 系譜: #17, #47, #49, #51, #52, #53, #54, #57, #64
-- 実測記録: [docs/benchmarks/LESSONS.md](../benchmarks/LESSONS.md) ( 感度実験の生データとキャリブレーション)
+- 実測記録: [.claude/skills/sloff-perf/references/lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) ( 感度実験の生データとキャリブレーション。 perf 作業の方法論 skill に同梱)
 - 運用ガイド: [docs/benchmarks/README.md](../benchmarks/README.md)
 
 ## Considered Options
@@ -102,13 +102,13 @@ bencher / codspeed 等の SaaS、 または self-hosted の専用ベンチラン
 - `ci.yml` に独立 job `bench` を追加。 merge-base を `git worktree` に展開し、 **macro 3 round × count 2、 micro 5 round × count 1 を base / head 交互に** 実行して 2 つの生ログを作る ( 交互実行が遅いドリフトを相殺する)
 - `internal/benchgate` ( `golang.org/x/perf` の benchfmt / benchmath) が単位でメトリクスを分類して判定する:
   - **時間系** ( `sec/op`, `*-ms/op`): Mann-Whitney U で p < 0.05 **かつ** median 悪化が +30% 超のときのみ fail。 二重条件により「有意だが微小」も「巨大だが不安定 ( 単発スパイク)」も素通しする ( R2)
-  - **`*-ms/op` の絶対デルタ床 ( 25ms)**: 分母の小さいフェーズ ( resolve ≈ 数 ms / fpload ≈ 十数 ms) は、 較正実験で「~1ms のドリフト + タイマ量子化だけで有意 かつ +30% 超」に到達し得ることが実証された ( [LESSONS.md](../benchmarks/LESSONS.md) の検証パス)。 そのため `*-ms/op` は悪化の絶対量が 25ms 以上のときのみ fail する ( resolve 4ms → 200ms のような実 blowup は依然捕まる)
+  - **`*-ms/op` の絶対デルタ床 ( 25ms)**: 分母の小さいフェーズ ( resolve ≈ 数 ms / fpload ≈ 十数 ms) は、 較正実験で「~1ms のドリフト + タイマ量子化だけで有意 かつ +30% 超」に到達し得ることが実証された ( [lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) の検証パス)。 そのため `*-ms/op` は悪化の絶対量が 25ms 以上のときのみ fail する ( resolve 4ms → 200ms のような実 blowup は依然捕まる)
   - **決定的** ( `makespan-ticks/op`, `batchloads/op`, `listloads/op`, `enumcalls/op`): 増加即 fail
   - **その他** ( `B/op`, `allocs/op`, 未知単位): 表示のみ
   - 片側にしか存在しないベンチマークは note 扱いで fail しない ( スイート導入 PR・ベンチ追加 PR が構造的に green)
   - 時間系で標本数が 4 未満なら **エラー** ( 検定が無力なまま silent pass するのは CI 設定ミス)
   - **fail-open 防止**: head 側に決定的ガード 4 単位と macro の `Run/scenario=*` が 1 つも見つからなければ **エラー**。 ベンチマークの rename / `-bench` regex のズレ / パッケージ移動でガードが消えても `go test` は green のままなので、 存在検査なしではゲート全体を無音で解除できてしまう ( ローカルの ad-hoc 比較は `-no-require` で外せる)
-- 閾値 +30% は初期値。 [LESSONS.md](../benchmarks/LESSONS.md) のキャリブレーション ( 同一コミット同士の比較で観測されたノイズ幅: ローカル / CI とも非有意 ±10% 以内、 有意到達は +7% 未満の微小系のみ) を上回るよう設定し、 CI 上での実測が溜まったら見直す
+- 閾値 +30% は初期値。 [lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) のキャリブレーション ( 同一コミット同士の比較で観測されたノイズ幅: ローカル / CI とも非有意 ±10% 以内、 有意到達は +7% 未満の微小系のみ) を上回るよう設定し、 CI 上での実測が溜まったら見直す
 
 ### D4. `-race` の分離
 
@@ -116,7 +116,7 @@ race detector は実行時間を大きく歪めるため、 **bench job は `-ra
 
 ### D5. 感度の実証を要求する
 
-ガードを追加・変更する PR は「最適化を無効化したらガードが動く」実験 ( 環境 toggle があれば toggle、 なければ scratch revert) の観測値を [LESSONS.md](../benchmarks/LESSONS.md) に記録する。 動かないガードは追加しない ( R1)。
+ガードを追加・変更する PR は「最適化を無効化したらガードが動く」実験 ( 環境 toggle があれば toggle、 なければ scratch revert) の観測値を [lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) に記録する。 動かないガードは追加しない ( R1)。
 
 ### D6. スコープ外: #51 ( DynamoDB credential warming)
 
@@ -143,5 +143,5 @@ race detector は実行時間を大きく歪めるため、 **bench job は `-ra
 
 ### 後続の更新
 
-1. CI 上のランナー分散を数回の再実行で実測し、 閾値の妥当性を [LESSONS.md](../benchmarks/LESSONS.md) に追記する
+1. CI 上のランナー分散を数回の再実行で実測し、 閾値の妥当性を [lessons.md](../../.claude/skills/sloff-perf/references/lessons.md) に追記する
 2. [architecture.md](../design/architecture.md) の関連リンクに本 ADR を追加する

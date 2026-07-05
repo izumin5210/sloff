@@ -109,12 +109,22 @@ macro ( 501 task / 30,060 file、 M4、 -benchtime=1x):
 
 ## CI runner variance calibration
 
-### ローカル ( M4) での事前キャリブレーション
+### ローカル ( M4) での事前キャリブレーション ( 2026-07-05)
 
-同一コミット ( HEAD vs HEAD の worktree) を CI と同じ手順 ( macro 3 round × count 2、
-micro 5 round × count 1、 交互実行) で比較し、 観測されたデルタ = ノイズ幅を記録する。
+同一コミット ( HEAD vs HEAD の worktree) を CI と同じ手順 ( macro 3 round × count 2 = 6 標本、
+micro 5 round × count 1 = 5 標本、 交互実行) で比較。 差分ゼロなので観測デルタ = ノイズ幅そのもの。
+結果: **benchgate exit 0 ( 偽陽性なし)**。
 
-( 実行中 — 完了後に追記)
+- `sec/op` の |delta| 最大: **+9.2%** ( FileCache/mode=cold、 p=0.421 で非有意)。
+  macro の sec/op は全シナリオ ±3.6% 以内
+- フェーズメトリクスの |delta| 最大: **±20% 前後** ( `fpload-ms/op` = 5〜16ms と分母が小さい系列。
+  いずれも p ≥ 0.16 で非有意)。 分母の大きい `prefetch-ms/op` / `tasksrun-ms/op` は ±6% 以内
+- 決定的メトリクス ( makespan / batchloads / listloads / enumcalls): **全て完全一致**
+- p < 0.05 に達した時間系メトリクスは 0 件
+
+初期閾値 +30% ( かつ有意性必須) は観測ノイズ幅 ( 非有意な ±20%) の上に立っており妥当。
+分母の小さいフェーズ ( fpload / resolve / collect / discover) は相対ノイズが大きいが、
+二重条件 ( 有意 かつ 閾値超) が防波堤になることを確認した。
 
 ### GitHub Actions 上の実測
 

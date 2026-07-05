@@ -26,6 +26,8 @@ func benchLines(name string, count int, nsPerOp float64, extra string) []string 
 	return lines
 }
 
+// gateCfg disables the required-suite presence check so unit tests can use
+// minimal fixtures; the presence check has its own dedicated tests.
 func gateCfg() gateConfig { return gateConfig{threshold: 0.30, alpha: 0.05, minCount: 4} }
 
 func mustGate(t *testing.T, oldPath, newPath string) *gateResult {
@@ -121,6 +123,88 @@ func TestGate_PhaseMetricGatedAsTiming(t *testing.T) {
 	c := findComparison(t, res, "prefetch-ms/op")
 	if c.kind != ruleTime || !c.regression {
 		t.Errorf("prefetch-ms/op comparison = %+v, want timing regression", c)
+	}
+}
+
+func TestGate_MsFloorSuppressesSmallPhaseDrift(t *testing.T) {
+	// Verification finding: small-denominator phases (resolve ≈ 4ms) can be
+	// significant AND beyond +30% on ~1ms of drift plus timer quantisation.
+	// The absolute floor must absorb exactly this class. Samples reproduce
+	// the experiment from the calibration: {3,3,3,4,4,4} -> {4,4,5,5,5,5}.
+	old := []string{}
+	for _, v := range []int{3, 3, 3, 4, 4, 4} {
+		old = append(old, fmt.Sprintf("BenchmarkRun/scenario=cold-4 \t 1\t 1000000000 ns/op\t %d.00 resolve-ms/op", v))
+	}
+	newer := []string{}
+	for _, v := range []int{4, 4, 5, 5, 5, 5} {
+		newer = append(newer, fmt.Sprintf("BenchmarkRun/scenario=cold-4 \t 1\t 1000000000 ns/op\t %d.00 resolve-ms/op", v))
+	}
+	oldPath := writeBench(t, "old.txt", old...)
+	newPath := writeBench(t, "new.txt", newer...)
+	res := mustGate(t, oldPath, newPath)
+	if res.failed() {
+		t.Errorf("gate failed on millisecond-scale phase drift below the absolute floor: %+v", res.comparisons)
+	}
+	// A real blowup of the same phase must still trip (covered by the
+	// 40->400ms case above: +360ms is far beyond the floor).
+}
+
+func TestGate_RequireSuiteFailsWhenGuardsVanish(t *testing.T) {
+	// The gate must fail closed: a renamed benchmark or a broken -bench
+	// regex removes guard metrics from the head file while `go test` stays
+	// green — that has to surface as an error, not a pass.
+	lines := benchLines("BenchmarkX", 6, 1000, "")
+	oldPath := writeBench(t, "old.txt", lines...)
+	newPath := writeBench(t, "new.txt", lines...)
+	res, err := runGate(oldPath, newPath, gateConfig{threshold: 0.30, alpha: 0.05, minCount: 4, requireSuite: true})
+	if err != nil {
+		t.Fatalf("runGate: %v", err)
+	}
+	if !res.failed() || len(res.errs) == 0 {
+		t.Errorf("gate passed although every suite guard metric is missing from head: errs=%v", res.errs)
+	}
+}
+
+func TestGate_RequireSuitePassesWhenGuardsPresent(t *testing.T) {
+	var lines []string
+	lines = append(lines, benchLines("BenchmarkScheduleMakespan", 6, 1000, "\t37.00 makespan-ticks/op")...)
+	lines = append(lines, benchLines("BenchmarkResolver/path=prewarmed", 6, 1000, "\t4.000 batchloads/op\t0 listloads/op")...)
+	lines = append(lines, benchLines("BenchmarkResolver/path=inputs", 6, 1000, "\t1.000 enumcalls/op")...)
+	lines = append(lines, benchLines("BenchmarkRun/scenario=full-hit/filehash=persist", 6, 2e8, "")...)
+	oldPath := writeBench(t, "old.txt", lines...)
+	newPath := writeBench(t, "new.txt", lines...)
+	res, err := runGate(oldPath, newPath, gateConfig{threshold: 0.30, alpha: 0.05, minCount: 4, requireSuite: true})
+	if err != nil {
+		t.Fatalf("runGate: %v", err)
+	}
+	if res.failed() {
+		t.Errorf("gate failed although all suite guard metrics are present: errs=%v", res.errs)
+	}
+}
+
+func TestGate_DistinguishesSameBenchmarkNameAcrossPackages(t *testing.T) {
+	// golocal and pnpmlocal both emit BenchmarkResolver; samples must not
+	// merge across packages.
+	oldContent := "goos: linux\ngoarch: amd64\npkg: example.test/a\n" +
+		strings.Join(benchLines("BenchmarkResolver", 6, 1000, ""), "\n") +
+		"\npkg: example.test/b\n" +
+		strings.Join(benchLines("BenchmarkResolver", 6, 9000, ""), "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "both.txt")
+	if err := os.WriteFile(path, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := readBenchFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkgs []string
+	for k := range m {
+		if k.unit == "sec/op" {
+			pkgs = append(pkgs, k.pkg)
+		}
+	}
+	if len(pkgs) != 2 {
+		t.Errorf("expected 2 distinct (pkg, name, sec/op) series, got %d (%v)", len(pkgs), pkgs)
 	}
 }
 

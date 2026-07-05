@@ -33,11 +33,15 @@ CI の `bench` job は PR head と merge-base を同一ランナーで交互実�
      ノイズではない。 スケジューリング / バッチングの決定的な挙動が変わっている。
      意図した設計変更なら、 該当ガード ( bench / テスト) の期待値と ADR-0021 を同じ PR で更新する。
      意図していなければ回帰なので直す
-   - **class=time**: 「統計的有意 かつ +30% 超」 の二重条件を満たしている。
-     まず再実行してみる価値はある ( ランナー異常のケース) が、 2 回連続で赤なら
-     ほぼ確実に実回帰。 `*-ms/op` のフェーズ内訳 ( `SLOFF_DEBUG_TIMING` と同じ軸)
-     でどのフェーズが悪化したかを特定する
-2. `error:` 行 ( insufficient samples) は CI 設定の問題。 round 数を減らした場合などに出る
+   - **class=time**: 「統計的有意 かつ +30% 超」 の二重条件を満たしている
+     ( `*-ms/op` はさらに絶対悪化 25ms 以上が必要)。 まず再実行してみる価値はある
+     ( ランナー異常のケース) が、 2 回連続で赤ならほぼ確実に実回帰。 `*-ms/op` の
+     フェーズ内訳 ( `SLOFF_DEBUG_TIMING` と同じ軸) でどのフェーズが悪化したかを特定する
+2. `error:` 行は 2 種類ある:
+   - `insufficient samples`: CI 設定の問題 ( round 数を減らした場合などに出る)
+   - `required metric ... missing from head` / `macro suite vanished`: ガードの
+     ベンチマークが head から消えている ( rename / `-bench` regex / パッケージ移動)。
+     ゲートは fail-open を防ぐため、 ガード消失を pass ではなくエラーにする
 
 ## rebaseline について
 

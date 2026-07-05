@@ -102,11 +102,13 @@ bencher / codspeed 等の SaaS、 または self-hosted の専用ベンチラン
 - `ci.yml` に独立 job `bench` を追加。 merge-base を `git worktree` に展開し、 **macro 3 round × count 2、 micro 5 round × count 1 を base / head 交互に** 実行して 2 つの生ログを作る ( 交互実行が遅いドリフトを相殺する)
 - `internal/benchgate` ( `golang.org/x/perf` の benchfmt / benchmath) が単位でメトリクスを分類して判定する:
   - **時間系** ( `sec/op`, `*-ms/op`): Mann-Whitney U で p < 0.05 **かつ** median 悪化が +30% 超のときのみ fail。 二重条件により「有意だが微小」も「巨大だが不安定 ( 単発スパイク)」も素通しする ( R2)
+  - **`*-ms/op` の絶対デルタ床 ( 25ms)**: 分母の小さいフェーズ ( resolve ≈ 数 ms / fpload ≈ 十数 ms) は、 較正実験で「~1ms のドリフト + タイマ量子化だけで有意 かつ +30% 超」に到達し得ることが実証された ( [LESSONS.md](../benchmarks/LESSONS.md) の検証パス)。 そのため `*-ms/op` は悪化の絶対量が 25ms 以上のときのみ fail する ( resolve 4ms → 200ms のような実 blowup は依然捕まる)
   - **決定的** ( `makespan-ticks/op`, `batchloads/op`, `listloads/op`, `enumcalls/op`): 増加即 fail
   - **その他** ( `B/op`, `allocs/op`, 未知単位): 表示のみ
   - 片側にしか存在しないベンチマークは note 扱いで fail しない ( スイート導入 PR・ベンチ追加 PR が構造的に green)
   - 時間系で標本数が 4 未満なら **エラー** ( 検定が無力なまま silent pass するのは CI 設定ミス)
-- 閾値 +30% は初期値。 [LESSONS.md](../benchmarks/LESSONS.md) のキャリブレーション ( 同一コミット同士の比較で観測されたノイズ幅) を上回るよう設定し、 CI 上での実測が溜まったら見直す
+  - **fail-open 防止**: head 側に決定的ガード 4 単位と macro の `Run/scenario=*` が 1 つも見つからなければ **エラー**。 ベンチマークの rename / `-bench` regex のズレ / パッケージ移動でガードが消えても `go test` は green のままなので、 存在検査なしではゲート全体を無音で解除できてしまう ( ローカルの ad-hoc 比較は `-no-require` で外せる)
+- 閾値 +30% は初期値。 [LESSONS.md](../benchmarks/LESSONS.md) のキャリブレーション ( 同一コミット同士の比較で観測されたノイズ幅: ローカル / CI とも非有意 ±10% 以内、 有意到達は +7% 未満の微小系のみ) を上回るよう設定し、 CI 上での実測が溜まったら見直す
 
 ### D4. `-race` の分離
 
@@ -130,7 +132,7 @@ race detector は実行時間を大きく歪めるため、 **bench job は `-ra
 
 ### 負の影響 / 注意点
 
-- bench job で PR の CI 時間が +15〜25 分程度増える ( base 側のビルド・実行を含む)。 重すぎると感じたら round 数を減らす前に、 検定の標本数要件 ( benchgate `-min-count`) を割らないこと
+- bench job で PR の CI 時間が増える ( 実測: GitHub hosted runner で **約 4 分**、 base 側のビルド・実行込み)。 round 数を減らす場合は検定の標本数要件 ( benchgate `-min-count`) を割らないこと
 - 時間系ゲートの閾値 +30% は「実 30% 級を確実に、 3% を追わない」という R2 側への意図的な倒し。 小さな漸進的劣化 ( 例: 毎 PR +5%) は積もるまで検出できない。 これは macro のフェーズメトリクスを人間が時々眺めることで補う
 - macro シナリオは `sync.OnceValues` の共有 fixture 上で順に走るため、 各シナリオの setup は前のシナリオが何を残しても状態を確立し直す規約 ( `converge`) を守る必要がある
 - 合成 repo は script tool のみ ( go-local / pnpm-local の実 resolve は macro に含まれない)。 それらは micro + 決定的ガード側で守られている

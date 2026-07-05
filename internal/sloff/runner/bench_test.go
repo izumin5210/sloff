@@ -14,7 +14,9 @@ import (
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/proto"
 
+	filecachev1 "github.com/izumin5210/sloff/internal/proto/sloff/filecache/v1"
 	"github.com/izumin5210/sloff/internal/sloff/benchgen"
 	"github.com/izumin5210/sloff/internal/sloff/fingerprint/local"
 	"github.com/izumin5210/sloff/internal/sloff/preflight"
@@ -181,7 +183,10 @@ func (c *phaseCollector) report(b *testing.B, discoverTotal time.Duration) {
 	b.Helper()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	perOp := func(d time.Duration) float64 { return float64(d.Milliseconds()) / float64(b.N) }
+	// Fractional milliseconds: integer truncation would quantise the small
+	// phases (resolve ≈ a few ms) and fabricate distribution splits the
+	// gate's significance test can mistake for real change.
+	perOp := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) / float64(b.N) }
 	b.ReportMetric(perOp(discoverTotal), "discover-ms/op")
 	for span, unit := range benchPhaseMetrics {
 		b.ReportMetric(perOp(c.totals[span]), unit)
@@ -217,24 +222,33 @@ func converge(b *testing.B, repo *benchgen.Repo) {
 	}
 }
 
-// warmPersistentStore seeds the ADR-0014 store after the racy-guard window
-// has passed, then sanity-checks the store actually holds entries — a
-// silently-empty store would turn the persist scenarios into memory-mode
-// measurements without failing anything.
+// warmPersistentStore seeds the ADR-0014 store and then verifies it covers
+// the whole source tree, so the persist scenarios cannot silently degrade
+// into memory-mode measurements. The settle sleep exists for the files the
+// preceding converge run just rewrote (outputs, a mutated chain head): the
+// racy guard drops sub-2s-old files at Save, and without settling those the
+// store would be missing a recent tail and the coverage assertion below
+// could not demand full coverage. The 30k generated sources are already old
+// by the time any persist scenario runs, so they never depend on the sleep.
 func warmPersistentStore(b *testing.B, repo *benchgen.Repo, path string) {
 	b.Helper()
 	time.Sleep(benchSettleDelay)
 	if _, err := benchRunOnce(repo, path, noopTracerProvider()); err != nil {
 		b.Fatalf("warm persistent store: %v", err)
 	}
-	st, err := os.Stat(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		b.Fatalf("persistent store missing after warm run: %v", err)
 	}
-	// 30k entries encode to megabytes; anything this small means the racy
-	// guard dropped the tree and the benchmark would lie.
-	if st.Size() < 100*1024 {
-		b.Fatalf("persistent store suspiciously small (%d bytes); racy-guard settle failed?", st.Size())
+	var cache filecachev1.Cache
+	if err := proto.Unmarshal(raw, &cache); err != nil {
+		b.Fatalf("persistent store unreadable: %v", err)
+	}
+	// Every generated source file must be covered; a partial store means the
+	// racy-guard settle failed and the benchmark would measure a mix of
+	// stat-hits and rehashes while claiming the pure warm path.
+	if got := len(cache.GetEntries()); got < repo.SourceFileCount {
+		b.Fatalf("persistent store has %d entries, want >= %d (all sources); racy-guard settle failed?", got, repo.SourceFileCount)
 	}
 }
 

@@ -126,6 +126,39 @@ micro 5 round × count 1 = 5 標本、 交互実行) で比較。 差分ゼロ�
 分母の小さいフェーズ ( fpload / resolve / collect / discover) は相対ノイズが大きいが、
 二重条件 ( 有意 かつ 閾値超) が防波堤になることを確認した。
 
-### GitHub Actions 上の実測
+### GitHub Actions 上の実測 ( 2026-07-05, PR #66 の一時 HEAD-vs-HEAD 計測)
 
-( PR の bench job を複数回実行して追記する)
+bench job を一時的に HEAD-vs-HEAD 比較に変えて ( 後で revert)、 hosted runner
+( ubuntu-latest, 4 vCPU) 上の実ノイズを計測。 ジョブ全体 **4m00s**、 gate exit 0。
+
+- `sec/op`: 全系列 |delta| ≤ **+2.2%** ( ローカル M4 の ±9.2% より安定)
+- 有意 ( p < 0.05) に達した系列は 4 件あったが、 いずれも微小デルタで閾値に遠く及ばず素通し:
+  `discover-ms` +6.6% ( p=0.013) / `discover-ms` +5.2% ( p=0.048) / `collect-ms` +5.3% ( p=0.045) /
+  `prefetch-ms` +1.9% ( p=0.032)。 **「有意性は容易に出る。 防波堤は振幅側」** を CI でも確認
+- 決定的メトリクス: 完全一致
+- 分母の小さい系列の量子化を観測: `fpload-ms` が cold で 1 → 0 ( -100%)。 整数 ms 丸めが
+  分布の偽分離を作る証拠で、 下記の検証パスの修正 ( 小数 ms 化 + 25ms 床) の根拠
+
+## 独立検証パス ( 2026-07-05, fresh-context エージェント)
+
+スイート構築者と独立のエージェントが敵対的に検証した結果と、 それによる修正:
+
+- **感度クレーム 3 件を独立再現**: ADR-0020 ( 37 → 52 ticks + テスト fail) / #49
+  ( enumcalls 1 → 13 + テスト fail) / ADR-0014 macro ( full-hit persist 184ms vs memory 662ms = 3.59x)
+- **P2 ( fail-open) 発見 → 修正**: head からベンチマークが消えても ( rename / regex ズレ)
+  gate が green のままになる穴。 → benchgate に必須メトリクス存在検査を追加
+  ( 決定的 4 単位 + macro の存在を要求、 欠落はエラー)
+- **P3 ( 小分母フェーズの偽陽性) 実証 → 修正**: resolve-ms {3,3,3,4,4,4} → {4,4,5,5,5,5}
+  ( 実体 ~1ms のドリフト) が **p=0.022 かつ +42.9% で REGRESSION 判定**になることを合成実験で実証。
+  6v6 Mann-Whitney の最小 p は ~0.002 で有意側は防波堤にならない。 → (a) フェーズメトリクスを
+  小数 ms 化 ( 整数丸めの偽分離を除去)、 (b) `*-ms/op` に絶対悪化 25ms の床を追加。
+  この合成ケースは benchgate の回帰テストとして固定
+- **P4 ( settle sleep の説明と実態の乖離) → 修正**: 30k のソースは persist シナリオ実行時点で
+  十分古く、 racy window に入るのは直前 run が書いた ≤501 個の出力のみ ( 「sleep なしで store が
+  空になる」は本番の実行順では偽)。 → コメントを実態に修正し、 store 検証を「サイズ ≥ 100KiB」から
+  「エントリ数 ≥ 全ソース数 ( 30,060)」の厳密比較に強化 ( 部分ドロップも検出)
+- **P5 ( metricKey の pkg 欠落) → 修正**: golocal / pnpmlocal が同名 `BenchmarkResolver` を emit
+  するため、 benchfmt の `pkg` config をキーに追加
+- **問題なしと確認**: 単位分類と emit の完全一致 / コンパイラ除去なし / cold 系ベンチの
+  memoisation 混入なし / macro の RUN・SKIP 自己検証の実効性 / 標本数と `-min-count` の整合 /
+  bench.sh の quoting / panic 時は `go test` 非ゼロで fail-closed

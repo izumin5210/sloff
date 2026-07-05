@@ -13,6 +13,7 @@ func main() {
 		threshold = flag.Float64("threshold", 0.30, "relative regression threshold for timing metrics (0.30 = +30%)")
 		alpha     = flag.Float64("alpha", 0.05, "significance level for the timing comparison")
 		minCount  = flag.Int("min-count", 4, "minimum samples per side required to gate a timing metric")
+		noRequire = flag.Bool("no-require", false, "skip the required-suite presence check (ad-hoc local comparisons)")
 	)
 	flag.Parse()
 	if *basePath == "" || *headPath == "" {
@@ -20,7 +21,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	res, err := runGate(*basePath, *headPath, gateConfig{threshold: *threshold, alpha: *alpha, minCount: *minCount})
+	res, err := runGate(*basePath, *headPath, gateConfig{
+		threshold:    *threshold,
+		alpha:        *alpha,
+		minCount:     *minCount,
+		requireSuite: !*noRequire,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "benchgate: %v\n", err)
 		os.Exit(2)

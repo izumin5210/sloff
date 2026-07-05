@@ -62,11 +62,12 @@ func classify(unit string) ruleKind {
 }
 
 type metricKey struct {
+	pkg  string // benchmarks in different packages may share a name (both resolver packages emit BenchmarkResolver)
 	name string // full benchmark name, including sub-benchmark config and -GOMAXPROCS suffix
 	unit string
 }
 
-func (k metricKey) String() string { return k.name + " " + k.unit }
+func (k metricKey) String() string { return k.pkg + " " + k.name + " " + k.unit }
 
 func readBenchFile(path string) (map[metricKey][]float64, error) {
 	f, err := os.Open(path)
@@ -82,8 +83,9 @@ func readBenchFile(path string) (map[metricKey][]float64, error) {
 			continue // SyntaxError records: tolerate stray non-benchmark output lines
 		}
 		name := string(res.Name.Full())
+		pkg := res.GetConfig("pkg")
 		for _, v := range res.Values {
-			k := metricKey{name: name, unit: v.Unit}
+			k := metricKey{pkg: pkg, name: name, unit: v.Unit}
 			out[k] = append(out[k], v.Value)
 		}
 	}
@@ -124,6 +126,54 @@ type gateConfig struct {
 	threshold float64 // e.g. 0.30 = fail timing metrics beyond +30%
 	alpha     float64 // significance level for the Mann-Whitney test
 	minCount  int     // minimum samples per side for timing metrics
+	// requireSuite errors when the head file lacks the suite's core metrics.
+	// Without it the gate fails open: renaming BenchmarkRun, moving a
+	// package, or breaking the -bench regex silently removes every guard
+	// while the job stays green.
+	requireSuite bool
+}
+
+// msAbsFloor is the minimum absolute worsening (in ms) before a *-ms/op
+// phase metric can fail the gate. Runner-noise calibration (LESSONS.md)
+// showed the small-denominator phases (resolve ≈ 1–7ms, fpload ≈ 5–15ms)
+// breach both the significance and the relative threshold on ~1ms drift and
+// timer quantisation alone; a millisecond-scale floor removes that class of
+// false positive while a real small-phase blowup (e.g. resolve 4ms → 200ms)
+// still trips.
+const msAbsFloor = 25.0
+
+// requiredHeadUnits are the deterministic guard metrics every gate run must
+// see on the head side; their absence means the corresponding benchmark
+// vanished (rename / regex drift / package move), not that it passed.
+var requiredHeadUnits = []string{
+	"makespan-ticks/op",
+	"batchloads/op",
+	"listloads/op",
+	"enumcalls/op",
+}
+
+// checkRequiredSuite appends an error per missing core metric. The macro
+// check keys on the benchmark name because sec/op alone is emitted by every
+// benchmark.
+func checkRequiredSuite(newM map[metricKey][]float64, res *gateResult) {
+	present := map[string]bool{}
+	macroSeen := false
+	for k := range newM {
+		present[k.unit] = true
+		if strings.Contains(k.name, "Run/scenario=") && k.unit == "sec/op" {
+			macroSeen = true
+		}
+	}
+	for _, u := range requiredHeadUnits {
+		if !present[u] {
+			res.errs = append(res.errs, fmt.Sprintf(
+				"required metric %q missing from head: its guard benchmark vanished (rename/regex/package move?)", u,
+			))
+		}
+	}
+	if !macroSeen {
+		res.errs = append(res.errs, "no BenchmarkRun/scenario=* sec/op in head: the macro suite vanished")
+	}
 }
 
 func runGate(oldPath, newPath string, cfg gateConfig) (*gateResult, error) {
@@ -152,6 +202,10 @@ func compare(oldM, newM map[metricKey][]float64, cfg gateConfig) *gateResult {
 		sorted = append(sorted, k)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].String() < sorted[j].String() })
+
+	if cfg.requireSuite {
+		checkRequiredSuite(newM, res)
+	}
 
 	for _, k := range sorted {
 		oldVals, inOld := oldM[k]
@@ -200,6 +254,10 @@ func compareOne(k metricKey, oldVals, newVals []float64, cfg gateConfig, res *ga
 		cmp := benchmath.AssumeNothing.Compare(oldSample, newSample)
 		c.p = cmp.P
 		if cmp.P < cfg.alpha && c.delta > cfg.threshold {
+			if strings.HasSuffix(k.unit, "-ms/op") && c.newCenter-c.oldCenter < msAbsFloor {
+				c.note = fmt.Sprintf("below %gms absolute floor (small-denominator phase)", msAbsFloor)
+				return c
+			}
 			c.regression = true
 			c.note = fmt.Sprintf("significant (p=%.3f) and beyond +%.0f%%", cmp.P, cfg.threshold*100)
 		}

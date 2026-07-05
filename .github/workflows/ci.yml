@@ -93,9 +93,7 @@ jobs:
         with:
           go-version: '1.26'
       - name: Add merge-base worktree
-        # TEMPORARY CALIBRATION (revert before merge): compare HEAD against
-        # itself so the observed deltas measure pure runner noise.
-        run: git worktree add /tmp/bench-base HEAD
+        run: git worktree add /tmp/bench-base "$(git merge-base origin/main HEAD)"
       - name: Run benchmarks (interleaved base/head)
         # Interleaving base/head rounds on one runner cancels slow drift
         # (thermal, noisy neighbours); sample counts must stay >= benchgate's

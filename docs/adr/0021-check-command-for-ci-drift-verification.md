@@ -99,9 +99,13 @@ check は run と同じ順序で計画フェーズを実行する: spec discover
 
 ### 副作用ゼロ ( read-only 契約)
 
+read-only の境界は「 **repo とリモート fingerprint store に一切書かない**」 こと:
+
 - record の書き込み / 上書き / collapse を一切行わない。 `--force` 相当の概念もない
 - 作業ツリーを変更しない
-- 例外は per-file content digest cache ( [ADR-0014](./0014-persistent-file-content-hash-cache.md)、 `$XDG_CACHE_HOME` 配下のホストローカル純粋性能キャッシュ) のみ。 run と同様に読み書きし、 `SLOFF_NO_FILE_HASH_CACHE` もそのまま効く。 repo 内容には影響しない
+- `$XDG_CACHE_HOME` 配下の **ホストローカル純粋性能キャッシュ** は境界の内側であり、 run の読み取り経路と同様に読み書きする:
+  - per-file content digest cache ( [ADR-0014](./0014-persistent-file-content-hash-cache.md))。 `SLOFF_NO_FILE_HASH_CACHE` もそのまま効く
+  - remote backend ( [ADR-0011](./0011-dynamodb-remote-fingerprint-storage.md)) 使用時は、 2 段ローカルキャッシュ decorator が Load した record をローカルにミラーする。 これは読み取り結果のホストローカル複製であり、 リモート store 側への書き込みは発生しない
 
 ### exit code 契約
 

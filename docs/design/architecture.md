@@ -717,7 +717,7 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 
 - **判定分類**: ok / record miss ( gen 忘れ or record commit 忘れ — 区別不能と明記して両方の修復を案内) / output mismatch ( 欠損・改変ファイルを列挙) / input missing ( 上流生成物の commit 漏れが典型) / unverifiable ( tool 解決失敗。 tool の depends 先 producer の判定で drift ↔ 環境問題を切り分け)
 - **exit code**: 0 = clean / 1 = drift / 2 = チェック実行不能 ( spec / tool / preflight / storage エラー)。 CI 側で「drift なら `sloff run` して commit を案内、 環境エラーなら別対応」 と機械分岐できる
-- **read-only 契約**: record の書き込み / collapse / ツリー変更を一切行わない。 例外は ADR-0014 の per-file digest cache ( ホストローカル純粋性能キャッシュ) のみ
+- **read-only 契約**: repo とリモート fingerprint store に一切書かない ( record の書き込み / collapse / ツリー変更なし)。 `$XDG_CACHE_HOME` 配下のホストローカル性能キャッシュ ( ADR-0014 の per-file digest cache、 remote backend 使用時の 2 段ローカルキャッシュの read ミラー) は run と同様に読み書きする
 - **`SLOFF_ALLOW_STALE_DEPS` は無効**: check は常に preflight 失敗 = exit 2 ( 検証コマンドの保証が env var で弱まらない、 ADR-0012 と同思想)
 - **環境要件**: run と同一のフルツールチェーンが CI に必要 ( script tool のバイナリ / `pnpm install` 済み / Go toolchain / provider 実行)。 `resolved_versions` の再解決を省く hermetic モードは R4 ( invalidate 安全性) を毀損するため提供しない
 - **barrier task** は fingerprint を持たないため判定対象外

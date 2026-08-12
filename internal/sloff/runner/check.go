@@ -139,9 +139,12 @@ func (rep *CheckReport) Clean() bool { return len(rep.Drift()) == 0 }
 // records without executing any generator (ADR-0021). It runs the same
 // planning phases as Run — provider expansion, tool resolution, preflight,
 // plan-time overlap validation — then evaluates every non-barrier task's
-// fingerprint hit decision read-only. No record is written or collapsed and
-// the tree is never mutated; the only side effect is the host-local per-file
-// digest cache (ADR-0014), which Run shares.
+// fingerprint hit decision read-only. The read-only boundary is the repo and
+// the fingerprint store: no record is written or collapsed and the tree is
+// never mutated. Host-local performance caches under XDG_CACHE_HOME — the
+// ADR-0014 per-file digest cache and, on remote backends, the cached
+// decorator's read mirror — are read and written exactly as Run's read
+// paths do.
 //
 // Preflight is strict: the SLOFF_ALLOW_STALE_DEPS degrade path (Options.
 // ReadOnly) is ignored, because a verification command whose guarantees can

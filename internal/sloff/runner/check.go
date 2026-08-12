@@ -80,7 +80,8 @@ func (s CheckStatus) isDrift() bool {
 
 // CheckFileIssue is the per-file detail of a CheckOutputMismatch result.
 type CheckFileIssue struct {
-	// Path is the repo-relative slash-form path as recorded in the record.
+	// Path is the recorded output path, normalized to repo-relative slash
+	// form.
 	Path string
 	// Reason is "missing", "modified", or "unreadable".
 	Reason string
@@ -365,16 +366,19 @@ func (r *Runner) diffRecordedOutputs(rec *fingerprintv1.Record) []CheckFileIssue
 	var issues []CheckFileIssue
 	for _, f := range rec.GetOutput().GetFiles() {
 		rel := filepath.FromSlash(f.GetPath())
+		// Normalize like missingInputPaths does: recorded paths are OS-native
+		// (glob.Expand output), and CheckFileIssue promises slash form.
+		slashPath := filepath.ToSlash(f.GetPath())
 		if _, statErr := os.Stat(filepath.Join(r.opts.RepoRoot, rel)); errors.Is(statErr, fs.ErrNotExist) {
-			issues = append(issues, CheckFileIssue{Path: f.GetPath(), Reason: "missing"})
+			issues = append(issues, CheckFileIssue{Path: slashPath, Reason: "missing"})
 			continue
 		}
 		hex, hashErr := r.fileCache.FileHex(r.opts.RepoRoot, rel)
 		switch {
 		case hashErr != nil:
-			issues = append(issues, CheckFileIssue{Path: f.GetPath(), Reason: "unreadable"})
+			issues = append(issues, CheckFileIssue{Path: slashPath, Reason: "unreadable"})
 		case hex != f.GetHash():
-			issues = append(issues, CheckFileIssue{Path: f.GetPath(), Reason: "modified"})
+			issues = append(issues, CheckFileIssue{Path: slashPath, Reason: "modified"})
 		}
 	}
 	return issues

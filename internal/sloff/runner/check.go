@@ -132,8 +132,19 @@ func (rep *CheckReport) Drift() []CheckResult {
 	return out
 }
 
-// Clean reports whether every task verified as a fingerprint hit.
-func (rep *CheckReport) Clean() bool { return len(rep.Drift()) == 0 }
+// Clean reports whether every task verified as a fingerprint hit. This is
+// deliberately stricter than "Drift() is empty": an environment-classified
+// unverifiable result is excluded from Drift (its cause travels via Check's
+// error) but it still means not every task was verified, so the report is
+// not clean (ADR-0021: clean = every task hit).
+func (rep *CheckReport) Clean() bool {
+	for _, res := range rep.Results {
+		if res.Status != CheckOK {
+			return false
+		}
+	}
+	return true
+}
 
 // Check verifies that the current tree matches its committed fingerprint
 // records without executing any generator (ADR-0021). It runs the same

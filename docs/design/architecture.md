@@ -711,10 +711,36 @@ per-task per-input ファイル方式では record が累積する。 容量見�
 
 `.sloff/fingerprints/**` を `.gitattributes` で `linguist-generated=true` 指定し、 GitHub PR diff の default collapsed 化。 PR template に「`.sloff/fingerprints/` 配下の差分は人間レビュー対象外」と明記する運用ルールを併設する。
 
+### CI でのドリフト検証 ( `sloff check`)
+
+「生成が完了し、 生成物と record が正しく commit されているか」 を **generator を一切実行せずに** CI で検証するサブコマンド ( [ADR-0021](../adr/0021-check-command-for-ci-drift-verification.md))。 run と同一の計画フェーズ ( provider 展開 → tool 解決 → preflight → plan 時 overlap 検証) を通したうえで、 全 task の fingerprint ヒット判定 ( ADR-0002 output-comparison) を read-only で評価し、 RUN に落ちる task があれば drift として fail する。
+
+- **判定分類**: ok / record miss ( gen 忘れ or record commit 忘れ — 区別不能と明記して両方の修復を案内) / output mismatch ( 欠損・改変ファイルを列挙) / input missing ( 上流生成物の commit 漏れが典型) / unverifiable ( tool 解決失敗。 tool の depends 先 producer の判定で drift ↔ 環境問題を切り分け)
+- **exit code**: 0 = clean / 1 = drift / 2 = チェック実行不能 ( spec / tool / preflight / storage エラー)。 CI 側で「drift なら `sloff run` して commit を案内、 環境エラーなら別対応」 と機械分岐できる
+- **read-only 契約**: record の書き込み / collapse / ツリー変更を一切行わない。 例外は ADR-0014 の per-file digest cache ( ホストローカル純粋性能キャッシュ) のみ
+- **`SLOFF_ALLOW_STALE_DEPS` は無効**: check は常に preflight 失敗 = exit 2 ( 検証コマンドの保証が env var で弱まらない、 ADR-0012 と同思想)
+- **環境要件**: run と同一のフルツールチェーンが CI に必要 ( script tool のバイナリ / `pnpm install` 済み / Go toolchain / provider 実行)。 `resolved_versions` の再解決を省く hermetic モードは R4 ( invalidate 安全性) を毀損するため提供しない
+- **barrier task** は fingerprint を持たないため判定対象外
+
+**検出保証の境界**: check の緑が保証するのは「committed outputs が、 現在の inputs ( CI 上で解決したツールバージョン込み) に対して、 いずれかの正直な `sloff run` が記録した結果と一致している」 こと。 (a) inputs 宣言漏れ、 (b) record の偽造・手編集、 (c) generator の非決定性、 (d) stale な余剰生成物、 の 4 クラスは構造的に検出できない ( 詳細は ADR-0021 Context)。 「check が緑 = フル再生成しても diff ゼロ」 ではない。
+
+推奨 CI レシピ:
+
+```yaml
+# PR ごと: 高速ドリフト検証 ( generator 実行なし)
+- run: sloff check
+# per-file digest cache ( ADR-0014) を actions/cache で永続化すると
+# ファイルハッシュ計算が差分のみになる ( XDG_CACHE_HOME 配下)
+
+# nightly 等の定期 job: check の盲点 ( inputs 宣言漏れ / record 偽造 / 非決定性) の補完
+- run: sloff run --force
+- run: git diff --exit-code
+```
+
 ## Open Questions
 
 - **Q1**: 同 input hash で複数 OS が独立に走った時、 output hash が真に一致するか。 一致しない generator (例: 行末コード差、 絶対パス埋込、 time.Now embed) が出た場合の対処方針。 cross-OS double-run 検証 CI を入れて早期発見するか
-- **Q2**: 開発者が手元で `.sloff/fingerprints/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み
+- **Q2**: 開発者が手元で `.sloff/fingerprints/` を `.gitignore` に足したくなる誘惑をどう抑制するか。 CI で record の commit を強制する pre-push hook、 または PR 上で record 差分が無い場合は warning 表示する仕組み。 → **一部解消** ( [ADR-0021](../adr/0021-check-command-for-ci-drift-verification.md)): `sloff check` が record miss を drift として fail するため、 record の commit 忘れ / gitignore 化は CI で構造的に検出される
 - **Q3**: ファイル粒度の import 解析を **overlap 検証にも適用するか** ( Pants 流のファイル粒度依存導出への発展)。 現状 sloff は task 粒度の glob ベースで overlap 検証 ( ADR-0013) を行うが、 inputs glob 配下の "実際に他 task の outputs を import しているファイル" だけを抽出して検証精度を上げる余地はある。 ただし「import 解析が間違うと検証が嘘をつく」リスクとのトレードオフ。 初版は glob ベースで十分とし、 運用知見が溜まった段階で再検討
 - **Q4** ( benchmark 検証): import 解析ベースの hash 抽出 ( `goPackagesLister`) が、 愚直 glob ベース ( `globLister`) と比べて **総合的なビルド時間で優位か**。 import 解析は精度で勝るが per-task で 100 ms 〜 数百 ms かかる。 愚直 glob は 10 ms 〜 数十 ms。 invalidate 削減効果が hash 計算オーバーヘッドを上回るかを実装後に benchmark で検証する。 検証結果次第で `globLister` への retreat も選択肢 ( Resolver 内部 helper の差し替えのみで対応可能)
 
@@ -727,7 +753,7 @@ per-task per-input ファイル方式では record が累積する。 容量見�
   <spec_relpath>/<task_id>/<YYYYMMDDHHMMSSsss>-<input_hash>.pb
 
 # sloff 自身のコードベース ( github.com/izumin5210/sloff):
-cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff fingerprint gc` 等)
+cmd/sloff/main.go                         # CLI エントリ (`sloff run` / `sloff check` / `sloff fingerprint gc` 等)
 internal/sloff/
   spec.go                                   # sloff.yml パース、 CmdSpec
   runner.go                                 # 並列 runner、 fingerprint lookup / write

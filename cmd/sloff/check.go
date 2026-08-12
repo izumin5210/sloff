@@ -151,9 +151,13 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 
 // printCheckReport prints one detail block per drifted task and a one-line
 // summary. Clean tasks stay silent so CI logs surface only what needs acting
-// on.
+// on. Environment-classified unverifiable tasks (tool unresolvable, depends
+// producers all clean) are rendered as CANNOT VERIFY rather than DRIFT: their
+// cause arrives as the accompanying error and exit code 2, and a DRIFT label
+// would misdirect the user to `sloff run`.
 func printCheckReport(out io.Writer, rep *runner.CheckReport) {
-	for _, res := range rep.Drift() {
+	drifted := rep.Drift()
+	for _, res := range drifted {
 		label := checkTaskLabel(res)
 		switch res.Status {
 		case runner.CheckNoRecord:
@@ -168,12 +172,24 @@ func printCheckReport(out io.Writer, rep *runner.CheckReport) {
 			fmt.Fprintf(out, "DRIFT %s: cannot verify — tool %q could not be resolved because tasks it depends on show drift; regenerating will restore its sources\n", label, res.Tool)
 		}
 	}
-	total := len(rep.Results)
-	if drifted := len(rep.Drift()); drifted > 0 {
-		fmt.Fprintf(out, "sloff check: %d tasks checked, %d drifted\n", total, drifted)
-		return
+	unverifiableEnv := 0
+	for _, res := range rep.Results {
+		if res.Status == runner.CheckUnverifiable && !res.ToolProducersDrifted {
+			unverifiableEnv++
+			fmt.Fprintf(out, "CANNOT VERIFY %s: tool %q could not be resolved; every task it depends on is clean, so this is an environment or spec problem, not missing generation\n", checkTaskLabel(res), res.Tool)
+		}
 	}
-	fmt.Fprintf(out, "sloff check: %d tasks checked, no drift\n", total)
+	summary := fmt.Sprintf("sloff check: %d tasks checked", len(rep.Results))
+	if len(drifted) > 0 {
+		summary += fmt.Sprintf(", %d drifted", len(drifted))
+	}
+	if unverifiableEnv > 0 {
+		summary += fmt.Sprintf(", %d unverifiable", unverifiableEnv)
+	}
+	if len(drifted) == 0 && unverifiableEnv == 0 {
+		summary += ", no drift"
+	}
+	fmt.Fprintln(out, summary)
 }
 
 func outputIssueLines(res runner.CheckResult) []string {

@@ -131,6 +131,41 @@ func TestCheck_AllowStaleDepsIgnored(t *testing.T) {
 	}
 }
 
+// TestCheck_EnvClassifiedToolFailureIsNotDrift: when a tool cannot resolve
+// but every producer in its depends closure is clean, the task must render
+// as CANNOT VERIFY (not DRIFT) and the command must exit 2 — the output has
+// to agree with the exit-code contract instead of misdirecting the user to
+// `sloff run`.
+func TestCheck_EnvClassifiedToolFailureIsNotDrift(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not available")
+	}
+	workdir := setupRunHarness(t, "check-tooldepends-env-error")
+	if _, err := runRunCmd(t, workdir); err != nil {
+		t.Fatalf("run cmd failed: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(workdir, "cmd", "tool")); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runCheckCmd(t, workdir)
+	wantExitCode(t, err, checkExitError)
+	if !strings.Contains(stdout, "CANNOT VERIFY consume") {
+		t.Errorf("expected CANNOT VERIFY line for consume, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "DRIFT") {
+		t.Errorf("environment-classified failure must not print DRIFT lines, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 unverifiable") {
+		t.Errorf("summary should count the unverifiable task, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "could not be resolved") {
+		t.Errorf("expected resolution failure on stderr, got:\n%s", stderr)
+	}
+}
+
 // TestCheck_AllowStaleDepsInvalidValueExitsTwo keeps the fail-loudly contract
 // for unparseable env values on the check path too.
 func TestCheck_AllowStaleDepsInvalidValueExitsTwo(t *testing.T) {

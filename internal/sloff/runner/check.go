@@ -100,6 +100,12 @@ type CheckResult struct {
 	MissingInputs []string
 	// Tool names the unresolvable tool (CheckUnverifiable only).
 	Tool string
+	// ToolProducersDrifted reports, for CheckUnverifiable, whether the tool's
+	// depends closure showed concrete drift: true means missing generation
+	// explains the failure (the result counts as drift), false means every
+	// producer is clean and Check surfaced the cause as an error instead
+	// (environment problem, CLI exit 2). Set by classifyToolFailures.
+	ToolProducersDrifted bool
 }
 
 // CheckReport is the outcome of Runner.Check for every non-barrier task, in
@@ -108,14 +114,18 @@ type CheckReport struct {
 	Results []CheckResult
 }
 
-// Drift returns the results that represent drift. When Check returned a nil
-// error, every non-ok result is drift by construction: unverifiable results
-// whose tool producers are all clean surface as a Check error instead of a
-// report entry.
+// Drift returns the results that represent drift: every concrete non-ok
+// status, plus unverifiable results whose tool's depends closure drifted.
+// Environment-classified unverifiable results are excluded — Check reported
+// their cause as an error (CLI exit 2), and listing them as drift would
+// misdirect the user to `sloff run`.
 func (rep *CheckReport) Drift() []CheckResult {
 	var out []CheckResult
 	for _, res := range rep.Results {
-		if res.Status != CheckOK {
+		switch {
+		case res.Status == CheckOK:
+		case res.Status == CheckUnverifiable && !res.ToolProducersDrifted:
+		default:
 			out = append(out, res)
 		}
 	}
@@ -373,7 +383,9 @@ func missingInputPaths(root string, paths []string) []string {
 // is explained by drift (some task in the tool's depends closure is not
 // generated/committed — the unverifiable consumers then count as drift) or
 // is an environment problem (every producer clean — escalate to an error so
-// the CLI exits 2 instead of misdirecting the user to `sloff run`).
+// the CLI exits 2 instead of misdirecting the user to `sloff run`). The
+// verdict is written back onto each unverifiable result so report consumers
+// can render the two cases distinctly.
 func (r *Runner) classifyToolFailures(ordered []depgraph.Task, results []CheckResult, failures map[string]error) error {
 	statusByRef := make(map[depgraph.TaskRef]CheckStatus, len(results))
 	for _, res := range results {
@@ -385,12 +397,19 @@ func (r *Runner) classifyToolFailures(ordered []depgraph.Task, results []CheckRe
 	}
 
 	var envErrs []error
+	driftedByTool := make(map[string]bool, len(failures))
 	for _, name := range slices.Sorted(maps.Keys(failures)) {
 		entry := r.deferredTools[name].entry
-		if toolProducersDrifted(entry, byRef, statusByRef) {
-			continue
+		drifted := toolProducersDrifted(entry, byRef, statusByRef)
+		driftedByTool[name] = drifted
+		if !drifted {
+			envErrs = append(envErrs, fmt.Errorf("%w; every task in the tool's declared depends closure is clean, so this is not missing generation — fix the tool's sources or the environment", failures[name]))
 		}
-		envErrs = append(envErrs, fmt.Errorf("%w; every task in the tool's declared depends closure is clean, so this is not missing generation — fix the tool's sources or the environment", failures[name]))
+	}
+	for i := range results {
+		if results[i].Status == CheckUnverifiable {
+			results[i].ToolProducersDrifted = driftedByTool[results[i].Tool]
+		}
 	}
 	return errors.Join(envErrs...)
 }

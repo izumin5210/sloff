@@ -64,6 +64,7 @@ type checkStepConfig struct {
 	wantOutputIssues  map[string][]string
 	wantMissingInputs map[string][]string
 	wantTools         map[string]string
+	wantDriftTasks    *[]string
 }
 
 type checkStepOption func(*checkStepConfig)
@@ -117,6 +118,14 @@ func expectCheckUnverifiableTool(taskKey, tool string) checkStepOption {
 		}
 		c.wantTools[taskKey] = tool
 	}
+}
+
+// expectCheckDriftTasks asserts CheckReport.Drift() contains exactly these
+// task keys (sorted compare). Pass none to assert the drift set is empty —
+// the contract for environment-classified unverifiable results, which must
+// surface via the Check error instead.
+func expectCheckDriftTasks(keys ...string) checkStepOption {
+	return func(c *checkStepConfig) { c.wantDriftTasks = &keys }
 }
 
 // checkStep runs runner.Check against the current workdir state and asserts
@@ -215,6 +224,21 @@ func checkStep(opts ...checkStepOption) step {
 			}
 			if res.Tool != want {
 				t.Errorf("Check tool for %s: want %q, got %q", taskKey, want, res.Tool)
+			}
+		}
+		if cfg.wantDriftTasks != nil {
+			if rep == nil {
+				t.Fatalf("Check: expected a report, got nil")
+			}
+			got := []string{}
+			for _, res := range rep.Drift() {
+				got = append(got, checkTaskKey(res))
+			}
+			sort.Strings(got)
+			want := append([]string{}, *cfg.wantDriftTasks...)
+			sort.Strings(want)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("Check Drift() mismatch (-want +got):\n%s", diff)
 			}
 		}
 	}
@@ -375,6 +399,7 @@ func TestCheck_DeferredToolProducerDriftClassifiesAsDrift(t *testing.T) {
 				"consume":    "unverifiable",
 			}),
 			expectCheckUnverifiableTool("consume", "gen-tool"),
+			expectCheckDriftTasks("gen-source", "consume"),
 		),
 	)
 }
@@ -394,6 +419,9 @@ func TestCheck_DeferredToolEnvFailureIsError(t *testing.T) {
 				"consume": "unverifiable",
 			}),
 			expectCheckUnverifiableTool("consume", "gen-tool"),
+			// Environment-classified: the unverifiable consumer must NOT count
+			// as drift — the cause travels via the Check error (CLI exit 2).
+			expectCheckDriftTasks(),
 		),
 	)
 }

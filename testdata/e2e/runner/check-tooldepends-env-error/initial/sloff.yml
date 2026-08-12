@@ -1,0 +1,20 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  gen-tool:
+    go-local: ./cmd/tool
+    depends:
+      - task: noop
+
+commands:
+  - name: noop
+    cmd: ["sh", "-c", "cp src.txt mid.txt"]
+    inputs: ["src.txt"]
+    outputs: ["mid.txt"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "cp input.txt output.txt"]
+    inputs: ["input.txt"]
+    outputs: ["output.txt"]
+    tools: [gen-tool]

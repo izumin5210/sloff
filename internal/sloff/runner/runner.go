@@ -1136,7 +1136,15 @@ func (r *Runner) prepareRegistry() (*spec.ToolRegistry, []string, error) {
 // are not written for a known-suspect run. Hard errors from a checker
 // (the check itself couldn't execute) bypass the read-only fall-through
 // and fail the run regardless.
-func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) (err error) {
+func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string) error {
+	return r.preflightPass(ctx, registry, referencedToolNames, false)
+}
+
+// preflightPass is the shared body of runPreflight (Run) and Check's strict
+// variant. strict disables the ReadOnly warn-degrade AND drops the escape-
+// hatch suggestion from the error: Check ignores SLOFF_ALLOW_STALE_DEPS
+// (ADR-0021), so suggesting it there would mislead.
+func (r *Runner) preflightPass(ctx context.Context, registry *spec.ToolRegistry, referencedToolNames []string, strict bool) (err error) {
 	ctx, span := r.tracer.Start(ctx, "runner.preflight", trace.WithAttributes(
 		attribute.Int("sloff.tool.referenced_count", len(referencedToolNames)),
 	))
@@ -1160,6 +1168,10 @@ func (r *Runner) runPreflight(ctx context.Context, registry *spec.ToolRegistry, 
 	if !res.OK {
 		span.SetAttributes(attribute.Int("sloff.preflight.issue_count", len(res.Issues)))
 		r.reportPreflightIssues(res.Issues)
+		if strict {
+			err = fmt.Errorf("preflight failed (%d issues)", len(res.Issues))
+			return err
+		}
 		if !r.opts.ReadOnly {
 			err = fmt.Errorf("preflight failed (%d issues); set SLOFF_ALLOW_STALE_DEPS=1 to bypass", len(res.Issues))
 			return err

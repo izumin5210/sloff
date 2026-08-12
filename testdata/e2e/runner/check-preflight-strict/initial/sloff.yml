@@ -1,0 +1,10 @@
+tools:
+  codegen:
+    pnpm-local: "@org/codegen"
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp input.txt out.txt"]
+    inputs: ["input.txt"]
+    outputs: ["out.txt"]
+    tools: [codegen]

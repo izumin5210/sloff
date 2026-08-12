@@ -1,0 +1,18 @@
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: produce
+    cmd: ["sh", "-c", "cp src.txt mid.txt"]
+    inputs: ["src.txt"]
+    outputs: ["mid.txt"]
+    tools: [versioner]
+  - name: consume
+    cmd: ["sh", "-c", "cp mid.txt out.txt"]
+    inputs: ["mid.txt"]
+    outputs: ["out.txt"]
+    tools: [versioner]
+    depends:
+      - task: produce

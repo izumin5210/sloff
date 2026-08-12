@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/izumin5210/sloff/internal/sloff/fingerprint"
 	"github.com/izumin5210/sloff/internal/sloff/runner"
 )
 
@@ -53,33 +54,47 @@ Exit codes: 0 = up to date, 1 = drift detected, 2 = the check could not run
 // and converted to an exitCodeError, so main never double-prints and the
 // 0/1/2 contract holds for everything past flag parsing.
 func checkE(ctx context.Context, out, errOut io.Writer, rawRoot, pattern string) error {
-	rep, err := runCheck(ctx, errOut, rawRoot, pattern)
+	rep, recordsInRepo, err := runCheck(ctx, errOut, rawRoot, pattern)
 	if rep != nil {
-		printCheckReport(out, rep)
+		printCheckReport(out, rep, recordsInRepo)
 	}
 	if err != nil {
 		fmt.Fprintf(errOut, "sloff check: %v\n", err)
 		return &exitCodeError{code: checkExitError}
 	}
 	if drifted := rep.Drift(); len(drifted) > 0 {
-		fmt.Fprintln(out, "To fix: run `sloff run`, then commit the regenerated outputs and the .sloff/fingerprints/ changes.")
+		fmt.Fprintln(out, checkRemediation(recordsInRepo))
 		return &exitCodeError{code: checkExitDrift}
 	}
 	return nil
+}
+
+// checkRemediation is the fix-it guidance for a drifted check. With the
+// local backend the records live in the repo and must be committed alongside
+// the outputs; remote backends receive the records from `sloff run` directly,
+// so only the outputs need committing.
+func checkRemediation(recordsInRepo bool) string {
+	if recordsInRepo {
+		return "To fix: run `sloff run`, then commit the regenerated outputs and the .sloff/fingerprints/ changes."
+	}
+	return "To fix: run `sloff run` to regenerate and store the records in the fingerprint backend, then commit the regenerated outputs."
 }
 
 // runCheck wires the same resolver/preflight/storage stack as runE and calls
 // Runner.Check. ReadOnly is intentionally never set: check ignores
 // SLOFF_ALLOW_STALE_DEPS (a verification whose guarantee an env var can
 // weaken is not a verification), so the variable only earns a warning here.
-func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (rep *runner.CheckReport, err error) {
+// recordsInRepo reports whether the selected backend stores records inside
+// the repository (local backend), which decides how drift messages phrase
+// the record half of the remediation.
+func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (rep *runner.CheckReport, recordsInRepo bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	tp, shutdown, err := setupTracing(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("setup tracing: %w", err)
+		return nil, false, fmt.Errorf("setup tracing: %w", err)
 	}
 	defer flushTracing(shutdown)
 
@@ -92,7 +107,7 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 
 	allowStale, err := allowStaleDepsEnabled()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if allowStale {
 		fmt.Fprintf(errOut, "sloff check: %s is ignored by check; preflight failures always fail the verification\n", allowStaleDepsEnv)
@@ -100,19 +115,19 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 
 	root, err := filepath.Abs(rawRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve --root: %w", err)
+		return nil, false, fmt.Errorf("resolve --root: %w", err)
 	}
 	span.SetAttributes(attribute.String("sloff.repo_root", root))
 
 	specs, err := discoverSpecs(ctx, tracer, root, pattern)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	span.SetAttributes(attribute.Int("sloff.spec.count", len(specs)))
 
 	noHashCache, err := fileHashCacheDisabled()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	hashCachePath := fileHashCachePath(root)
 	if noHashCache {
@@ -121,13 +136,17 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 
 	resolvers, err := buildResolvers(root)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	storage, err := loadStorage(ctx, root)
 	if err != nil {
-		return nil, fmt.Errorf("load fingerprint storage: %w", err)
+		return nil, false, fmt.Errorf("load fingerprint storage: %w", err)
 	}
+	// The cached decorator wrapping remote backends delegates Name() to the
+	// inner backend, so this comparison sees "dynamodb", not the wrapper.
+	recordsInRepo = storage.Name() == string(fingerprint.BackendLocal)
+	span.SetAttributes(attribute.String("sloff.fingerprint.backend", storage.Name()))
 
 	r := runner.New(runner.Options{
 		RepoRoot:          root,
@@ -146,7 +165,7 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 			attribute.Int("sloff.check.drift_count", len(rep.Drift())),
 		)
 	}
-	return rep, err
+	return rep, recordsInRepo, err
 }
 
 // printCheckReport prints one detail block per drifted task and a one-line
@@ -155,13 +174,17 @@ func runCheck(ctx context.Context, errOut io.Writer, rawRoot, pattern string) (r
 // producers all clean) are rendered as CANNOT VERIFY rather than DRIFT: their
 // cause arrives as the accompanying error and exit code 2, and a DRIFT label
 // would misdirect the user to `sloff run`.
-func printCheckReport(out io.Writer, rep *runner.CheckReport) {
+func printCheckReport(out io.Writer, rep *runner.CheckReport, recordsInRepo bool) {
+	noRecordCause := "the generator was not re-run after an input change, or the record was not committed"
+	if !recordsInRepo {
+		noRecordCause = "the generator was not re-run after an input change, or its record was never stored in the fingerprint backend"
+	}
 	drifted := rep.Drift()
 	for _, res := range drifted {
 		label := checkTaskLabel(res)
 		switch res.Status {
 		case runner.CheckNoRecord:
-			fmt.Fprintf(out, "DRIFT %s: no fingerprint record for the current inputs (the generator was not re-run after an input change, or the record was not committed)\n", label)
+			fmt.Fprintf(out, "DRIFT %s: no fingerprint record for the current inputs (%s)\n", label, noRecordCause)
 		case runner.CheckOutputMismatch:
 			fmt.Fprintf(out, "DRIFT %s: generated outputs do not match the fingerprint record\n", label)
 			printCheckIssueList(out, outputIssueLines(res))

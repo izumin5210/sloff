@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/izumin5210/sloff/internal/sloff/runner"
 )
 
 // runCheckCmd invokes the assembled root command with `check` and the given
@@ -163,6 +165,38 @@ func TestCheck_EnvClassifiedToolFailureIsNotDrift(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "could not be resolved") {
 		t.Errorf("expected resolution failure on stderr, got:\n%s", stderr)
+	}
+}
+
+// TestCheck_BackendAwareRecordWording pins the remediation and no-record
+// phrasing to the storage backend: the local backend stores records in the
+// repo (commit .sloff/fingerprints/), remote backends receive them from
+// `sloff run` directly, so pointing users at a repo path that never changes
+// would be wrong.
+func TestCheck_BackendAwareRecordWording(t *testing.T) {
+	local := checkRemediation(true)
+	remote := checkRemediation(false)
+	if !strings.Contains(local, ".sloff/fingerprints/") {
+		t.Errorf("local remediation should mention the record path, got: %s", local)
+	}
+	if strings.Contains(remote, ".sloff/fingerprints/") {
+		t.Errorf("remote remediation must not point at the in-repo record path, got: %s", remote)
+	}
+
+	rep := &runner.CheckReport{Results: []runner.CheckResult{
+		{SpecRelpath: "spec", Task: "copy", Status: runner.CheckNoRecord},
+	}}
+	var localOut, remoteOut bytes.Buffer
+	printCheckReport(&localOut, rep, true)
+	printCheckReport(&remoteOut, rep, false)
+	if !strings.Contains(localOut.String(), "not committed") {
+		t.Errorf("local no-record message should mention committing, got:\n%s", localOut.String())
+	}
+	if strings.Contains(remoteOut.String(), "not committed") {
+		t.Errorf("remote no-record message must not mention committing, got:\n%s", remoteOut.String())
+	}
+	if !strings.Contains(remoteOut.String(), "fingerprint backend") {
+		t.Errorf("remote no-record message should point at the backend, got:\n%s", remoteOut.String())
 	}
 }
 

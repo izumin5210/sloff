@@ -1,5 +1,8 @@
 # Changelog
 
+## [v0.0.8](https://github.com/izumin5210/sloff/compare/v0.0.7...v0.0.8) - 2026-08-13
+- feat: add `sloff check` for CI drift verification (ADR-0021) by @izumin5210 in https://github.com/izumin5210/sloff/pull/67
+
 ## [v0.0.7](https://github.com/izumin5210/sloff/compare/v0.0.6...v0.0.7) - 2026-07-04
 - feat(timing): off-by-default SLOFF_DEBUG_TIMING run summary by @izumin5210 in https://github.com/izumin5210/sloff/pull/63
 - perf(depgraph): schedule deep chains first via downstream height (ADR-0020) by @izumin5210 in https://github.com/izumin5210/sloff/pull/64

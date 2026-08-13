@@ -1,0 +1,30 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": "spec",
+    "task_id": "consume",
+    "cmd": "sh -c cp mid.txt out.txt"
+  },
+  "input": {
+    "hash": "36af8e8532054fe1942e1d6f900a4a0381c95a145ca6d70f3942fc548fe56751",
+    "files_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cmd_hash": "04e7d5a8c397e3eae6c06585d8096340ec39c7116ac90e34f05a87e2d46824b2",
+    "resolved_versions_hash": "de5936d928d184861e2668b663daf49ab98a26a2a063734e8287d2b2f7161bac",
+    "resolved_versions": [
+      {
+        "name": "sh",
+        "version": "script:sh@v1.0.0",
+        "source": "script:sh"
+      }
+    ]
+  },
+  "output": {
+    "hash": "7a90108775c99e2f800cdfc82642760c5aee356f6831ae9d06b1e1790e508b7f",
+    "files": [
+      {
+        "path": "spec/out.txt",
+        "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      }
+    ]
+  }
+}

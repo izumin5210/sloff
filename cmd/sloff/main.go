@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	cmd.AddCommand(newRunCmd())
+	cmd.AddCommand(newCheckCmd())
 	cmd.AddCommand(newGraphCmd())
 	cmd.AddCommand(newFingerprintCmd())
 	cmd.AddCommand(newVersionCmd())

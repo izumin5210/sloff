@@ -1,0 +1,6 @@
+package gen
+
+// Suffix is what the fixture generator appends; gen-source (re)generates
+// this file, so on a tree where it was never generated the tool cannot
+// compile and check must classify the failure via the producer's drift.
+const Suffix = "generated"

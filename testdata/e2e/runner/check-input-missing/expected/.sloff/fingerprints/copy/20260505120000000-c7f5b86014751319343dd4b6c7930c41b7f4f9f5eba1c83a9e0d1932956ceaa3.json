@@ -1,0 +1,23 @@
+{
+  "schema_version": "SCHEMA_VERSION_V3",
+  "spec": {
+    "dir": ".",
+    "task_id": "copy",
+    "cmd": "sh -c cp input.txt output.txt"
+  },
+  "input": {
+    "hash": "c7f5b86014751319343dd4b6c7930c41b7f4f9f5eba1c83a9e0d1932956ceaa3",
+    "files_hash": "8f5a113f0094f028eee9e9345dc243ebe53c58c46a6f2340f0619889e4350d5d",
+    "cmd_hash": "d50c9da992fa316ef7b5c3b00945323397a044df0c19523de3880ecd92a6121f",
+    "resolved_versions_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "output": {
+    "hash": "ef0fac10de73ede3bc209d4aa93c72236923f8b3406ad365e6c433c1529caaee",
+    "files": [
+      {
+        "path": "output.txt",
+        "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      }
+    ]
+  }
+}

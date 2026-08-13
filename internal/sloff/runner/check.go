@@ -353,17 +353,43 @@ func (r *Runner) checkTask(ctx context.Context, t depgraph.Task) (res CheckResul
 	case existing == nil:
 		res.Status = CheckNoRecord
 	default:
+		issues, readErr := r.diffRecordedOutputs(existing)
+		// A mismatch is only established by concrete evidence (a missing or
+		// modified file). Unreadable entries mean the comparison itself
+		// failed: report that as a check error (CLI exit 2) instead of drift,
+		// because the drift remediation — run and commit — would fail on the
+		// same unreadable file. When concrete evidence exists the drift
+		// verdict stands and unreadable entries ride along as detail.
+		concrete := false
+		for _, is := range issues {
+			if is.Reason != "unreadable" {
+				concrete = true
+				break
+			}
+		}
+		if !concrete {
+			if readErr != nil {
+				return res, fmt.Errorf("%s: cannot verify recorded outputs: %w", t.Name, readErr)
+			}
+			// The folded output hash mismatched but the per-file walk found
+			// no difference — the tree changed between the two reads.
+			return res, fmt.Errorf("%s: output comparison was inconsistent (files changed while checking?)", t.Name)
+		}
 		res.Status = CheckOutputMismatch
-		res.OutputIssues = r.diffRecordedOutputs(existing)
+		res.OutputIssues = issues
 	}
 	return res, nil
 }
 
 // diffRecordedOutputs lists which recorded output files stopped matching the
 // tree. The hit decision already failed on the folded hash; this re-walks
-// the recorded entries so the report can name the concrete files.
-func (r *Runner) diffRecordedOutputs(rec *fingerprintv1.Record) []CheckFileIssue {
+// the recorded entries so the report can name the concrete files. Read
+// failures other than absence become "unreadable" issues AND are returned
+// joined as the error, so the caller can distinguish established drift from
+// a comparison that could not run.
+func (r *Runner) diffRecordedOutputs(rec *fingerprintv1.Record) ([]CheckFileIssue, error) {
 	var issues []CheckFileIssue
+	var readErrs []error
 	for _, f := range rec.GetOutput().GetFiles() {
 		rel := filepath.FromSlash(f.GetPath())
 		// Normalize like missingInputPaths does: recorded paths are OS-native
@@ -377,11 +403,12 @@ func (r *Runner) diffRecordedOutputs(rec *fingerprintv1.Record) []CheckFileIssue
 		switch {
 		case hashErr != nil:
 			issues = append(issues, CheckFileIssue{Path: slashPath, Reason: "unreadable"})
+			readErrs = append(readErrs, hashErr)
 		case hex != f.GetHash():
 			issues = append(issues, CheckFileIssue{Path: slashPath, Reason: "modified"})
 		}
 	}
-	return issues
+	return issues, errors.Join(readErrs...)
 }
 
 // missingInputPaths stats each input path and returns the absent ones in

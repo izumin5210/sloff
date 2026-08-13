@@ -36,6 +36,18 @@ func removeStep(relpath string) step {
 	}
 }
 
+// chmodStep changes a file's permission bits. Fixtures use 0o000 to make a
+// recorded output unreadable and a later 0o644 to restore it before the
+// golden compare (readTree cannot read a 0o000 file either).
+func chmodStep(relpath string, mode os.FileMode) step {
+	return func(t *testing.T, h *harness) {
+		t.Helper()
+		if err := os.Chmod(filepath.Join(h.workdir, relpath), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // gitCommitStep stages and commits the whole workdir. Fixtures use it to turn
 // worktree files into *tracked* files, so a later removeStep produces the
 // "git-tracked but absent from the worktree" state the pnpm-local resolver
@@ -357,6 +369,23 @@ func TestCheck_TrackedToolSourceMissingIsInputMissingDrift(t *testing.T) {
 			}),
 			expectCheckMissingInputs("copy", "packages/codegen/src/index.js"),
 		),
+	)
+}
+
+// An unreadable recorded output means the comparison itself failed: no
+// mismatch is established, so Check must error (CLI exit 2) instead of
+// reporting drift — the drift remediation (run and commit) would fail on the
+// same unreadable file.
+func TestCheck_UnreadableOutputIsCheckErrorNotDrift(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not prevent reads")
+	}
+	runE2E(
+		t, "check-output-unreadable",
+		runStep(),
+		chmodStep("spec/output.txt", 0o000),
+		checkStep(expectCheckErr("cannot verify recorded outputs")),
+		chmodStep("spec/output.txt", 0o644),
 	)
 }
 

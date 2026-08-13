@@ -1,0 +1,48 @@
+{
+  "skill_name": "sloff-perf",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "perf-investigation-warm-run",
+      "prompt": "sloff の warm run(全タスクが fingerprint hit するケース)をもっと速くしたい。どこにボトルネックがあるか実測で特定して、いちばん効果が大きそうな改善箇所を 1 つ、根拠データ付きで提案してほしい。実装まではしなくていいが、提案の根拠になる数字は実際に測って示すこと。",
+      "expected_output": "フェーズ単位の実測に基づくボトルネック特定と、実測の生出力に裏付けられた改善提案 (report.md + bench-raw.txt)",
+      "files": [],
+      "assertions": [
+        "計測を提案より先に実行している: bench-raw.txt に実際に実行したコマンドとその生出力が含まれる",
+        "report.md 中の性能数値が bench-raw.txt の生出力に対応しており、捏造・推定値を実測のように書いていない",
+        "フェーズ単位 (discover/resolve/collect/prefetch/tasksrun/hashinputs 等) でボトルネックを特定し数値で説明している",
+        "提案対象が自分の計測データで最大コストと示された経路と整合している"
+      ]
+    },
+    {
+      "id": 1,
+      "eval_name": "guard-for-loadmany-parallelism",
+      "prompt": "internal/sloff/fingerprint/local の LoadMany / SaveMany は localBulkConcurrency で並列化されている。この並列化には回帰ガードが無いので、将来誰かが直列化しても CI で気付けるようにガード(ベンチマーク/テスト)を追加してほしい。追加したガードが本当に機能する(並列化が失われたら検知できる)ことも確認すること。",
+      "expected_output": "感度が実証されたガード (patch.diff) + 検証手順と before/after 実測 (report.md, bench-raw.txt)",
+      "files": [],
+      "assertions": [
+        "ガードが patch.diff に含まれ、テスト/ベンチとして実行され green である",
+        "感度実証を実施している: 並列化を無効化 (直列化) する実験の before/after の生数値が示され、ガードが実際に動く (fail する / 数値が跳ねる) ことを確認している",
+        "感度実証の数値が bench-raw.txt 等の生出力に裏付けられている",
+        "CI で実際に走る導線を考慮している: scripts/bench.sh の対象パッケージへの追加、決定的メトリクスの benchgate 登録、または -race の test job で走る通常テスト化のいずれかを行うか明示的に言及している",
+        "ベンチマーク計測を -race 付きで実行していない",
+        "(with-skill 期待) 感度実証の実測値を .claude/skills/sloff-perf/references/lessons.md に追記している"
+      ]
+    },
+    {
+      "id": 2,
+      "eval_name": "gate-failure-triage",
+      "prompt": "PR の bench job が添付の出力 (gate-output.txt) で落ちた。何が起きているのか判断して、私(メンテナ)が取るべき対応を具体的に指示してほしい。",
+      "expected_output": "exact/time クラスを正しく読み分けた診断と、二分岐 (意図的変更/回帰) の具体的対応指示 (report.md)",
+      "files": [
+        "/tmp/sloff-perf-workspace/inputs/gate-output.txt"
+      ],
+      "assertions": [
+        "batchloads/op 4→8 (exact class) をノイズではなく決定的な挙動変化 (go-local prewarm のバッチングの回帰または設計変更) と判断している",
+        "persist 系シナリオの時間回帰 (prefetch-ms 41→412 等) を ADR-0014 永続 file-hash cache の経路の問題として診断している (memory 系が無事な点との対比を使っている)",
+        "「baseline を更新する」等の手動 rebaseline を提案していない (比較対象は常に merge-base であることを正しく扱っている)",
+        "意図的な設計変更ならガードの期待値 (+ADR-0021) を同じ PR で更新し、意図しない回帰ならコードを直す、という二分岐の指示を出している"
+      ]
+    }
+  ]
+}

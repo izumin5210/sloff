@@ -1,4 +1,12 @@
-package pnpmlocal_test
+// Package e2e holds heavy end-to-end tests that exercise sloff against real
+// external tools (network downloads, real installs). They are kept out of the
+// per-package unit suites so their resource usage cannot destabilize
+// timing-sensitive suites sharing a runner (fingerprint/dynamodb's kumo
+// startup, notably). Everything here is gated on testing.Short(): the CI
+// unit/coverage job runs with -short, and the dedicated test-e2e job runs
+// this package on its own runner. The hermetic golden-based E2E tests under
+// internal/sloff/runner are a different tier and stay in the unit job.
+package e2e
 
 import (
 	"archive/tar"
@@ -22,13 +30,13 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/toolresolver/pnpmlocal"
 )
 
-// End-to-end coverage against real pnpm binaries. The unit tests in this
-// package pin the lockfile format we BELIEVE pnpm writes; these tests pin the
-// format pnpm ACTUALLY writes, so a future pnpm release that changes the
-// lockfile layout (as v12 did with its multi-document stream) fails here
-// first instead of surfacing as a confusing resolver error in a consuming
-// repo. Requires network (GitHub Releases + registry.npmjs.org); skipped
-// under `go test -short`.
+// End-to-end coverage against real pnpm binaries. The unit tests in
+// toolresolver/pnpmlocal pin the lockfile format we BELIEVE pnpm writes;
+// these tests pin the format pnpm ACTUALLY writes, so a future pnpm release
+// that changes the lockfile layout (as v12 did with its multi-document
+// stream) fails here first instead of surfacing as a confusing resolver
+// error in a consuming repo. Requires network (GitHub Releases +
+// registry.npmjs.org).
 const (
 	// e2ePnpmV11 pins the single-document lockfile era.
 	e2ePnpmV11 = "11.9.0"
@@ -351,6 +359,16 @@ func extractTarGz(r io.Reader, destDir string) error {
 		default:
 			return fmt.Errorf("unsupported archive entry type %d for %q", hdr.Typeflag, hdr.Name)
 		}
+	}
+}
+
+func mustWrite(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

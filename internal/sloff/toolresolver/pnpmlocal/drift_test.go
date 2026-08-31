@@ -77,6 +77,35 @@ func TestAssertInstallInSync_ContentDriftErrors(t *testing.T) {
 	}
 }
 
+// TestAssertInstallInSync_Pnpm12MultiDocLockfilePasses covers the pnpm 12
+// snapshot behaviour: pnpm 12 prepends a self-pin document to pnpm-lock.yaml
+// but writes only the final (lockfile) document to node_modules/.pnpm/lock.yaml.
+// A whole-file byte comparison would therefore report permanent drift that no
+// `pnpm install` can clear; the comparison must be per final document.
+func TestAssertInstallInSync_Pnpm12MultiDocLockfilePasses(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), pnpm12HeadDocument+sampleLockfile)
+	mustWrite(t, filepath.Join(root, "node_modules", ".pnpm", "lock.yaml"), sampleLockfile)
+
+	if err := pnpmlocal.AssertInstallInSync(root); err != nil {
+		t.Fatalf("AssertInstallInSync: %v", err)
+	}
+}
+
+// TestAssertInstallInSync_Pnpm12MultiDocDriftStillErrors pins that scoping the
+// comparison to the final document didn't blunt the check: real content drift
+// in the lockfile document must still surface as ErrInstallStale.
+func TestAssertInstallInSync_Pnpm12MultiDocDriftStillErrors(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), pnpm12HeadDocument+sampleLockfile)
+	mustWrite(t, filepath.Join(root, "node_modules", ".pnpm", "lock.yaml"),
+		strings.ReplaceAll(sampleLockfile, "4.17.21", "4.17.20"))
+
+	if err := pnpmlocal.AssertInstallInSync(root); !errors.Is(err, pnpmlocal.ErrInstallStale) {
+		t.Errorf("drift within the lockfile document must error with ErrInstallStale, got %v", err)
+	}
+}
+
 // TestAssertInstallInSync_MissingLockfileErrors guards the boundary where
 // the workspace has no lockfile at all (pnpm wasn't introduced yet, or it
 // was deleted). We surface a plain IO error rather than ErrInstallStale —

@@ -1,6 +1,7 @@
 package pnpmlocal
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,7 +75,7 @@ func LoadLockfile(repoRoot string) (*Lockfile, error) {
 
 func parseLockfile(b []byte, sourcePath string) (*Lockfile, error) {
 	var lf Lockfile
-	if err := yaml.Unmarshal(b, &lf); err != nil {
+	if err := yaml.Unmarshal(lastYAMLDocument(b), &lf); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
 	}
 	if lf.LockfileVersion != supportedLockfileVersion {
@@ -85,6 +86,37 @@ func parseLockfile(b []byte, sourcePath string) (*Lockfile, error) {
 		return nil, fmt.Errorf("parse %s: unsupported lockfileVersion %s: sloff supports pnpm lockfileVersion %q only (pnpm v9+); regenerate the lockfile with a supported pnpm version", sourcePath, got, supportedLockfileVersion)
 	}
 	return &lf, nil
+}
+
+// lastYAMLDocument returns the bytes of the final document in a YAML stream.
+// pnpm 12 writes pnpm-lock.yaml as a multi-document stream: a leading
+// document pinning pnpm itself (configDependencies /
+// packageManagerDependencies) followed by the actual lockfile document. The
+// leading document carries the same lockfileVersion as the real one, so the
+// version guard cannot tell them apart — position (last) is the contract.
+// Single-document files from earlier pnpm versions are returned unchanged.
+//
+// Splitting is line-based on "---" end-of-directives markers at column zero.
+// That is exact for pnpm-generated lockfiles (top-level block mappings, no
+// block scalars that could embed a column-zero "---"), and both sides of the
+// install-drift comparison go through this same function, so a hypothetical
+// mis-split cannot introduce asymmetry there.
+func lastYAMLDocument(b []byte) []byte {
+	marker := []byte("---")
+	start := 0
+	for i := 0; i < len(b); {
+		next := len(b)
+		line := b[i:]
+		if nl := bytes.IndexByte(line, '\n'); nl >= 0 {
+			line = line[:nl]
+			next = i + nl + 1
+		}
+		if bytes.Equal(bytes.TrimRight(line, " \t\r"), marker) {
+			start = next
+		}
+		i = next
+	}
+	return b[start:]
 }
 
 // WorkspacePaths returns importer paths sorted ascending. The root importer

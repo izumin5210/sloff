@@ -31,6 +31,17 @@ go test ./internal/sloff/runner/... -update   # rewrite expected/ from actual ou
 
 When adding E2E tests, create a dedicated fixture directory per test case under `testdata/e2e/<package>/<case>/` and aim for comprehensive case coverage (happy path, edge cases, regression scenarios) rather than overloading a single case. For bug fixes, add a regression case that fails before the fix.
 
+### Heavy e2e tests (`internal/e2e`)
+
+Tests that exercise sloff against real external tools (network downloads, real
+package-manager installs) live in `internal/e2e`, separate from the hermetic
+per-package suites. They are gated on `testing.Short()`: CI's unit/coverage job
+runs with `-short` and the dedicated `test-e2e` job runs `./internal/e2e/...`
+on its own runner, so their resource usage cannot destabilize timing-sensitive
+suites (e.g. the kumo startup in `fingerprint/dynamodb`). Put new
+network-dependent or resource-heavy e2e tests here, not in the package they
+cover.
+
 ## Repository-specific conventions
 
 - Whenever you want to change something that constitutes a design decision (spec required fields, presence of a manual `depends`, resolver auto-dispatch policy, etc.), first review and update the corresponding ADR / design doc.

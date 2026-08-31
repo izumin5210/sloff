@@ -1,5 +1,8 @@
 # Changelog
 
+## [v0.0.9](https://github.com/izumin5210/sloff/compare/v0.0.8...v0.0.9) - 2026-08-31
+- fix(pnpmlocal): support pnpm 12 multi-document pnpm-lock.yaml by @izumin5210 in https://github.com/izumin5210/sloff/pull/69
+
 ## [v0.0.8](https://github.com/izumin5210/sloff/compare/v0.0.7...v0.0.8) - 2026-08-13
 - feat: add `sloff check` for CI drift verification (ADR-0021) by @izumin5210 in https://github.com/izumin5210/sloff/pull/67
 

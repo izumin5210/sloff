@@ -41,6 +41,86 @@ importers:
 	}
 }
 
+// pnpm12HeadDocument mirrors the self-pin document pnpm 12 prepends to
+// pnpm-lock.yaml: it records the resolved pnpm binaries themselves
+// (packageManagerDependencies / configDependencies) and — crucially for the
+// parser — carries the same lockfileVersion as the real lockfile document
+// that follows, so a version guard alone cannot tell the two apart.
+const pnpm12HeadDocument = `---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      '@pnpm/exe':
+        specifier: 12.1.0
+        version: 12.1.0
+      pnpm:
+        specifier: 12.1.0
+        version: 12.1.0
+
+packages:
+
+  '@pnpm/exe.darwin-arm64@12.1.0':
+    resolution: {integrity: sha512-aaaa}
+    cpu: [arm64]
+    os: [darwin]
+
+snapshots:
+
+  '@pnpm/exe.darwin-arm64@12.1.0':
+    optional: true
+
+---
+`
+
+// TestLoadLockfile_Pnpm12MultiDocumentPicksLockfileDocument guards the pnpm 12
+// lockfile layout: the stream's final document is the actual lockfile, and the
+// leading self-pin document must contribute nothing. Decoding only the first
+// document would pass the version guard (both documents say 9.0) yet leave
+// Importers/Snapshots pointing at pnpm's own binaries — the exact silent-empty
+// failure mode the R4 guard exists to prevent.
+func TestLoadLockfile_Pnpm12MultiDocumentPicksLockfileDocument(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "pnpm-lock.yaml"), pnpm12HeadDocument+`lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      '@org/codegen':
+        specifier: workspace:*
+        version: link:packages/codegen
+  packages/codegen:
+    dependencies:
+      typescript:
+        specifier: ^5.0.0
+        version: 5.0.0
+snapshots:
+  typescript@5.0.0: {}
+`)
+
+	lf, err := pnpmlocal.LoadLockfile(root)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+
+	got := lf.WorkspacePaths()
+	want := []string{".", "packages/codegen"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("WorkspacePaths mismatch (-want +got):\n%s", diff)
+	}
+	if v := lf.Importers["packages/codegen"].Dependencies["typescript"].Version; v != "5.0.0" {
+		t.Errorf("typescript version = %q, want %q", v, "5.0.0")
+	}
+	if _, ok := lf.Snapshots["typescript@5.0.0"]; !ok {
+		t.Errorf("snapshots should come from the lockfile document, got %v", lf.Snapshots)
+	}
+	if _, ok := lf.Snapshots["@pnpm/exe.darwin-arm64@12.1.0"]; ok {
+		t.Error("snapshots from the self-pin document must not leak into the parsed lockfile")
+	}
+}
+
 func TestLoadLockfile_MissingFile(t *testing.T) {
 	root := t.TempDir()
 	if _, err := pnpmlocal.LoadLockfile(root); err == nil {

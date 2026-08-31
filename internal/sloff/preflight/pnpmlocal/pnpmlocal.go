@@ -1,9 +1,10 @@
 // Package pnpmlocal implements the preflight Checker that protects pnpm-local
 // from running against a stale node_modules. The check is the install-state
-// dual of the resolver's lockfile-derived hashing: pnpm copies pnpm-lock.yaml
-// byte-for-byte into node_modules/.pnpm/lock.yaml at install time, so a byte
-// comparison cleanly detects "lockfile updated, pnpm install was forgotten"
-// without parsing semantics or shelling out to pnpm.
+// dual of the resolver's lockfile-derived hashing: pnpm snapshots
+// pnpm-lock.yaml into node_modules/.pnpm/lock.yaml at install time (verbatim
+// through pnpm 11; final YAML document only from pnpm 12), so a per-document
+// byte comparison cleanly detects "lockfile updated, pnpm install was
+// forgotten" without parsing semantics or shelling out to pnpm.
 //
 // Living in preflight (rather than inside the resolver) is deliberate: the
 // runner already wires SLOFF_ALLOW_STALE_DEPS read-only fall-through and

@@ -12,6 +12,7 @@
 - [ADR-0010: fingerprint filename への timestamp prefix](../adr/0010-fingerprint-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
 - [ADR-0011: 大規模 monorepo 向け remote backend は DynamoDB](../adr/0011-dynamodb-remote-fingerprint-storage.md) (= 1000+ task 規模では per-item KV モデルが構造的に最適)
 - [ADR-0013: タスク間依存を spec に明示宣言する](../adr/0013-explicit-task-dependencies.md) (= 実行順序は `depends`、 overlap は検証として存続)
+- [ADR-0021: ベンチマークスイートと CI 回帰ゲート](../adr/0021-benchmark-suite-and-regression-gate.md) (= perf 資産の自動ガード。 運用は [docs/benchmarks/README.md](../benchmarks/README.md))
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)

@@ -63,3 +63,4 @@ spec にすでにある `outputs` を利用者にもう一度書かせる二重�
 
 - 自分の outputs を入力に含んでいた task は input hash が変わるため、 導入後の初回 run で 1 度だけ record miss になる ( record の書き直しが発生する)
 - 冪等でない generator ( 自分の前回 outputs を読んで結果を変える) は、 その依存が input hash に乗らなくなる。 ただしこれは従来からスコープ外であり、 従来も 2 回目以降で結果が揺れていた
+- 自分の outputs pattern の下に、 generator が読む手書きのファイルを置いている task では、 そこへのファイル追加が invalidate に効かなくなる ( 追加されたファイルは input hash から除かれ、 record の output 一覧にも無いため、 output-comparison でも検出されない)。 outputs pattern は「 その task が書くファイル」 を宣言するものであり、 手書きのファイルを含む pattern はもともと spec の誤りである。 宣言 inputs と重なる場合は D3 の warning でこれを知らせる。 resolver の contribution と重なる場合は知らせられないため、 outputs pattern を生成物だけに絞ることを利用者に求める

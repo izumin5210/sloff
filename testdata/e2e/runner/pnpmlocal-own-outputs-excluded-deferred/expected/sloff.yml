@@ -1,0 +1,24 @@
+# packages/app/package.json is absent until gen-package runs, so app-pkg is
+# deferred on a cold run (ADR-0019 D4) and gen's input surface is rebuilt at
+# exec time. That rebuild must also drop gen's own output (ADR-0022), or the
+# cold-written record would not match warm runs.
+tools:
+  versioner:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+  app-pkg:
+    pnpm-local: "@org/app"
+    depends:
+      - task: gen-package
+
+commands:
+  - name: gen-package
+    cmd: ["sh", "-c", "cp pkg-template/package.json packages/app/package.json"]
+    inputs: ["pkg-template/package.json"]
+    outputs: ["packages/app/package.json"]
+    tools: [versioner]
+  - name: gen
+    cmd: ["sh", "-c", "cp packages/app/src/schema.txt packages/app/gen/out.txt"]
+    inputs: ["packages/app/src/schema.txt"]
+    outputs: ["packages/app/gen/out.txt"]
+    tools: [app-pkg]

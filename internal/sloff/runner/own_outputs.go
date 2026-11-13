@@ -9,6 +9,11 @@ import (
 	"github.com/izumin5210/sloff/internal/sloff/glob"
 )
 
+// maxOverlapExamples caps the paths listed in the declared-inputs overlap
+// warning; a broad inputs glob over a large generated tree would otherwise
+// print thousands of paths on every run.
+const maxOverlapExamples = 3
+
 // joinOutputPatterns joins a task's output patterns with its spec dir in slash
 // form so they can be matched against repo-relative input paths.
 func joinOutputPatterns(specDir string, patterns []string) []string {

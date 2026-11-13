@@ -1632,7 +1632,8 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 		ownOutputs := joinOutputPatterns(ec.specDir, c.Outputs)
 		declaredInputs, overlap := dropOwnOutputs(ec.inputs, ownOutputs)
 		if len(overlap) > 0 {
-			r.logger.Warnf("%s/%s: declared inputs match the task's own outputs %v; excluded from the input hash (ADR-0022)", ec.specDir, c.Name, slashPaths(overlap))
+			label := depgraph.TaskRef{SpecRelpath: ec.specDir, Name: c.Name}.Label()
+			r.logger.Warnf("%s: declared inputs match %d of the task's own output files (e.g. %v); they are excluded from the input hash, so files added under its output patterns do not invalidate it (ADR-0022)", label, len(overlap), slashPaths(overlap[:min(len(overlap), maxOverlapExamples)]))
 		}
 		extraInputs := combineToolInputs(c.Tools, inputsByTool)
 		mergedInputs, _ := dropOwnOutputs(mergeInputs(declaredInputs, extraInputs), ownOutputs)

@@ -5,6 +5,7 @@
 Accepted
 
 - Amended by [ADR-0019](./0019-tool-bootstrap-depends.md): tool 定義の shape に `depends` ( bootstrap 依存の task 参照リスト) が追加された。 また「参照される全 tool を Run 冒頭で一括解決し、 失敗は fatal」 という解決モデルは、 `depends` を宣言した tool に限り「宣言 depends 完了後の遅延解決」 へ降格するようになった ( 未宣言 tool の失敗は従来どおり fatal)
+- Amended by [ADR-0022](./0022-exclude-own-outputs-from-inputs.md): resolver の Inputs は task の inputs に union された後、 その task 自身の outputs pattern に一致するファイルが除かれるようになった
 
 ## Context
 

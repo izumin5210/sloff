@@ -28,3 +28,20 @@ func TestRunner_DeclaredInputsOverlapOwnOutputs(t *testing.T) {
 		runStep(expectInfo("SKIP ./gen"), expectNoInfoContaining("RUN ")),
 	)
 }
+
+// TestRunner_PnpmLocal_OwnOutputsExcludedDeferred covers ADR-0022 D1 on the
+// deferred-tool path: when the task's own-package tool is deferred on a cold
+// run (ADR-0019 D4), the exec-time input rebuild must drop the task's own
+// outputs too, so the cold-written record hits on warm runs (ADR-0019 D7).
+func TestRunner_PnpmLocal_OwnOutputsExcludedDeferred(t *testing.T) {
+	requireSh(t)
+	runE2E(
+		t, "pnpmlocal-own-outputs-excluded-deferred",
+		runStep(
+			expectWarn("deferred until its declared depends complete"),
+			expectInfo(`resolved tool "app-pkg" after its declared depends completed`),
+		),
+		checkStep(expectCheckDriftTasks()),
+		runStep(expectNoWarns(), expectNoInfoContaining("RUN ")),
+	)
+}

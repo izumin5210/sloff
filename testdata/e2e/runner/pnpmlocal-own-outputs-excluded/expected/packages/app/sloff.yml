@@ -1,0 +1,13 @@
+# The task's own package is the pnpm-local tool, so the resolver contributes
+# every git-tracked file under packages/app — including gen/out.txt, which is
+# this task's own committed output.
+tools:
+  app-pkg:
+    pnpm-local: "@org/app"
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp src/schema.txt gen/out.txt"]
+    inputs: ["package.json"]
+    outputs: ["gen/out.txt"]
+    tools: [app-pkg]

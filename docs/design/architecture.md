@@ -12,6 +12,7 @@
 - [ADR-0010: fingerprint filename への timestamp prefix](../adr/0010-fingerprint-filename-timestamp-prefix.md) (= R5 を path uniqueness で構造的に担保、 `generated_at` 削除)
 - [ADR-0011: 大規模 monorepo 向け remote backend は DynamoDB](../adr/0011-dynamodb-remote-fingerprint-storage.md) (= 1000+ task 規模では per-item KV モデルが構造的に最適)
 - [ADR-0013: タスク間依存を spec に明示宣言する](../adr/0013-explicit-task-dependencies.md) (= 実行順序は `depends`、 overlap は検証として存続)
+- [ADR-0022: task 自身の outputs を input hash から除く](../adr/0022-exclude-own-outputs-from-inputs.md) (= 1 回の run で record が落ち着くことを構造的に担保)
 - 各 Resolver の詳細設計:
   - [Resolver: script](./resolver-script.md) — prebuilt binary ( nix / mise / aqua 等で配布されるもの / `go tool` 経由 / `pnpm exec` 経由 / 外部 OSS パッケージの `<bin> --version` も含む)
   - [Resolver: go-local](./resolver-go-local.md) — Go 内製ソース ( repo local main package)
@@ -496,6 +497,8 @@ type ResolvedVersion struct {
 ```
 
 `Inputs` は **resolver が task の inputs に追加 contribute する経路**。 runner は depgraph を組む前に Resolver を呼び、 戻ってきた Inputs を declared inputs に union してから depgraph に渡す。 これにより workspace tool の transitive ソース ( pnpm-local が抽出する git-tracked ファイル群) が consumer task の inputs に乗り、 ツールのソース変更が files_hash 経路で fingerprint を invalidate する。 union 後の inputs は overlap 検証 ( ADR-0013、 後述「タスク間依存」) の対象にもなる。 詳細は [resolver-pnpm-local.md](./resolver-pnpm-local.md) 参照。
+
+union 後の inputs からは、 **その task 自身の `outputs` pattern に一致するファイルを除く** ( [ADR-0022](../adr/0022-exclude-own-outputs-from-inputs.md))。 生成先の package 自身を pnpm-local の tool にした task や、 広い inputs glob を持つ task では自分の committed outputs が入力に紛れ込み、 outputs を書き換える run が「 実行後のツリーと合わない key」 で record を書いてしまうため。 決定的な generator にとって実行前の自分の outputs は結果に影響せず、 その正しさは output-comparison ( ADR-0002) が別途検証している。 除外は pattern 照合でファイルの存在に依存しない。 宣言 inputs との重なりは spec の書き間違いの疑いとして warning を出す。
 
 `Inputs` / `Versions` を別メソッドにしているのは、 graph 構築 ( ExtraInputs のみ必要) と execution ( Versions も必要) の関心が異なるため ( IZU-16)。 内部で発見コスト ( lockfile walk / `packages.Load`) を共有する resolver は ADR-0008 のメモ化方針に従って「同じ declared tool への Inputs / Versions 連続呼び出しが 1 回分の発見作業で済む」ことを実装側で保証する。
 

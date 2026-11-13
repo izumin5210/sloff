@@ -1538,8 +1538,12 @@ type taskInfo struct {
 	command        spec.Command
 	inputPaths     []string
 	outputPatterns []string
-	// declaredInputs is the glob expansion of command.Inputs alone, before
-	// tool contributions were merged in. Kept so the deferred-resolution path
+	// joinedOutputPatterns is outputPatterns joined with the spec dir in
+	// slash form, used to drop the task's own outputs from its inputs
+	// (ADR-0022) both at collect time and on deferred-tool rebuild.
+	joinedOutputPatterns []string
+	// declaredInputs is the glob expansion of command.Inputs alone, minus the
+	// task's own outputs, before tool contributions were merged in. Kept so the deferred-resolution path
 	// (ADR-0019 D4) can rebuild the merged input set at exec time; inputPaths
 	// only carries the merged result, which cannot be un-merged.
 	declaredInputs []string
@@ -1625,8 +1629,14 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 	for _, ec := range flat {
 		c := ec.command
 
+		ownOutputs := joinOutputPatterns(ec.specDir, c.Outputs)
+		declaredInputs, overlap := dropOwnOutputs(ec.inputs, ownOutputs)
+		if len(overlap) > 0 {
+			label := depgraph.TaskRef{SpecRelpath: ec.specDir, Name: c.Name}.Label()
+			r.logger.Warnf("%s: declared inputs match %d of the task's own output files (e.g. %v); they are excluded from the input hash, so files added under its output patterns do not invalidate it (ADR-0022)", label, len(overlap), slashPaths(overlap[:min(len(overlap), maxOverlapExamples)]))
+		}
 		extraInputs := combineToolInputs(c.Tools, inputsByTool)
-		mergedInputs := mergeInputs(ec.inputs, extraInputs)
+		mergedInputs, _ := dropOwnOutputs(mergeInputs(declaredInputs, extraInputs), ownOutputs)
 
 		var versions []toolresolver.ResolvedVersion
 		if versionsByTool != nil {
@@ -1662,7 +1672,8 @@ func (r *Runner) collectTasks(inputsByTool map[string][]string, versionsByTool m
 			command:                   c,
 			inputPaths:                mergedInputs,
 			outputPatterns:            c.Outputs,
-			declaredInputs:            ec.inputs,
+			joinedOutputPatterns:      ownOutputs,
+			declaredInputs:            declaredInputs,
 			versions:                  versions,
 			inputSet:                  inputSet,
 			joinedInputPatterns:       joinedPatterns,

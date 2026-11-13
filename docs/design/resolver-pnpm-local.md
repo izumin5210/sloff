@@ -45,6 +45,8 @@ pnpm workspace では複数パッケージを 1 リポジトリに同居させ�
 
 `.gitignore` で除外されたファイル ( 典型的には `dist/`, `build/`, `node_modules/`) は ExtraInputs に含まれない ( 利用者がローカルで生成する build artefact が fingerprint を汚さない)。
 
+生成物を commit する package 自身を tool に宣言した場合、 ExtraInputs にはその task 自身の outputs も含まれる。 resolver はどの task から参照されるかを知らないため、 これを除くのは runner の責務 ( [ADR-0022](../adr/0022-exclude-own-outputs-from-inputs.md))。 他 task の outputs は除かれず、 上流の生成物の変更は従来どおり invalidate に効く。
+
 ### Result の形式
 
 ```go

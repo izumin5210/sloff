@@ -229,7 +229,7 @@ func (r *Runner) resolvedInputSurface(info *taskInfo) (mergedPaths []string, ver
 		extras = append(extras, r.inputsByTool[name]...)
 		versions = append(versions, r.versionsByTool[name]...)
 	}
-	mergedPaths = mergeInputs(info.declaredInputs, extras)
+	mergedPaths, _ = dropOwnOutputs(mergeInputs(info.declaredInputs, extras), info.joinedOutputPatterns)
 	return mergedPaths, versions
 }
 

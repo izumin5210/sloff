@@ -1,0 +1,12 @@
+tools:
+  sh:
+    exec: ["sh", "-c", "echo v1.0.0"]
+    extract: 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+commands:
+  - name: gen
+    cmd: ["sh", "-c", "cp schema.txt gen/out.txt"]
+    # Also matches gen/out.txt, this task's own output.
+    inputs: ["**/*.txt"]
+    outputs: ["gen/out.txt"]
+    tools: [sh]

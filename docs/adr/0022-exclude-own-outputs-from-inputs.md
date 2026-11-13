@@ -8,7 +8,7 @@ Accepted
 
 ### 背景
 
-pnpm-local resolver は、 宣言された workspace package 配下の git 管理ファイルをすべて ExtraInputs として返す ( [resolver-pnpm-local.md](../design/resolver-pnpm-local.md))。 生成物を commit する運用 ( [ADR-0002](./0002-fingerprint-hit-decision-model.md) 前提) で、 **生成先の package 自身を pnpm-local の tool に宣言した task** は、 自分の committed outputs も入力に含めることになる。 「 生成物が置かれる package のソース全体を入力にしたい」 ( inputs を手で列挙すると漏れが古い生成物の見逃しに直結する) という動機で実際に使われている形である。
+pnpm-local resolver は、 宣言された workspace package 配下の git 管理ファイルをすべて ExtraInputs として返す ( [resolver-pnpm-local.md](../design/resolver-pnpm-local.md))。 生成物を commit する運用 ( [ADR-0002](./0002-fingerprint-hit-decision-model.md) 前提) で、 **生成先の package 自身を pnpm-local の tool に宣言した task** は、 自分の committed outputs も入力に含めることになる。 「 生成物が置かれる package のソース全体を入力にしたい」 ( inputs を手で列挙すると漏れが古い生成物の見逃しに直結する) という動機で自然に選ばれる形である。
 
 input hash は cmd 実行前のツリーで計算され、 record はその hash を key に書かれる。 outputs が書き換わる run では次のことが起きる:
 
@@ -57,7 +57,7 @@ spec にすでにある `outputs` を利用者にもう一度書かせる二重�
 ### 正の影響
 
 - 生成先の package 自身を pnpm-local の tool にした task でも、 1 回の run で record が落ち着き、 直後の check が緑になる
-- CI の gen ジョブで、 正しく commit された PR に対する generator の再実行が無くなる
+- CI で `sloff run` を回す運用でも、 正しく commit された変更に対して generator が再実行されなくなる
 
 ### 負の影響
 
